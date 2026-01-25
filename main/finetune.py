@@ -351,88 +351,38 @@ def run_generation_task(model, file_sample_dict, gene_ids, tissue_map, args, dev
         mu_bio = np.concatenate(mu_bio_list, axis=0)
         
         # Update AnnData
-        # 1. Match genes (mu_bio corresponds to gene_ids)
-        # Check if adata needs subsetting or reordering
+        # Always save as independent file to ensure gene order matches model (ensg_keys_high_quality.txt)
+        print(f"  Saving output to separate file with model genes ({len(gene_ids)} genes)...")
         
-        # Create a temporary AnnData for the model output to align
-        adata_model = sc.AnnData(X=mu_bio)
-        adata_model.var_names = gene_ids
-        adata_model.obs_names = adata.obs_names # Assuming 1:1 mapping (use_qc=False)
+        # Create new AnnData with model genes
+        adata_out = sc.AnnData(X=sparse.csr_matrix(mu_bio)) # mu_bio can be dense or sparse, usually dense is fine for rate, but let's keep it numpy array if dense
+        # Actually mu_bio is typically dense float. 
+        # User asked for "sample matrix need to be sparse". mu_bio is usually kept as is (often dense).
+        # Let's check previous code. Previous code: adata_out = sc.AnnData(X=mu_bio)
+        # We will keep X=mu_bio (dense) for precision, but samples as sparse.
         
-        # Strategy: Subset original adata to gene_ids. 
-        # If original adata doesn't have these genes as var_names, we might have an issue.
-        # Assuming typical workflow where gene_ids are present in input.
+        adata_out = sc.AnnData(X=mu_bio)
+        adata_out.var_names = gene_ids
+        adata_out.obs = adata.obs.copy()
         
-        # Check if gene_ids are in index or a column
-        adata_var_index = set(adata.var_names)
-        adata_var_col = set(adata.var["gene_ids"]) if "gene_ids" in adata.var else set()
+        # Save sparse samples
+        if args.num_samples_gen > 0:
+            print(f"  Generating {args.num_samples_gen} Poisson samples...")
+            for i in range(args.num_samples_gen):
+                # Generate counts
+                sample_counts = np.random.poisson(mu_bio)
+                # Save as sparse CSR
+                adata_out.layers[f"sample_{i}"] = sparse.csr_matrix(sample_counts)
         
-        # We need to ensure we align mu_bio (columns=gene_ids) to adata
-        # Simplest: Subset adata to just these genes in the correct order
-        
-        # Try to find genes in index
-        missing_index = [g for g in gene_ids if g not in adata_var_index]
-        if len(missing_index) == 0:
-             adata_subset = adata[:, gene_ids].copy()
-             adata_subset.layers["mu_bio"] = mu_bio
-             
-             # Generate and save sparse samples
-             if args.num_samples_gen > 0:
-                 print(f"  Generating {args.num_samples_gen} Poisson samples...")
-                 for i in range(args.num_samples_gen):
-                     sample_counts = np.random.poisson(mu_bio)
-                     adata_subset.layers[f"sample_{i}"] = sparse.csr_matrix(sample_counts)
-             
-             save_path = os.path.join(args.output_dir, fname)
-             adata_subset.write(save_path)
-             print(f"  Saved updated h5ad (subset to model genes) to {save_path}")
-             
-        else:
-             # Try column 'gene_ids'
-             if "gene_ids" in adata.var.columns:
-                 # Create mapping
-                 gid_to_idx = {gid: i for i, gid in enumerate(adata.var["gene_ids"])}
-                 indices = [gid_to_idx[g] for g in gene_ids if g in gid_to_idx]
-                 
-                 if len(indices) == len(gene_ids):
-                     adata_subset = adata[:, indices].copy()
-                     # Ensure order matches gene_ids (indices list follows gene_ids order)
-                     adata_subset.layers["mu_bio"] = mu_bio
-                     
-                     # Generate and save sparse samples
-                     if args.num_samples_gen > 0:
-                         print(f"  Generating {args.num_samples_gen} Poisson samples...")
-                         for i in range(args.num_samples_gen):
-                             sample_counts = np.random.poisson(mu_bio)
-                             adata_subset.layers[f"sample_{i}"] = sparse.csr_matrix(sample_counts)
-                     
-                     save_path = os.path.join(args.output_dir, fname)
-                     adata_subset.write(save_path)
-                     print(f"  Saved updated h5ad (subset by gene_ids col) to {save_path}")
-                 else:
-                     print(f"  Warning: Input file missing {len(gene_ids) - len(indices)} model genes. Saving mu_bio as separate file.")
-                     # Fallback ? Or force save? 
-                     # User asked for "in original h5ad slot". If we can't align, we can't save in slot safely.
-                     # Let's save a new adata with just mu_bio
-                     adata_out = sc.AnnData(X=mu_bio)
-                     adata_out.var_names = gene_ids
-                     adata_out.obs = adata.obs
-                     
-                     if args.num_samples_gen > 0:
-                         for i in range(args.num_samples_gen):
-                             sample_counts = np.random.poisson(mu_bio)
-                             adata_out.layers[f"sample_{i}"] = sparse.csr_matrix(sample_counts)
+        # Save mu_bio mainly for reference, though it is in X
+        # adata_out.layers['mu_bio'] = mu_bio # Optional, X is already mu_bio
+        # The previous code had layers['mu_bio']. Let's keep consistency if users expect it.
+        adata_out.layers['mu_bio'] = mu_bio
 
-                     save_path = os.path.join(args.output_dir, f"{os.path.splitext(fname)[0]}_mu_bio.h5ad")
-                     adata_out.write(save_path)
-                     print(f"  Saved separate mu_bio file to {save_path}")
-             else:
-                 print("  Warning: Could not align genes. Saving separate mu_bio file.")
-                 adata_out = sc.AnnData(X=mu_bio)
-                 adata_out.var_names = gene_ids
-                 adata_out.obs = adata.obs
-                 save_path = os.path.join(args.output_dir, f"{os.path.splitext(fname)[0]}_mu_bio.h5ad")
-                 adata_out.write(save_path)
+        save_path = os.path.join(args.output_dir, f"{os.path.splitext(fname)[0]}_mu_bio.h5ad")
+        adata_out.write(save_path)
+        print(f"  Saved to {save_path}")
+
 
 
 def main():

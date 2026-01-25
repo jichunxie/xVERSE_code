@@ -61,15 +61,17 @@ xVERSE provides a unified CLI `main.finetune` for all core tasks.
 The script generates `.h5ad` files in the `output_dir`.
 
 #### Task: `embedding`
-*   **File**: Overwrites input `.h5ad` or creates new one.
+*   **File**: Saves a copy of the input `.h5ad` to the `output_dir`.
 *   **Content**:
     *   **`adata.obsm['xVerse']`**: The biological embedding matrix (`z_bio`), size `(n_cells, 384)`. Use this for clustering, UMAP, and integration.
 
 #### Task: `generation`
-*   **File**: `*_mu_bio.h5ad` (or updates input file if genes match).
+*   **File**: Creates a new file `*_mu_bio.h5ad` in `output_dir`.
 *   **Content**:
-    *   **`adata.layers['mu_bio']`**: The denoised, reconstructed gene expression matrix (Poisson rate).
-    *   **`adata.layers['sample_0']`, `sample_1`...**: Sparse count matrices sampled from `mu_bio`. These represent "virtual cells" or "imputed counts".
+    *   **`adata.X`**: The denoised gene expression (`mu_bio`).
+    *   **`adata.layers['mu_bio']`**: Same as X.
+    *   **`adata.layers['sample_0']`, `sample_1`...**: **Sparse** count matrices sampled from `mu_bio`.
+    *   **Genes**: Strictly aligns with `ensg_keys_high_quality.txt` order.
 
 ### 3. Examples
 
