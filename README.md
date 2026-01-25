@@ -1,59 +1,63 @@
 <p align="center">
-  <img src="logo.png" width="800">
+  <img src="logo.png" width="800" alt="xVERSE Logo">
 </p>
 
-# xVERSE Fine-Tuning and Inference
+# xVERSE: Transcriptomics-Native Foundation Model
 
-xVERSE is a **transcriptomics-native foundation model** that couples batch-invariant representation learning with the probabilistic generation of gene expression count profiles. By doing so, xVERSE not only learns robust biological representations but also is capable of synthesizing high-fidelity virtual cells.
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
+[![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
 
-This repository provides a unified pipeline (`finetune.py`) to extract embeddings, fine-tune the xVERSE model, and perform generation/imputation tasks on single-cell or spatial transcriptomics data.
+**xVERSE** (X-Verse) is a **transcriptomics-native foundation model** designed to learn robust, batch-invariant biological representations and synthesize high-fidelity virtual cells. By coupling representation learning with probabilistic gene expression generation, xVERSE enables advanced downstream applications in single-cell and spatial transcriptomics.
 
-## 1. Prerequisites
+## 🚀 Key Capabilities
 
-### Environment
-Ensure you have a Python environment (e.g., conda or venv) with the following packages installed:
+*   **Universal Representation Learning**: Extract biological embeddings (`z_bio`) that are robust to batch effects and noise.
+*   **Spatial Gene Imputation**: Inaccurately impute unmeasured genes in spatial transcriptomics data using single-cell references.
+*   **Virtual Cell Synthesis**: Generate realistic, high-fidelity virtual cells to augment small datasets or serve as a data-augmentation engine.
 
-*   `torch`
-*   `scanpy`
-*   `pandas`
-*   `numpy`
-*   `scipy`
-*   `tqdm`
-*   `matplotlib`
+---
 
-### Input Data Format
-The script accepts **`.h5ad` files** (AnnData format). Your input files **MUST** meet the following requirements:
+## 📦 Installation
 
-1.  **Tissue Label**: A column named **`tissue`** in `adata.obs`.
-    *   Values must match entries in `tissue_name_to_id_map.csv` (e.g., 'liver', 'kidney', 'lung').
-2.  **Gene IDs**: A column named **`gene_ids`** in `adata.var`.
-    *   This column must contain **Ensembl IDs** (e.g., `ENSG00000123456`) to align with the pretrained model.
+1.  **Clone the repository**:
+    ```bash
+    git clone https://github.com/your-username/xVERSE_code.git
+    cd xVERSE_code
+    ```
 
-## 2. Usage
+2.  **Create a virtual environment (Recommended)**:
+    ```bash
+    conda create -n xverse python=3.9
+    conda activate xverse
+    ```
 
-The script is run via the command line:
+3.  **Install dependencies**:
+    ```bash
+    pip install -r requirements.txt
+    ```
+
+---
+
+## 🛠️ Usage
+
+xVERSE provides a unified CLI `main.finetune` for all core tasks.
+
+### Input Requirements
+*   **Format**: `.h5ad` (AnnData).
+*   **Annotations**:
+    *   `adata.obs['tissue']`: Tissue label (must match `main/tissue_name_to_id_map.csv`).
+    *   `adata.var['gene_ids']`: Ensembl IDs (e.g., `ENSG00000123456`).
+
+### Basic Command
 
 ```bash
 python -m main.finetune --input_dir <INPUT> --output_dir <OUTPUT> --base_model <MODEL_PATH> [OPTIONS]
 ```
 
-### Common Arguments
-| Argument | Description | Required |
-| :--- | :--- | :--- |
-| `--input_dir` | Directory containing `.h5ad` files or path to a single file. | Yes |
-| `--output_dir` | Directory where results will be saved. | Yes |
-| `--base_model` | Path to the pretrained xVERSE model (`.pth`). | Yes |
-| `--tissue_name` | Name of the tissue (e.g., 'liver'). | Yes |
-| `--task` | Task to perform: `embedding` or `generation`. | Yes |
-| `--mode` | `0shot` (Pretrained) or `ft` (Fine-tune). | No (Default: `0shot`) |
-| `--gpu` | GPU ID to use (e.g., `0`). If omitted, uses available GPU. | No |
-| `--num_samples_gen` | Number of sparse Poisson samples to generate (Generation task only, default: 5). | No |
-
 ### Examples
 
-#### Scenario A: Zero-Shot Embedding Extraction
-Extract biological embeddings (`z_bio`) using the pretrained model without modification.
-
+#### 1. Zero-Shot Embedding Extraction
+Extract biological embeddings without fine-tuning.
 ```bash
 python -m main.finetune \
     --input_dir ./data/liver_samples \
@@ -63,28 +67,9 @@ python -m main.finetune \
     --mode 0shot \
     --task embedding
 ```
-**Output**: 
-- `.h5ad` files in output directory with `adata.obsm['xVerse']` containing the embeddings.
 
-#### Scenario B: Zero-Shot Generation / Imputation
-Perform imputation/virtual cell synthesis using the pretrained model directly (no fine-tuning).
-
-```bash
-python -m main.finetune \
-    --input_dir ./data/liver_samples \
-    --output_dir ./results/zeroshot_imputation \
-    --base_model ./checkpoints/xverse_pretrained.pth \
-    --tissue_name liver \
-    --mode 0shot \
-    --task generation \
-    --num_samples_gen 5
-```
-**Output**: 
-- `.h5ad` files with `adata.layers['mu_bio']` (reconstruction) and sparse samples (`sample_0`...).
-
-#### Scenario C: Fine-Tuning for Imputation/Generation
-Fine-tune the model on your data, then generate denoised gene expression (`mu_bio`).
-
+#### 2. Fine-Tuning & Imputation
+Fine-tune on your data to generate denoised expression (`mu_bio`).
 ```bash
 python -m main.finetune \
     --input_dir ./data/liver_samples \
@@ -95,38 +80,56 @@ python -m main.finetune \
     --task generation \
     --num_samples_gen 5
 ```
-**Output**: 
-- `.h5ad` files in output directory with `adata.layers['mu_bio']` containing the reconstruction.
-- `adata.layers['sample_0']` ... `adata.layers['sample_4']`: Sparse Poisson samples drawn from `mu_bio`.
-- `best_model_liver_ft.pth`: The fine-tuned model checkpoint.
 
-#### Scenario D: Fine-Tuning followed by Embedding Extraction
-Adapt the model to your specific dataset (e.g., to handle strong batch effects) before extracting embeddings.
+See [Examples](#examples) in the full documentation for more scenarios.
 
-```bash
-python -m main.finetune \
-    --input_dir ./data/liver_samples \
-    --output_dir ./results/ft_embeddings \
-    --base_model ./checkpoints/xverse_pretrained.pth \
-    --tissue_name liver \
-    --mode ft \
-    --task embedding \
-    --epochs 20
+| Argument | Description | Required |
+| :--- | :--- | :--- |
+| `--input_dir` | Input directory or file path. | Yes |
+| `--output_dir` | Output directory. | Yes |
+| `--base_model` | Path to pretrained model checkpoint. | Yes |
+| `--task` | `embedding` or `generation`. | Yes |
+| `--mode` | `0shot` or `ft` (Fine-tune). | No (Default: 0shot) |
+
+---
+
+## 📂 Repository Structure
+
+```
+xVERSE_code/
+├── main/                   # Core source code
+│   ├── finetune.py         # Main entry point
+│   ├── utils_model.py      # Model architecture
+│   └── ...
+├── reproduce_manuscript/   # Scripts for reproducing paper figures
+│   ├── fig1_overview/      
+│   └── ...
+├── bashfiles/              # Slurm/Bash scripts for HPC
+├── requirements.txt        # Python dependencies
+├── LICENSE                 # GNU GPL-3.0 License
+└── README.md               # This file
 ```
 
-## 3. Output Details
+## 📜 Citation
 
-The script preserves the mapping between input files and output files.
+If you use xVERSE in your research, please cite our paper:
 
-*   **Embedding Task**:
-    *   Outputs are saved as `.h5ad` files.
-    *   **`adata.obsm['xVerse']`**: Stores the `z_bio` (biological embedding) matrix.
-    
-*   **Generation Task**:
-    *   Outputs are saved as `.h5ad` files.
-    *   **`adata.layers['mu_bio']`**: Stores the `mu_bio` (denoised/reconstructed expression) matrix.
-    *   **`adata.layers['sample_X']`**: Sparse count matrices sampled from the Poisson distribution (e.g., `sample_0`, `sample_1`...), controlled by `--num_samples_gen`.
-    *   *Note*: The output file is subset to the genes present in the model (intersection of input genes and model training genes).
+```bibtex
+@article{xverse2024,
+  title={A transcriptomics-native foundation model for universal cell representation and virtual cell synthesis},
+  author={Jiang, Xiaohui and Xie, Jichun},
+  journal={BioRxiv},
+  year={2024}
+}
+```
 
-*   **Combined Visualization**:
-    *   If multiple files are processed in `embedding` mode, a `combined_umap.png` is generated for quick inspection.
+## ⚖️ License
+
+This project is open source under the **GNU General Public License v3.0 (GPL-3.0)** - see the [LICENSE](LICENSE) file for details.
+
+> [!NOTE]
+> **Commercial Use**: This software is free for non-commercial use. For commercial use, please contact the authors to obtain a separate license:
+> *   **Jichun Xie**: [jichun.xie@duke.edu](mailto:jichun.xie@duke.edu)
+> *   **Xiaohui Jiang**: [x.jiang@duke.edu](mailto:x.jiang@duke.edu)
+
+
