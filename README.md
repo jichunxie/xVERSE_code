@@ -21,7 +21,7 @@
 
 1.  **Clone the repository**:
     ```bash
-    git clone https://github.com/your-username/xVERSE_code.git
+    git clone https://github.com/jichunxie/xVERSE_code.git
     cd xVERSE_code
     ```
 
@@ -97,17 +97,22 @@ See [Examples](#examples) in the full documentation for more scenarios.
 
 ```
 xVERSE_code/
-├── main/                   # Core source code
-│   ├── finetune.py         # Main entry point
-│   ├── utils_model.py      # Model architecture
+├── main/                           # Core xVERSE source code
+│   ├── finetune.py                 # Main CLI entry point
+│   ├── utils_model.py              # Model architecture definitions
 │   └── ...
-├── reproduce_manuscript/   # Scripts for reproducing paper figures
-│   ├── fig1_overview/      
-│   └── ...
-├── bashfiles/              # Slurm/Bash scripts for HPC
-├── requirements.txt        # Python dependencies
-├── LICENSE                 # GNU GPL-3.0 License
-└── README.md               # This file
+├── reproduce_manuscript/           # Scripts to reproduce paper figures
+│   ├── fig1_overview/              # Figure 1: Model Overview
+│   ├── fig2_biology_signal/        # Figure 2: Biological Signal & Benchmarking
+│   ├── fig3_check_score_for_panel/ # Figure 3: Panel Analysis
+│   ├── fig4_generate_single_cell/  # Figure 4: SC Generation
+│   ├── fig5_imputation_spatial/    # Figure 5: Spatial Imputation
+│   ├── fig6_small_sample/          # Figure 6: Small Sample Learning
+│   └── fig7_cross_modality/        # Figure 7: Cross-Modality Prediction
+├── bashfiles/                      # HPC Slurm/Bash scripts
+├── requirements.txt                # Python dependencies
+├── LICENSE                         # GNU GPL-3.0 License
+└── README.md                       # Project documentation
 ```
 
 ## 📜 Citation
@@ -131,5 +136,3 @@ This project is open source under the **GNU General Public License v3.0 (GPL-3.0
 > **Commercial Use**: This software is free for non-commercial use. For commercial use, please contact the authors to obtain a separate license:
 > *   **Jichun Xie**: [jichun.xie@duke.edu](mailto:jichun.xie@duke.edu)
 > *   **Xiaohui Jiang**: [x.jiang@duke.edu](mailto:x.jiang@duke.edu)
-
-
