@@ -115,19 +115,6 @@ xVERSE_code/
 └── README.md                       # Project documentation
 ```
 
-## 📜 Citation
-
-If you use xVERSE in your research, please cite our paper:
-
-```bibtex
-@article{xverse2024,
-  title={A transcriptomics-native foundation model for universal cell representation and virtual cell synthesis},
-  author={Jiang, Xiaohui and Xie, Jichun},
-  journal={BioRxiv},
-  year={2024}
-}
-```
-
 ## ⚖️ License
 
 This project is open source under the **GNU General Public License v3.0 (GPL-3.0)** - see the [LICENSE](LICENSE) file for details.
