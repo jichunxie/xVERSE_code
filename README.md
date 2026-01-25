@@ -11,7 +11,7 @@
 
 ## 🚀 Key Capabilities
 
-*   **Universal Representation Learning**: Extract biological embeddings that are robust to batch effects and noise.
+*   **Universal Representation Learning**: Extract biological embeddings (`z_bio`) that are robust to batch effects and noise.
 *   **Spatial Gene Imputation**: Inaccurately impute unmeasured genes in spatial transcriptomics data using single-cell references.
 *   **Virtual Cell Synthesis**: Generate realistic, high-fidelity virtual cells to augment small datasets or serve as a data-augmentation engine.
 
@@ -42,22 +42,39 @@
 
 xVERSE provides a unified CLI `main.finetune` for all core tasks.
 
-### Input Requirements
-*   **Format**: `.h5ad` (AnnData).
-*   **Annotations**:
-    *   `adata.obs['tissue']`: Tissue label (must match `main/tissue_name_to_id_map.csv`).
-    *   `adata.var['gene_ids']`: Ensembl IDs (e.g., `ENSG00000123456`).
+### 1. Arguments
 
-### Basic Command
+| Argument | Description | Required |
+| :--- | :--- | :--- |
+| `--input_dir` | Input directory or file path. | **Yes** |
+| `--output_dir` | Output directory. | **Yes** |
+| `--base_model` | Path to pretrained model checkpoint. | **Yes** |
+| `--task` | `embedding` or `generation` (see Outputs below). | **Yes** |
+| `--tissue_name` | Tissue label (e.g., 'liver'). | **Yes** |
+| `--mode` | `0shot` (Pretrained) or `ft` (Fine-tune). | No (Default: `0shot`) |
+| `--gpu` | GPU ID (e.g., `0`). | No |
+| `--num_samples_gen` | Number of Poisson samples to generate (Generation task only). | No (Default: 5) |
+| `--epochs` | Number of fine-tuning epochs. | No (Default: 20) |
 
-```bash
-python -m main.finetune --input_dir <INPUT> --output_dir <OUTPUT> --base_model <MODEL_PATH> [OPTIONS]
-```
+### 2. Output Details
 
-### Examples
+The script generates `.h5ad` files in the `output_dir`.
 
-#### 1. Zero-Shot Embedding Extraction
-Extract biological embeddings without fine-tuning.
+#### Task: `embedding`
+*   **File**: Overwrites input `.h5ad` or creates new one.
+*   **Content**:
+    *   **`adata.obsm['xVerse']`**: The biological embedding matrix (`z_bio`), size `(n_cells, 384)`. Use this for clustering, UMAP, and integration.
+
+#### Task: `generation`
+*   **File**: `*_mu_bio.h5ad` (or updates input file if genes match).
+*   **Content**:
+    *   **`adata.layers['mu_bio']`**: The denoised, reconstructed gene expression matrix (Poisson rate).
+    *   **`adata.layers['sample_0']`, `sample_1`...**: Sparse count matrices sampled from `mu_bio`. These represent "virtual cells" or "imputed counts".
+
+### 3. Examples
+
+#### Scenario A: Zero-Shot Embedding Extraction
+Extract biological embeddings (`z_bio`) using the pretrained model directly.
 ```bash
 python -m main.finetune \
     --input_dir ./data/liver_samples \
@@ -68,8 +85,21 @@ python -m main.finetune \
     --task embedding
 ```
 
-#### 2. Fine-Tuning & Imputation
-Fine-tune on your data to generate denoised expression (`mu_bio`).
+#### Scenario B: Zero-Shot Generation / Imputation
+Perform gene imputation or virtual cell synthesis using the pretrained model.
+```bash
+python -m main.finetune \
+    --input_dir ./data/liver_samples \
+    --output_dir ./results/zeroshot_imputation \
+    --base_model ./checkpoints/xverse_pretrained.pth \
+    --tissue_name liver \
+    --mode 0shot \
+    --task generation \
+    --num_samples_gen 5
+```
+
+#### Scenario C: Fine-Tuning & Imputation
+Fine-tune on your specific dataset to generate denoised expression (`mu_bio`) or virtual cells.
 ```bash
 python -m main.finetune \
     --input_dir ./data/liver_samples \
@@ -81,15 +111,18 @@ python -m main.finetune \
     --num_samples_gen 5
 ```
 
-See [Examples](#examples) in the full documentation for more scenarios.
-
-| Argument | Description | Required |
-| :--- | :--- | :--- |
-| `--input_dir` | Input directory or file path. | Yes |
-| `--output_dir` | Output directory. | Yes |
-| `--base_model` | Path to pretrained model checkpoint. | Yes |
-| `--task` | `embedding` or `generation`. | Yes |
-| `--mode` | `0shot` or `ft` (Fine-tune). | No (Default: 0shot) |
+#### Scenario D: Fine-Tuning followed by Embedding Extraction
+Adapt the model to your specific dataset (e.g., to handle strong batch effects) before extracting embeddings.
+```bash
+python -m main.finetune \
+    --input_dir ./data/liver_samples \
+    --output_dir ./results/ft_embeddings \
+    --base_model ./checkpoints/xverse_pretrained.pth \
+    --tissue_name liver \
+    --mode ft \
+    --task embedding \
+    --epochs 20
+```
 
 ---
 
