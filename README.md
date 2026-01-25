@@ -11,7 +11,7 @@
 
 ## 🚀 Key Capabilities
 
-*   **Universal Representation Learning**: Extract biological embeddings (`z_bio`) that are robust to batch effects and noise.
+*   **Universal Representation Learning**: Extract biological embeddings that are robust to batch effects and noise.
 *   **Spatial Gene Imputation**: Inaccurately impute unmeasured genes in spatial transcriptomics data using single-cell references.
 *   **Virtual Cell Synthesis**: Generate realistic, high-fidelity virtual cells to augment small datasets or serve as a data-augmentation engine.
 
