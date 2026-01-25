@@ -1,0 +1,65 @@
+tissue_name,tissue_id
+abdomen,0
+adipose tissue,1
+adrenal gland,2
+axilla,3
+bladder organ,4
+blood,5
+bone marrow,6
+brain,7
+breast,8
+central nervous system,9
+chest wall,10
+colon,11
+cortex,12
+digestive system,13
+embryo,14
+endocrine gland,15
+esophagogastric junction,16
+esophagus,17
+exocrine gland,18
+eye,19
+fallopian tube,20
+forelimb,21
+gallbladder,22
+head,23
+heart,24
+hindlimb,25
+immune system,26
+intestine,27
+kidney,28
+lamina propria,29
+large intestine,30
+liver,31
+lung,32
+lymph node,33
+milk,34
+mucosa,35
+musculature,36
+neck,37
+nose,38
+omentum,39
+ovary,40
+pancreas,41
+placenta,42
+pleura,43
+pleural fluid,44
+prostate gland,45
+reproductive system,46
+respiratory system,47
+saliva,48
+sensory system,49
+skeletal system,50
+skin of body,51
+small intestine,52
+spinal cord,53
+spleen,54
+stomach,55
+tendon of semitendinosus,56
+testis,57
+tongue,58
+ureter,59
+urinary bladder,60
+uterus,61
+vasculature,62
+yolk sac,63
