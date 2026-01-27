@@ -179,25 +179,24 @@ def run_finetuning_loop(model, full_dataset, args, device, output_dir):
     early_stop_patience = 10
     ckpt_path = os.path.join(output_dir, f"best_model_{args.tissue_name}_ft.pth")
 
+    train_loader = DataLoader(
+        train_dataset, batch_size=args.batch_size, shuffle=True,
+        num_workers=args.num_workers, pin_memory=True
+    )
+    
+    valid_loader = DataLoader(
+        valid_dataset, batch_size=args.batch_size, shuffle=False,
+        num_workers=args.num_workers, pin_memory=True
+    )
+
     for epoch in range(1, args.epochs + 1):
         # Training
-        # Standard DataLoader with shuffle
-        train_loader = DataLoader(
-            train_dataset, batch_size=args.batch_size, shuffle=True,
-            num_workers=args.num_workers, pin_memory=True
-        )
-        
         train_metrics = finetune_one_epoch(
             model, optimizer, scaler, train_loader, device,
             lambda_recon_bio=args.lambda_recon_bio
         )
         
         # Validation
-        valid_loader = DataLoader(
-            valid_dataset, batch_size=args.batch_size, shuffle=False,
-            num_workers=args.num_workers, pin_memory=True
-        )
-        
         val_metrics = evaluate_one_epoch(model, valid_loader, device)
         val_loss = val_metrics.get("loss_poisson", 0.0) + val_metrics["loss_poisson_bio"]
         
@@ -355,12 +354,6 @@ def run_generation_task(model, file_sample_dict, gene_ids, tissue_map, args, dev
         print(f"  Saving output to separate file with model genes ({len(gene_ids)} genes)...")
         
         # Create new AnnData with model genes
-        adata_out = sc.AnnData(X=sparse.csr_matrix(mu_bio)) # mu_bio can be dense or sparse, usually dense is fine for rate, but let's keep it numpy array if dense
-        # Actually mu_bio is typically dense float. 
-        # User asked for "sample matrix need to be sparse". mu_bio is usually kept as is (often dense).
-        # Let's check previous code. Previous code: adata_out = sc.AnnData(X=mu_bio)
-        # We will keep X=mu_bio (dense) for precision, but samples as sparse.
-        
         adata_out = sc.AnnData(X=mu_bio)
         adata_out.var_names = gene_ids
         adata_out.obs = adata.obs.copy()
