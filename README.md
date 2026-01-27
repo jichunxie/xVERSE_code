@@ -36,11 +36,22 @@
     pip install -r requirements.txt
     ```
 
+4.  **Download Model Weights**:
+    Download the pretrained model weights (`xVERSE_384.pth`) from our Hugging Face repository:
+    
+    [**🤗 Xie-Lab/xVERSE**](https://huggingface.co/Xie-Lab/xVERSE)
+
+    After downloading, you can verify the path and pass it to the `--base_model` argument in the CLI. For example:
+    ```bash
+    # If you saved it to ./checkpoints/xVERSE_384.pth
+    --base_model ./checkpoints/xVERSE_384.pth
+    ```
+
 ---
 
 ## 🛠️ Usage
 
-xVERSE provides a unified CLI `main.finetune` for all core tasks.
+xVERSE provides a unified CLI `main.cli_xverse` for all core tasks.
 
 ### 1. Arguments
 
@@ -48,7 +59,7 @@ xVERSE provides a unified CLI `main.finetune` for all core tasks.
 | :--- | :--- | :--- |
 | `--input_dir` | Input directory or file path. | **Yes** |
 | `--output_dir` | Output directory. | **Yes** |
-| `--base_model` | Path to pretrained model checkpoint. | **Yes** |
+| `--base_model` | Local path to the downloaded model checkpoint (`xVERSE_384.pth`). | **Yes** |
 | `--task` | `embedding` or `generation` (see Outputs below). | **Yes** |
 | `--tissue_name` | Tissue label (e.g., 'liver'). | **Yes** |
 | `--mode` | `0shot` (Pretrained) or `ft` (Fine-tune). | No (Default: `0shot`) |
@@ -78,10 +89,10 @@ The script generates `.h5ad` files in the `output_dir`.
 #### Scenario A: Zero-Shot Embedding Extraction
 Extract biological embeddings (`z_bio`) using the pretrained model directly.
 ```bash
-python -m main.finetune \
+python -m main.cli_xverse \
     --input_dir ./data/liver_samples \
     --output_dir ./results/embeddings \
-    --base_model ./checkpoints/xverse_pretrained.pth \
+    --base_model /path/to/your/xVERSE_384.pth \
     --tissue_name liver \
     --mode 0shot \
     --task embedding
@@ -90,10 +101,10 @@ python -m main.finetune \
 #### Scenario B: Zero-Shot Generation / Imputation
 Perform gene imputation or virtual cell synthesis using the pretrained model.
 ```bash
-python -m main.finetune \
+python -m main.cli_xverse \
     --input_dir ./data/liver_samples \
     --output_dir ./results/zeroshot_imputation \
-    --base_model ./checkpoints/xverse_pretrained.pth \
+    --base_model /path/to/your/xVERSE_384.pth \
     --tissue_name liver \
     --mode 0shot \
     --task generation \
@@ -103,10 +114,10 @@ python -m main.finetune \
 #### Scenario C: Fine-Tuning & Imputation
 Fine-tune on your specific dataset to generate denoised expression (`mu_bio`) or virtual cells.
 ```bash
-python -m main.finetune \
+python -m main.cli_xverse \
     --input_dir ./data/liver_samples \
     --output_dir ./results/imputation \
-    --base_model ./checkpoints/xverse_pretrained.pth \
+    --base_model /path/to/your/xVERSE_384.pth \
     --tissue_name liver \
     --mode ft \
     --task generation \
@@ -116,10 +127,10 @@ python -m main.finetune \
 #### Scenario D: Fine-Tuning followed by Embedding Extraction
 Adapt the model to your specific dataset (e.g., to handle strong batch effects) before extracting embeddings.
 ```bash
-python -m main.finetune \
+python -m main.cli_xverse \
     --input_dir ./data/liver_samples \
     --output_dir ./results/ft_embeddings \
-    --base_model ./checkpoints/xverse_pretrained.pth \
+    --base_model /path/to/your/xVERSE_384.pth \
     --tissue_name liver \
     --mode ft \
     --task embedding \
@@ -133,7 +144,7 @@ python -m main.finetune \
 ```
 xVERSE_code/
 ├── main/                           # Core xVERSE source code
-│   ├── finetune.py                 # Main CLI entry point
+│   ├── cli_xverse.py               # Main CLI entry point
 │   ├── utils_model.py              # Model architecture definitions
 │   └── ...
 ├── reproduce_manuscript/           # Scripts to reproduce paper figures
