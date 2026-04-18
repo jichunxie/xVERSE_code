@@ -29,8 +29,8 @@ stdbuf -oL -eL torchrun --standalone --nproc_per_node=2 -m main_energy.train_pan
     --num-epochs 100 \
     --batch-size 512 \
     --val-batch-size 512 \
-    --num-workers 8 \
-    --val-num-workers 0 \
+    --num-workers 15 \
+    --val-num-workers 5 \
     --samples-per-id 1000 \
     --lr 3e-4 \
     --weight-decay 1e-5 \
