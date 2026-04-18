@@ -1,6 +1,6 @@
 #!/bin/bash
-#SBATCH -p h200ea                            
-#SBATCH -A h200ea                                
+#SBATCH -p scavenger-h200                      
+#SBATCH -A scavenger-h200                             
 #SBATCH --gres=gpu:h200:2
 #SBATCH -c 20                                 
 #SBATCH --mem=200G                        
