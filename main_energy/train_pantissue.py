@@ -59,6 +59,8 @@ def parse_args():
     parser.add_argument("--batch-size", type=int, default=512, help="Training batch size.")
     parser.add_argument("--val-batch-size", type=int, default=512, help="Validation batch size.")
     parser.add_argument("--num-workers", type=int, default=20, help="DataLoader workers for both train/val.")
+    parser.add_argument("--val-num-workers", type=int, default=None,
+                        help="Validation DataLoader workers. Defaults to min(num_workers, 4).")
     parser.add_argument("--prefetch-factor", type=int, default=2, help="DataLoader prefetch factor (when num_workers>0).")
     parser.add_argument("--persistent-workers", action="store_true", default=True,
                         help="Keep DataLoader workers alive across epochs.")
@@ -190,6 +192,17 @@ def main():
         loader_kwargs["prefetch_factor"] = args.prefetch_factor
         loader_kwargs["persistent_workers"] = args.persistent_workers
 
+    val_num_workers = min(args.num_workers, 4) if args.val_num_workers is None else max(0, int(args.val_num_workers))
+    val_loader_kwargs = dict(num_workers=val_num_workers, pin_memory=True)
+    if val_num_workers > 0:
+        val_loader_kwargs["prefetch_factor"] = args.prefetch_factor
+        # Keep val workers non-persistent to avoid train/val worker resource contention.
+        val_loader_kwargs["persistent_workers"] = False
+    log(
+        f"[Loader] train_workers={args.num_workers}, train_persistent={args.persistent_workers}, "
+        f"val_workers={val_num_workers}, val_persistent={val_loader_kwargs.get('persistent_workers', False)}"
+    )
+
     val_sampler = DistributedSampler(val_ds, num_replicas=world_size, rank=rank, shuffle=False) if ddp_enabled else None
     val_loader = DataLoader(
         val_ds,
@@ -198,7 +211,7 @@ def main():
         sampler=val_sampler,
         drop_last=False,
         collate_fn=val_collator,
-        **loader_kwargs,
+        **val_loader_kwargs,
     )
 
     if ddp_enabled:
