@@ -66,7 +66,7 @@ class FiLMMaskEncoder(nn.Module):
         self.encoder_mu = nn.Linear(expr_hidden_dim, latent_dim)
         self.encoder_logvar = nn.Linear(expr_hidden_dim, latent_dim)
 
-    def forward(self, x_expr: torch.Tensor, x_mask: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, x_expr: torch.Tensor, x_mask: torch.Tensor, return_hidden: bool = False):
         # Unobserved entries are removed before expression path encoding.
         x_expr_masked = x_expr * x_mask
         h_expr = self.expr_encoder(x_expr_masked)
@@ -78,6 +78,8 @@ class FiLMMaskEncoder(nn.Module):
 
         mu = self.encoder_mu(h)
         logvar = self.encoder_logvar(h)
+        if return_hidden:
+            return mu, logvar, h
         return mu, logvar
 
 
@@ -139,8 +141,7 @@ class PoissonDecoder(nn.Module):
         )
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
-        raw = self.decoder(z)
-        return F.softplus(raw) + 1e-8
+        return self.decoder(z)
 
 
 class MaskFiLMGMMVAE(nn.Module):
@@ -173,6 +174,8 @@ class MaskFiLMGMMVAE(nn.Module):
             hidden_dim=dec_hidden_dim,
             dropout=dropout,
         )
+        # Library-size head from encoder hidden feature.
+        self.library_head = nn.Linear(expr_hidden_dim, 1)
         self.score_head = MLP(
             input_dim=latent_dim,
             hidden_dims=[dec_hidden_dim, dec_hidden_dim],
@@ -183,10 +186,20 @@ class MaskFiLMGMMVAE(nn.Module):
     def forward(self, x_count: torch.Tensor, x_mask: torch.Tensor, x_expr: torch.Tensor = None) -> Dict[str, torch.Tensor]:
         if x_expr is None:
             x_expr = torch.log1p(x_count.float())
-        mu, logvar = self.encoder(x_expr=x_expr, x_mask=x_mask.float())
+        mu, logvar, h = self.encoder(x_expr=x_expr, x_mask=x_mask.float(), return_hidden=True)
         z = reparameterize(mu, logvar)
-        rate = self.decoder(z)
-        return {"mu": mu, "logvar": logvar, "z": z, "rate": rate}
+        gene_logits = self.decoder(z)
+        library_size = F.softplus(self.library_head(h)) + 1e-8
+        gene_probs = F.softmax(gene_logits, dim=-1)
+        rate = gene_probs * library_size
+        return {
+            "mu": mu,
+            "logvar": logvar,
+            "z": z,
+            "library_size": library_size,
+            "gene_logits": gene_logits,
+            "rate": rate,
+        }
 
     def loss(
         self,

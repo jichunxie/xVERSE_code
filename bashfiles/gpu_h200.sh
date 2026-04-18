@@ -33,7 +33,7 @@ stdbuf -oL -eL python -m main_energy.train_pantissue \
     --samples-per-id 1000 \
     --lr 1e-4 \
     --weight-decay 1e-5 \
-    --prior-type gaussian \
+    --prior-type gmm \
     --latent-dim 128 \
     --num-components 16 \
     --expr-hidden-dim 1024 \
