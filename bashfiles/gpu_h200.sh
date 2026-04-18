@@ -12,8 +12,6 @@
 #SBATCH --mail-type=BEGIN,END,FAIL  
 #SBATCH --exclude=dcc-h200-gpu-05                 
 
-set -euo pipefail
-
 # Load environment
 source ~/.bashrc
 conda activate SpaRest
