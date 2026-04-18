@@ -18,7 +18,7 @@ conda activate SpaRest
 
 cd /hpc/group/xielab/xj58/xVERSE_code
 
-echo ">>> Running Task: Train VAE-Gaussian baseline (kidney only)"
+echo ">>> Running Task: Train GMM prior model (kidney only)"
 stdbuf -oL -eL python -m main_energy.train_pantissue \
     --data-root "/hpc/group/xielab/xj58/xVerseAtlas/npz_tissue_dataset_donor" \
     --summary-csv "/hpc/group/xielab/xj58/xVerseAtlas/npz_tissue_dataset_donor/pantissue_full_updated.csv" \
@@ -46,4 +46,6 @@ stdbuf -oL -eL python -m main_energy.train_pantissue \
     --mask-aug-min-frac 0.1 \
     --mask-aug-max-frac 0.5 \
     --lambda-score 0.05 \
-    --score-noise-std 0.1
+    --score-noise-std 0.1 \
+    --lambda-contrast 0.02 \
+    --contrast-temp 0.1
