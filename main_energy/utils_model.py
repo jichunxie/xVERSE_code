@@ -358,6 +358,7 @@ def train_gmm_vae_one_epoch(
     score_detach_z=True,
 ):
     model.train()
+    loss_fn = model.module.loss if hasattr(model, "module") else model.loss
     total_loss = total_recon = total_kl = total_score = 0.0
     n_cells = 0
 
@@ -377,7 +378,7 @@ def train_gmm_vae_one_epoch(
         n_cells += bsz
 
         with torch.amp.autocast(device_type='cuda', enabled=scaler.is_enabled()):
-            out = model.loss(
+            out = loss_fn(
                 x_count=x_count,
                 x_mask=x_mask,
                 beta=beta_kl,
@@ -428,6 +429,7 @@ def evaluate_gmm_vae_one_epoch(
     score_detach_z=True,
 ):
     model.eval()
+    loss_fn = model.module.loss if hasattr(model, "module") else model.loss
     total_loss = total_recon = total_kl = total_score = 0.0
     n_cells = 0
 
@@ -438,7 +440,7 @@ def evaluate_gmm_vae_one_epoch(
             bsz = x_count.size(0)
             n_cells += bsz
 
-            out = model.loss(
+            out = loss_fn(
                 x_count=x_count,
                 x_mask=x_mask,
                 beta=beta_kl,
