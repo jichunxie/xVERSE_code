@@ -346,12 +346,53 @@ def _random_hide_observed(
         return x_mask
 
     enc_mask = x_mask.clone()
-    B = enc_mask.size(0)
+    # Fast path for CPU tensors: avoid many tiny torch RNG calls and .item() sync points.
+    if enc_mask.device.type == "cpu":
+        arr = enc_mask.numpy()
+        B = arr.shape[0]
+        apply_flags = np.random.rand(B) <= float(apply_prob)
+        simple_min = max(0.0, min(1.0, float(min_frac)))
+        simple_max = max(simple_min, min(1.0, float(max_frac)))
 
+        for i in range(B):
+            if not apply_flags[i]:
+                continue
+            obs_idx = np.flatnonzero(arr[i] > 0)
+            n_obs = int(obs_idx.size)
+            if n_obs <= 1:
+                continue
+
+            if policy == "xverse":
+                if n_obs < 1000:
+                    max_to_mask = max(5, int(n_obs * (1.0 / 5.0)))
+                    if n_obs > 10:
+                        low = 10
+                        high = max(low, max_to_mask)
+                        n_hide = int(np.random.randint(low, high + 1))
+                    else:
+                        n_hide = n_obs
+                else:
+                    p = float(np.random.rand())
+                    if p < 0.2:
+                        frac = 0.1 + 0.2 * float(np.random.rand())  # 0.1 - 0.3
+                    elif p < 0.9:
+                        frac = 0.3 + 0.2 * float(np.random.rand())  # 0.3 - 0.5
+                    else:
+                        frac = 0.5 + 0.25 * float(np.random.rand())  # 0.5 - 0.75
+                    n_hide = int(n_obs * frac)
+            else:
+                frac = simple_min + (simple_max - simple_min) * float(np.random.rand())
+                n_hide = int(n_obs * frac)
+
+            n_hide = max(1, min(n_hide, n_obs - 1))
+            hide_idx = np.random.choice(obs_idx, size=n_hide, replace=False)
+            arr[i, hide_idx] = 0
+        return enc_mask
+
+    B = enc_mask.size(0)
     for i in range(B):
         if torch.rand(1, device=enc_mask.device).item() > apply_prob:
             continue
-
         obs_idx = (enc_mask[i] > 0).nonzero(as_tuple=False).flatten()
         n_obs = int(obs_idx.numel())
         if n_obs <= 1:
@@ -369,11 +410,11 @@ def _random_hide_observed(
             else:
                 p = torch.rand(1, device=enc_mask.device).item()
                 if p < 0.2:
-                    frac = 0.1 + 0.2 * torch.rand(1, device=enc_mask.device).item()  # 0.1 - 0.3
+                    frac = 0.1 + 0.2 * torch.rand(1, device=enc_mask.device).item()
                 elif p < 0.9:
-                    frac = 0.3 + 0.2 * torch.rand(1, device=enc_mask.device).item()  # 0.3 - 0.5
+                    frac = 0.3 + 0.2 * torch.rand(1, device=enc_mask.device).item()
                 else:
-                    frac = 0.5 + 0.25 * torch.rand(1, device=enc_mask.device).item()  # 0.5 - 0.75
+                    frac = 0.5 + 0.25 * torch.rand(1, device=enc_mask.device).item()
                 n_hide = int(n_obs * frac)
         else:
             min_frac = max(0.0, min(1.0, min_frac))
@@ -540,13 +581,8 @@ def evaluate_gmm_vae_one_epoch(
             step_start_t = time.perf_counter()
             data_t = step_start_t - iter_end_t
             prep_start_t = step_start_t
-            x_mask_encoder = _random_hide_observed(
-                x_mask=x_mask,
-                apply_prob=1.0,
-                policy="xverse",
-                min_frac=0.1,
-                max_frac=0.5,
-            )
+            # Validation uses the original observation mask directly (no random hide).
+            x_mask_encoder = x_mask
             x_count = x_count.to(device, non_blocking=True)
             x_mask = x_mask.to(device, non_blocking=True)
             x_mask_encoder = x_mask_encoder.to(device, non_blocking=True)
