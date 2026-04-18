@@ -31,7 +31,7 @@ stdbuf -oL -eL python -m main_energy.train_pantissue \
     --val-batch-size 512 \
     --num-workers 20 \
     --samples-per-id 1000 \
-    --lr 1e-4 \
+    --lr 3e-4 \
     --weight-decay 1e-5 \
     --prior-type gmm \
     --latent-dim 128 \
