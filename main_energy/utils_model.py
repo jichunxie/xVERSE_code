@@ -457,18 +457,11 @@ def train_gmm_vae_one_epoch(
     interval_data_t = interval_prep_t = interval_compute_t = interval_step_t = 0.0
     interval_steps = 0
 
-    for batch_idx, (_, _, _, x_count, x_mask) in enumerate(train_loader):
+    for batch_idx, (_, _, _, x_count, x_mask, x_mask_encoder) in enumerate(train_loader):
         step_start_t = time.perf_counter()
         data_t = step_start_t - iter_end_t
         prep_start_t = step_start_t
         optimizer.zero_grad(set_to_none=True)
-        x_mask_encoder = _random_hide_observed(
-            x_mask=x_mask,
-            apply_prob=mask_aug_prob,
-            policy=mask_aug_policy,
-            min_frac=mask_aug_min_frac,
-            max_frac=mask_aug_max_frac,
-        )
         x_count = x_count.to(device, non_blocking=True)
         x_mask = x_mask.to(device, non_blocking=True)
         x_mask_encoder = x_mask_encoder.to(device, non_blocking=True)
@@ -489,12 +482,15 @@ def train_gmm_vae_one_epoch(
                 score_noise_std=score_noise_std,
                 score_detach_z=score_detach_z,
             )
-            out_real = model(x_count, x_mask)
-            contrast = bidirectional_contrastive_loss(
-                z_real=out_real["z"],
-                z_fake=out_fake["z"],
-                temperature=contrast_temp,
-            )
+            if lambda_contrast > 0:
+                out_real = model(x_count, x_mask)
+                contrast = bidirectional_contrastive_loss(
+                    z_real=out_real["z"],
+                    z_fake=out_fake["z"],
+                    temperature=contrast_temp,
+                )
+            else:
+                contrast = torch.zeros((), device=x_count.device, dtype=out_fake["z"].dtype)
 
             loss = out_fake["loss"] + lambda_contrast * contrast
             recon = out_fake["recon_loss"]
@@ -577,12 +573,10 @@ def evaluate_gmm_vae_one_epoch(
     interval_steps = 0
 
     with torch.no_grad():
-        for batch_idx, (_, _, _, x_count, x_mask) in enumerate(val_loader):
+        for batch_idx, (_, _, _, x_count, x_mask, x_mask_encoder) in enumerate(val_loader):
             step_start_t = time.perf_counter()
             data_t = step_start_t - iter_end_t
             prep_start_t = step_start_t
-            # Validation uses the original observation mask directly (no random hide).
-            x_mask_encoder = x_mask
             x_count = x_count.to(device, non_blocking=True)
             x_mask = x_mask.to(device, non_blocking=True)
             x_mask_encoder = x_mask_encoder.to(device, non_blocking=True)
@@ -601,12 +595,15 @@ def evaluate_gmm_vae_one_epoch(
                 score_noise_std=score_noise_std,
                 score_detach_z=score_detach_z,
             )
-            out_real = model(x_count, x_mask)
-            contrast = bidirectional_contrastive_loss(
-                z_real=out_real["z"],
-                z_fake=out_fake["z"],
-                temperature=contrast_temp,
-            )
+            if lambda_contrast > 0:
+                out_real = model(x_count, x_mask)
+                contrast = bidirectional_contrastive_loss(
+                    z_real=out_real["z"],
+                    z_fake=out_fake["z"],
+                    temperature=contrast_temp,
+                )
+            else:
+                contrast = torch.zeros((), device=x_count.device, dtype=out_fake["z"].dtype)
             loss = out_fake["loss"] + lambda_contrast * contrast
 
             total_loss += loss.item() * bsz
@@ -808,9 +805,79 @@ class SparseBatchCollator:
     - x_count: observed counts (float32), zeros for unobserved, shape (B, G)
     """
 
-    def __init__(self, dataset: FastXVerseBatchDataset, num_genes: int):
+    def __init__(
+        self,
+        dataset: FastXVerseBatchDataset,
+        num_genes: int,
+        apply_mask_aug: bool = False,
+        mask_aug_prob: float = 1.0,
+        mask_aug_policy: str = "xverse",
+        mask_aug_min_frac: float = 0.1,
+        mask_aug_max_frac: float = 0.5,
+    ):
         self.dataset = dataset
         self.num_genes = int(num_genes)
+        self.apply_mask_aug = bool(apply_mask_aug)
+        self.mask_aug_prob = float(mask_aug_prob)
+        self.mask_aug_policy = str(mask_aug_policy)
+        self.mask_aug_min_frac = float(mask_aug_min_frac)
+        self.mask_aug_max_frac = float(mask_aug_max_frac)
+
+    @staticmethod
+    def _random_hide_observed_numpy(
+        x_mask: np.ndarray,
+        apply_prob: float,
+        policy: str,
+        min_frac: float,
+        max_frac: float,
+    ) -> np.ndarray:
+        """
+        Numpy implementation used in DataLoader workers.
+        x_mask: bool array, shape (B, G)
+        """
+        if apply_prob <= 0:
+            return x_mask.copy()
+
+        enc = x_mask.copy()
+        B = enc.shape[0]
+        apply_flags = np.random.rand(B) <= float(apply_prob)
+        simple_min = max(0.0, min(1.0, float(min_frac)))
+        simple_max = max(simple_min, min(1.0, float(max_frac)))
+
+        for i in range(B):
+            if not apply_flags[i]:
+                continue
+            obs_idx = np.flatnonzero(enc[i])
+            n_obs = int(obs_idx.size)
+            if n_obs <= 1:
+                continue
+
+            if policy == "xverse":
+                if n_obs < 1000:
+                    max_to_mask = max(5, int(n_obs * (1.0 / 5.0)))
+                    if n_obs > 10:
+                        low = 10
+                        high = max(low, max_to_mask)
+                        n_hide = int(np.random.randint(low, high + 1))
+                    else:
+                        n_hide = n_obs
+                else:
+                    p = float(np.random.rand())
+                    if p < 0.2:
+                        frac = 0.1 + 0.2 * float(np.random.rand())
+                    elif p < 0.9:
+                        frac = 0.3 + 0.2 * float(np.random.rand())
+                    else:
+                        frac = 0.5 + 0.25 * float(np.random.rand())
+                    n_hide = int(n_obs * frac)
+            else:
+                frac = simple_min + (simple_max - simple_min) * float(np.random.rand())
+                n_hide = int(n_obs * frac)
+
+            n_hide = max(1, min(n_hide, n_obs - 1))
+            hide_idx = np.random.choice(obs_idx, size=n_hide, replace=False)
+            enc[i, hide_idx] = False
+        return enc
 
     def __call__(self, batch):
         bsz = len(batch)
@@ -829,7 +896,18 @@ class SparseBatchCollator:
             if observed_global_idx.size > 0:
                 x_mask[i, observed_global_idx] = True
             if nz_gene_rel_idx.size > 0:
-                x_count[i, observed_global_idx[nz_gene_rel_idx]] = nz_value.astype(np.float32, copy=False)
+                x_count[i, observed_global_idx[nz_gene_rel_idx]] = nz_value
+
+        if self.apply_mask_aug:
+            x_mask_encoder = self._random_hide_observed_numpy(
+                x_mask=x_mask,
+                apply_prob=self.mask_aug_prob,
+                policy=self.mask_aug_policy,
+                min_frac=self.mask_aug_min_frac,
+                max_frac=self.mask_aug_max_frac,
+            )
+        else:
+            x_mask_encoder = x_mask
 
         return (
             torch.from_numpy(sample_ids),
@@ -837,6 +915,7 @@ class SparseBatchCollator:
             torch.from_numpy(celltype_ids),
             torch.from_numpy(x_count),
             torch.from_numpy(x_mask),
+            torch.from_numpy(x_mask_encoder),
         )
 
 

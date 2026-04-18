@@ -160,6 +160,10 @@ def main():
     if args.ddp and not ddp_enabled:
         print("[Info] --ddp is enabled by default, but torchrun env was not found. Falling back to single-process mode.")
     set_seed(args.seed + rank)
+    if torch.cuda.is_available():
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.backends.cudnn.benchmark = True
 
     def log(msg: str):
         if is_main_process(rank):
@@ -184,8 +188,20 @@ def main():
     log("Creating Dataset...")
     ds = FastXVerseBatchDataset(train_pairs, gene_ids, pair_to_idx, cell_type_to_index, pair_to_tissue_id=pair_to_tissue_id)
     val_ds = FastXVerseBatchDataset(val_pairs, gene_ids, pair_to_idx, cell_type_to_index, pair_to_tissue_id=pair_to_tissue_id)
-    train_collator = SparseBatchCollator(ds, num_genes=args.total_gene)
-    val_collator = SparseBatchCollator(val_ds, num_genes=args.total_gene)
+    train_collator = SparseBatchCollator(
+        ds,
+        num_genes=args.total_gene,
+        apply_mask_aug=True,
+        mask_aug_prob=args.mask_aug_prob,
+        mask_aug_policy=args.mask_aug_policy,
+        mask_aug_min_frac=args.mask_aug_min_frac,
+        mask_aug_max_frac=args.mask_aug_max_frac,
+    )
+    val_collator = SparseBatchCollator(
+        val_ds,
+        num_genes=args.total_gene,
+        apply_mask_aug=False,
+    )
 
     loader_kwargs = dict(num_workers=args.num_workers, pin_memory=True)
     if args.num_workers > 0:
@@ -258,7 +274,15 @@ def main():
         log(f"Using {torch.cuda.device_count()} GPUs.")
         model = torch.nn.DataParallel(model)
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    if torch.cuda.is_available():
+        try:
+            optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay, fused=True)
+            log("[Optimizer] Using fused Adam.")
+        except TypeError:
+            optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+            log("[Optimizer] Fused Adam unavailable; falling back to Adam.")
+    else:
+        optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = ReduceLROnPlateau(
         optimizer,
         mode='min',
