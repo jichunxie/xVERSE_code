@@ -274,15 +274,10 @@ def main():
         log(f"Using {torch.cuda.device_count()} GPUs.")
         model = torch.nn.DataParallel(model)
 
+    # Keep optimizer on stable AMP-compatible path for this environment.
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     if torch.cuda.is_available():
-        try:
-            optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay, fused=True)
-            log("[Optimizer] Using fused Adam.")
-        except TypeError:
-            optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-            log("[Optimizer] Fused Adam unavailable; falling back to Adam.")
-    else:
-        optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+        log("[Optimizer] Using standard Adam (AMP-compatible).")
     scheduler = ReduceLROnPlateau(
         optimizer,
         mode='min',
