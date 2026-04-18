@@ -411,10 +411,10 @@ def train_gmm_vae_one_epoch(
     total_loss = total_recon = total_kl = total_score = total_contrast = 0.0
     n_cells = 0
 
-    for batch_idx, (_, _, _, value) in enumerate(train_loader):
+    for batch_idx, (_, _, _, x_count, x_mask) in enumerate(train_loader):
         optimizer.zero_grad(set_to_none=True)
-        value = value.to(device, non_blocking=True)
-        x_count, x_mask = _build_vae_inputs(value)
+        x_count = x_count.to(device, non_blocking=True)
+        x_mask = x_mask.to(device, non_blocking=True)
         x_mask_encoder = _random_hide_observed(
             x_mask=x_mask,
             apply_prob=mask_aug_prob,
@@ -499,9 +499,9 @@ def evaluate_gmm_vae_one_epoch(
     n_cells = 0
 
     with torch.no_grad():
-        for _, _, _, value in val_loader:
-            value = value.to(device, non_blocking=True)
-            x_count, x_mask = _build_vae_inputs(value)
+        for _, _, _, x_count, x_mask in val_loader:
+            x_count = x_count.to(device, non_blocking=True)
+            x_mask = x_mask.to(device, non_blocking=True)
             x_mask_encoder = _random_hide_observed(
                 x_mask=x_mask,
                 apply_prob=1.0,
@@ -573,15 +573,19 @@ class FastXVerseBatchDataset(Dataset):
         self.use_cache = use_cache
         self.available_genes = set(available_genes) if available_genes is not None else None
 
-        self.X_blocks = []
+        self.block_indptr = []
+        self.block_indices = []
+        self.block_data = []
         self.index_map = []
         self.gene_idx_maps = []
+        self.block_observed_global_idx = []
+        self.block_local_to_rel = []
         self.cell_types = []
         self.cache = {} if use_cache else None
 
         def load_one_block(args):
             matrix_path, meta_path = args
-            X = sp.load_npz(matrix_path)
+            X = sp.load_npz(matrix_path).tocsr()
             meta = np.load(meta_path, allow_pickle=True)
             gene_ids_available = meta["gene_ids"]
             cell_type_array = meta["cell_type_ontology_term_id"]
@@ -604,9 +608,28 @@ class FastXVerseBatchDataset(Dataset):
                     if self.available_genes is None or gene in self.available_genes:
                         gene_idx_array[global_idx] = gene_to_idx[gene]
 
-            self.X_blocks.append(X)
             self.gene_idx_maps.append(gene_idx_array)
             self.cell_types.append(cell_type_array)
+            observed_global_idx = np.where(gene_idx_array >= 0)[0].astype(np.int32, copy=False)
+            observed_local_idx = gene_idx_array[observed_global_idx].astype(np.int32, copy=False)
+            local_to_rel = np.full(X.shape[1], -1, dtype=np.int32)
+            if observed_local_idx.size > 0:
+                local_to_rel[observed_local_idx] = np.arange(observed_local_idx.size, dtype=np.int32)
+
+            self.block_observed_global_idx.append(observed_global_idx)
+            self.block_local_to_rel.append(local_to_rel)
+            self.block_indptr.append(X.indptr.astype(np.int64, copy=False))
+            self.block_indices.append(X.indices.astype(np.int32, copy=False))
+            if np.issubdtype(X.data.dtype, np.integer):
+                block_data = X.data.astype(np.uint32, copy=False)
+            else:
+                # Keep exact integer counts in compact form when possible.
+                rounded = np.rint(X.data)
+                if np.allclose(X.data, rounded):
+                    block_data = rounded.astype(np.uint32, copy=False)
+                else:
+                    block_data = X.data.astype(np.float32, copy=False)
+            self.block_data.append(block_data)
 
             pair = (matrix_path, meta_path)
             sample_id = int(self.pair_to_sample_id.get(pair, -1))
@@ -614,9 +637,15 @@ class FastXVerseBatchDataset(Dataset):
             tissue_id = int(self.pair_to_tissue_id.get(pair, -1))
 
             for i in range(X.shape[0]):
-                row = X.getrow(i)
-                max_count = row.max()
-                sum_count = row.sum()
+                st = self.block_indptr[block_idx][i]
+                ed = self.block_indptr[block_idx][i + 1]
+                if st >= ed:
+                    max_count = 0.0
+                    sum_count = 0.0
+                else:
+                    row_vals = self.block_data[block_idx][st:ed]
+                    max_count = float(row_vals.max())
+                    sum_count = float(row_vals.sum(dtype=np.float64))
                 if (max_count > 1000) or (sum_count > 200000):
                     continue
                 self.index_map.append((block_idx, i, sample_id, tissue_id))
@@ -629,28 +658,77 @@ class FastXVerseBatchDataset(Dataset):
             return self.cache[idx]
 
         block_idx, local_idx, sample_id_int, tissue_id_int = self.index_map[idx]
-        X = self.X_blocks[block_idx]
-        gene_idx_array = self.gene_idx_maps[block_idx]
         cell_type_str = self.cell_types[block_idx][local_idx]
         celltype_index = self.cell_type_to_index.get(cell_type_str, -1)
-
-        row_data = X.getrow(local_idx).toarray().flatten()
-        result = np.full(len(self.gene_ids), -1, dtype=np.float32)
-        valid = gene_idx_array >= 0
-        if np.any(valid):
-            result[valid] = row_data[gene_idx_array[valid]].astype(np.float32)
+        indptr = self.block_indptr[block_idx]
+        indices = self.block_indices[block_idx]
+        data = self.block_data[block_idx]
+        local_to_rel = self.block_local_to_rel[block_idx]
+        st = indptr[local_idx]
+        ed = indptr[local_idx + 1]
+        if st < ed:
+            row_cols = indices[st:ed]
+            row_vals = data[st:ed]
+            rel_idx = local_to_rel[row_cols]
+            keep = rel_idx >= 0
+            nz_gene_rel_idx = rel_idx[keep].astype(np.int32, copy=False)
+            nz_value = row_vals[keep]
+        else:
+            nz_gene_rel_idx = np.empty((0,), dtype=np.int32)
+            nz_value = np.empty((0,), dtype=np.uint32)
 
         output = (
-            torch.tensor(sample_id_int, dtype=torch.long),
-            torch.tensor(tissue_id_int, dtype=torch.long),
-            torch.tensor(celltype_index, dtype=torch.long),
-            torch.tensor(result, dtype=torch.float32),
+            sample_id_int,
+            tissue_id_int,
+            celltype_index,
+            block_idx,
+            nz_gene_rel_idx,
+            nz_value,
         )
 
         if self.use_cache:
             self.cache[idx] = output
 
         return output
+
+
+class SparseBatchCollator:
+    """
+    Batch-level densification to model-ready tensors:
+    - x_mask: observed genes (bool), shape (B, G)
+    - x_count: observed counts (float32), zeros for unobserved, shape (B, G)
+    """
+
+    def __init__(self, dataset: FastXVerseBatchDataset, num_genes: int):
+        self.dataset = dataset
+        self.num_genes = int(num_genes)
+
+    def __call__(self, batch):
+        bsz = len(batch)
+        x_count = np.zeros((bsz, self.num_genes), dtype=np.float32)
+        x_mask = np.zeros((bsz, self.num_genes), dtype=np.bool_)
+        sample_ids = np.empty((bsz,), dtype=np.int64)
+        tissue_ids = np.empty((bsz,), dtype=np.int64)
+        celltype_ids = np.empty((bsz,), dtype=np.int64)
+
+        for i, (sample_id_int, tissue_id_int, celltype_index, block_idx, nz_gene_rel_idx, nz_value) in enumerate(batch):
+            sample_ids[i] = sample_id_int
+            tissue_ids[i] = tissue_id_int
+            celltype_ids[i] = celltype_index
+
+            observed_global_idx = self.dataset.block_observed_global_idx[block_idx]
+            if observed_global_idx.size > 0:
+                x_mask[i, observed_global_idx] = True
+            if nz_gene_rel_idx.size > 0:
+                x_count[i, observed_global_idx[nz_gene_rel_idx]] = nz_value.astype(np.float32, copy=False)
+
+        return (
+            torch.from_numpy(sample_ids),
+            torch.from_numpy(tissue_ids),
+            torch.from_numpy(celltype_ids),
+            torch.from_numpy(x_count),
+            torch.from_numpy(x_mask),
+        )
 
 
 class BalancedSampleSampler(Sampler):

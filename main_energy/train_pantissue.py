@@ -30,6 +30,7 @@ from main_energy.utils_model import (
     train_gmm_vae_one_epoch,
     evaluate_gmm_vae_one_epoch,
     FastXVerseBatchDataset,
+    SparseBatchCollator,
     build_pair_to_sample_id_and_paths,
     build_cell_type_to_index,
     BalancedSampleSampler,
@@ -137,9 +138,11 @@ def main():
     print("Creating Dataset...")
     ds = FastXVerseBatchDataset(train_pairs, gene_ids, pair_to_idx, cell_type_to_index, pair_to_tissue_id=pair_to_tissue_id)
     val_ds = FastXVerseBatchDataset(val_pairs, gene_ids, pair_to_idx, cell_type_to_index, pair_to_tissue_id=pair_to_tissue_id)
+    train_collator = SparseBatchCollator(ds, num_genes=args.total_gene)
+    val_collator = SparseBatchCollator(val_ds, num_genes=args.total_gene)
     val_loader = DataLoader(
         val_ds, batch_size=args.val_batch_size, num_workers=args.num_workers,
-        pin_memory=True, shuffle=False, drop_last=False
+        pin_memory=True, shuffle=False, drop_last=False, collate_fn=val_collator
     )
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = MaskFiLMGMMVAE(
@@ -197,7 +200,7 @@ def main():
         sampler = BalancedSampleSampler(ds, samples_per_id=args.samples_per_id)
         train_loader = DataLoader(
             ds, batch_size=args.batch_size, num_workers=args.num_workers,
-            pin_memory=True, sampler=sampler, drop_last=True
+            pin_memory=True, sampler=sampler, drop_last=True, collate_fn=train_collator
         )
 
         loss_full, loss_recon, loss_kl, loss_score, loss_contrast = train_gmm_vae_one_epoch(
