@@ -66,6 +66,8 @@ def parse_args():
     parser.add_argument("--last-ckpt-name", default="last_model.pth", help="Filename for last checkpoint.")
     parser.add_argument("--best-ckpt-name", default="best_model.pth", help="Filename for best checkpoint.")
     parser.add_argument("--beta-kl", type=float, default=1.0, help="KL weight.")
+    parser.add_argument("--prior-type", choices=["gmm", "gaussian"], default="gmm",
+                        help="Latent prior type. 'gaussian' uses N(0,I) with closed-form KL.")
     parser.add_argument("--latent-dim", type=int, default=128, help="Latent dim.")
     parser.add_argument("--num-components", type=int, default=16, help="GMM component count K.")
     parser.add_argument("--expr-hidden-dim", type=int, default=1024, help="Expression encoder hidden dim.")
@@ -144,6 +146,7 @@ def main():
         mask_hidden_dim=args.mask_hidden_dim,
         dec_hidden_dim=args.dec_hidden_dim,
         dropout=args.dropout,
+        prior_type=args.prior_type,
     ).to(device)
 
     total_params, trainable_params = count_parameters(model)

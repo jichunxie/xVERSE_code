@@ -153,8 +153,12 @@ class MaskFiLMGMMVAE(nn.Module):
         mask_hidden_dim: int = 512,
         dec_hidden_dim: int = 1024,
         dropout: float = 0.1,
+        prior_type: str = "gmm",
     ):
         super().__init__()
+        if prior_type not in ("gmm", "gaussian"):
+            raise ValueError(f"Unsupported prior_type: {prior_type}")
+        self.prior_type = prior_type
         self.encoder = FiLMMaskEncoder(
             num_genes=num_genes,
             latent_dim=latent_dim,
@@ -209,9 +213,18 @@ class MaskFiLMGMMVAE(nn.Module):
         else:
             recon_loss = poisson_nll_masked(x_count=x_count, rate=rate, mask=recon_mask)
 
-        log_q = gaussian_log_prob_diag(z=z, mu=mu, logvar=logvar)
-        log_p = self.prior.log_prob(z)
-        kl_loss = (log_q - log_p).mean()
+        if self.prior_type == "gaussian":
+            # Closed-form KL(q(z|x)||N(0,I)) for diagonal Gaussian posterior.
+            kl_per_cell = 0.5 * torch.sum(torch.exp(logvar) + mu.pow(2) - 1.0 - logvar, dim=-1)
+            kl_loss = kl_per_cell.mean()
+            log_q = gaussian_log_prob_diag(z=z, mu=mu, logvar=logvar)
+            zero_mu = torch.zeros_like(z)
+            zero_logvar = torch.zeros_like(z)
+            log_p = gaussian_log_prob_diag(z=z, mu=zero_mu, logvar=zero_logvar)
+        else:
+            log_q = gaussian_log_prob_diag(z=z, mu=mu, logvar=logvar)
+            log_p = self.prior.log_prob(z)
+            kl_loss = (log_q - log_p).mean()
         score_loss = torch.zeros((), device=z.device, dtype=z.dtype)
         score_norm_pred = torch.zeros((), device=z.device, dtype=z.dtype)
         score_norm_tgt = torch.zeros((), device=z.device, dtype=z.dtype)
@@ -220,7 +233,11 @@ class MaskFiLMGMMVAE(nn.Module):
             z_for_score = z.detach() if score_detach_z else z
             z_noisy = z_for_score + score_noise_std * torch.randn_like(z_for_score)
             score_pred = self.score_head(z_noisy)
-            score_tgt = self.prior.score(z_noisy).detach()
+            if self.prior_type == "gmm":
+                score_tgt = self.prior.score(z_noisy).detach()
+            else:
+                # score of standard Gaussian N(0, I): grad_z log p(z) = -z
+                score_tgt = (-z_noisy).detach()
             score_loss = F.mse_loss(score_pred, score_tgt)
             score_norm_pred = score_pred.norm(dim=-1).mean()
             score_norm_tgt = score_tgt.norm(dim=-1).mean()
