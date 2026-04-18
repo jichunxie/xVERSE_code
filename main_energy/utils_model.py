@@ -1,5 +1,6 @@
 import math
 import random
+import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List
@@ -410,8 +411,15 @@ def train_gmm_vae_one_epoch(
     loss_fn = model.module.loss if hasattr(model, "module") else model.loss
     total_loss = total_recon = total_kl = total_score = total_contrast = 0.0
     n_cells = 0
+    is_rank0 = (not dist.is_available()) or (not dist.is_initialized()) or (dist.get_rank() == 0)
+    iter_end_t = time.perf_counter()
+    interval_data_t = interval_prep_t = interval_compute_t = interval_step_t = 0.0
+    interval_steps = 0
 
     for batch_idx, (_, _, _, x_count, x_mask) in enumerate(train_loader):
+        step_start_t = time.perf_counter()
+        data_t = step_start_t - iter_end_t
+        prep_start_t = step_start_t
         optimizer.zero_grad(set_to_none=True)
         x_mask_encoder = _random_hide_observed(
             x_mask=x_mask,
@@ -423,10 +431,12 @@ def train_gmm_vae_one_epoch(
         x_count = x_count.to(device, non_blocking=True)
         x_mask = x_mask.to(device, non_blocking=True)
         x_mask_encoder = x_mask_encoder.to(device, non_blocking=True)
+        prep_t = time.perf_counter() - prep_start_t
 
         bsz = x_count.size(0)
         n_cells += bsz
 
+        compute_start_t = time.perf_counter()
         with torch.amp.autocast(device_type='cuda', enabled=scaler.is_enabled()):
             out_fake = loss_fn(
                 x_count=x_count,
@@ -455,20 +465,35 @@ def train_gmm_vae_one_epoch(
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         scaler.step(optimizer)
         scaler.update()
+        compute_t = time.perf_counter() - compute_start_t
 
         total_loss += loss.item() * bsz
         total_recon += recon.item() * bsz
         total_kl += kl.item() * bsz
         total_score += score.item() * bsz
         total_contrast += contrast.item() * bsz
+        step_t = time.perf_counter() - step_start_t
+        iter_end_t = time.perf_counter()
 
-        if (batch_idx + 1) % 100 == 0:
+        interval_data_t += data_t
+        interval_prep_t += prep_t
+        interval_compute_t += compute_t
+        interval_step_t += step_t
+        interval_steps += 1
+
+        if (batch_idx + 1) % 100 == 0 and is_rank0:
             print(
                 f"[Batch {batch_idx + 1}] "
                 f"Loss={loss.item():.4f}, Recon={recon.item():.4f}, KL={kl.item():.4f}, "
                 f"Score={score.item():.4f}, Contrast={contrast.item():.4f}, "
-                f"||s_pred||={out_fake['score_norm_pred'].item():.4f}, ||s_tgt||={out_fake['score_norm_tgt'].item():.4f}"
+                f"||s_pred||={out_fake['score_norm_pred'].item():.4f}, ||s_tgt||={out_fake['score_norm_tgt'].item():.4f}, "
+                f"DataT={interval_data_t / max(interval_steps, 1):.4f}s, "
+                f"PrepT={interval_prep_t / max(interval_steps, 1):.4f}s, "
+                f"ComputeT={interval_compute_t / max(interval_steps, 1):.4f}s, "
+                f"StepT={interval_step_t / max(interval_steps, 1):.4f}s"
             )
+            interval_data_t = interval_prep_t = interval_compute_t = interval_step_t = 0.0
+            interval_steps = 0
 
     if dist.is_available() and dist.is_initialized():
         stats = torch.tensor(
@@ -505,9 +530,16 @@ def evaluate_gmm_vae_one_epoch(
     loss_fn = model.module.loss if hasattr(model, "module") else model.loss
     total_loss = total_recon = total_kl = total_score = total_contrast = 0.0
     n_cells = 0
+    is_rank0 = (not dist.is_available()) or (not dist.is_initialized()) or (dist.get_rank() == 0)
+    iter_end_t = time.perf_counter()
+    interval_data_t = interval_prep_t = interval_compute_t = interval_step_t = 0.0
+    interval_steps = 0
 
     with torch.no_grad():
-        for _, _, _, x_count, x_mask in val_loader:
+        for batch_idx, (_, _, _, x_count, x_mask) in enumerate(val_loader):
+            step_start_t = time.perf_counter()
+            data_t = step_start_t - iter_end_t
+            prep_start_t = step_start_t
             x_mask_encoder = _random_hide_observed(
                 x_mask=x_mask,
                 apply_prob=1.0,
@@ -518,9 +550,11 @@ def evaluate_gmm_vae_one_epoch(
             x_count = x_count.to(device, non_blocking=True)
             x_mask = x_mask.to(device, non_blocking=True)
             x_mask_encoder = x_mask_encoder.to(device, non_blocking=True)
+            prep_t = time.perf_counter() - prep_start_t
             bsz = x_count.size(0)
             n_cells += bsz
 
+            compute_start_t = time.perf_counter()
             out_fake = loss_fn(
                 x_count=x_count,
                 x_mask=x_mask,
@@ -544,6 +578,26 @@ def evaluate_gmm_vae_one_epoch(
             total_kl += out_fake["kl_loss"].item() * bsz
             total_score += out_fake["score_loss"].item() * bsz
             total_contrast += contrast.item() * bsz
+            compute_t = time.perf_counter() - compute_start_t
+            step_t = time.perf_counter() - step_start_t
+            iter_end_t = time.perf_counter()
+
+            interval_data_t += data_t
+            interval_prep_t += prep_t
+            interval_compute_t += compute_t
+            interval_step_t += step_t
+            interval_steps += 1
+
+            if (batch_idx + 1) % 100 == 0 and is_rank0:
+                print(
+                    f"[Val Batch {batch_idx + 1}] "
+                    f"DataT={interval_data_t / max(interval_steps, 1):.4f}s, "
+                    f"PrepT={interval_prep_t / max(interval_steps, 1):.4f}s, "
+                    f"ComputeT={interval_compute_t / max(interval_steps, 1):.4f}s, "
+                    f"StepT={interval_step_t / max(interval_steps, 1):.4f}s"
+                )
+                interval_data_t = interval_prep_t = interval_compute_t = interval_step_t = 0.0
+                interval_steps = 0
 
     if dist.is_available() and dist.is_initialized():
         stats = torch.tensor(
