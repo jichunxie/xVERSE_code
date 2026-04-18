@@ -4,7 +4,7 @@
 #SBATCH --gres=gpu:h200:2
 #SBATCH -c 20                                 
 #SBATCH --mem=200G                        
-#SBATCH -t 70:00:00                            
+#SBATCH -t 12:00:00                            
 #SBATCH -J h200
 #SBATCH --output=/hpc/group/xielab/xj58/sbatch_output/%x_output_%j.txt  
 #SBATCH --error=/hpc/group/xielab/xj58/sbatch_output/%x_error_%j.txt  
