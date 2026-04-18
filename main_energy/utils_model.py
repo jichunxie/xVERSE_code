@@ -304,6 +304,23 @@ def poisson_nll_masked(x_count: torch.Tensor, rate: torch.Tensor, mask: torch.Te
     return nll.sum() / denom
 
 
+def bidirectional_contrastive_loss(z_real: torch.Tensor, z_fake: torch.Tensor, temperature: float = 0.1) -> torch.Tensor:
+    """
+    Symmetric InfoNCE:
+    - z_real[i] <-> z_fake[i] is a positive pair
+    - other samples in batch are negatives
+    """
+    if z_real.size(0) <= 1:
+        return torch.zeros((), device=z_real.device, dtype=z_real.dtype)
+    z1 = F.normalize(z_real, dim=-1)
+    z2 = F.normalize(z_fake, dim=-1)
+    logits = torch.matmul(z1, z2.transpose(0, 1)) / max(temperature, 1e-6)
+    labels = torch.arange(z1.size(0), device=z1.device)
+    loss_12 = F.cross_entropy(logits, labels)
+    loss_21 = F.cross_entropy(logits.transpose(0, 1), labels)
+    return 0.5 * (loss_12 + loss_21)
+
+
 # =========================
 # Training / evaluation (for GMM-VAE)
 # =========================
@@ -386,10 +403,12 @@ def train_gmm_vae_one_epoch(
     lambda_score=0.0,
     score_noise_std=0.1,
     score_detach_z=True,
+    lambda_contrast=0.0,
+    contrast_temp=0.1,
 ):
     model.train()
     loss_fn = model.module.loss if hasattr(model, "module") else model.loss
-    total_loss = total_recon = total_kl = total_score = 0.0
+    total_loss = total_recon = total_kl = total_score = total_contrast = 0.0
     n_cells = 0
 
     for batch_idx, (_, _, _, value) in enumerate(train_loader):
@@ -408,7 +427,7 @@ def train_gmm_vae_one_epoch(
         n_cells += bsz
 
         with torch.amp.autocast(device_type='cuda', enabled=scaler.is_enabled()):
-            out = loss_fn(
+            out_fake = loss_fn(
                 x_count=x_count,
                 x_mask=x_mask,
                 beta=beta_kl,
@@ -418,10 +437,17 @@ def train_gmm_vae_one_epoch(
                 score_noise_std=score_noise_std,
                 score_detach_z=score_detach_z,
             )
-            loss = out["loss"]
-            recon = out["recon_loss"]
-            kl = out["kl_loss"]
-            score = out["score_loss"]
+            out_real = model(x_count, x_mask)
+            contrast = bidirectional_contrastive_loss(
+                z_real=out_real["z"],
+                z_fake=out_fake["z"],
+                temperature=contrast_temp,
+            )
+
+            loss = out_fake["loss"] + lambda_contrast * contrast
+            recon = out_fake["recon_loss"]
+            kl = out_fake["kl_loss"]
+            score = out_fake["score_loss"]
 
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
@@ -433,19 +459,26 @@ def train_gmm_vae_one_epoch(
         total_recon += recon.item() * bsz
         total_kl += kl.item() * bsz
         total_score += score.item() * bsz
+        total_contrast += contrast.item() * bsz
 
         if (batch_idx + 1) % 100 == 0:
             print(
                 f"[Batch {batch_idx + 1}] "
                 f"Loss={loss.item():.4f}, Recon={recon.item():.4f}, KL={kl.item():.4f}, "
-                f"Score={score.item():.4f}, "
-                f"||s_pred||={out['score_norm_pred'].item():.4f}, ||s_tgt||={out['score_norm_tgt'].item():.4f}"
+                f"Score={score.item():.4f}, Contrast={contrast.item():.4f}, "
+                f"||s_pred||={out_fake['score_norm_pred'].item():.4f}, ||s_tgt||={out_fake['score_norm_tgt'].item():.4f}"
             )
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
-    return total_loss / n_cells, total_recon / n_cells, total_kl / n_cells, total_score / n_cells
+    return (
+        total_loss / n_cells,
+        total_recon / n_cells,
+        total_kl / n_cells,
+        total_score / n_cells,
+        total_contrast / n_cells,
+    )
 
 
 def evaluate_gmm_vae_one_epoch(
@@ -457,35 +490,59 @@ def evaluate_gmm_vae_one_epoch(
     lambda_score=0.0,
     score_noise_std=0.1,
     score_detach_z=True,
+    lambda_contrast=0.0,
+    contrast_temp=0.1,
 ):
     model.eval()
     loss_fn = model.module.loss if hasattr(model, "module") else model.loss
-    total_loss = total_recon = total_kl = total_score = 0.0
+    total_loss = total_recon = total_kl = total_score = total_contrast = 0.0
     n_cells = 0
 
     with torch.no_grad():
         for _, _, _, value in val_loader:
             value = value.to(device, non_blocking=True)
             x_count, x_mask = _build_vae_inputs(value)
+            x_mask_encoder = _random_hide_observed(
+                x_mask=x_mask,
+                apply_prob=1.0,
+                policy="xverse",
+                min_frac=0.1,
+                max_frac=0.5,
+            )
             bsz = x_count.size(0)
             n_cells += bsz
 
-            out = loss_fn(
+            out_fake = loss_fn(
                 x_count=x_count,
                 x_mask=x_mask,
                 beta=beta_kl,
-                encoder_mask=x_mask,
+                encoder_mask=x_mask_encoder,
                 recon_mask=x_mask if recon_observed_only else None,
                 lambda_score=lambda_score,
                 score_noise_std=score_noise_std,
                 score_detach_z=score_detach_z,
             )
-            total_loss += out["loss"].item() * bsz
-            total_recon += out["recon_loss"].item() * bsz
-            total_kl += out["kl_loss"].item() * bsz
-            total_score += out["score_loss"].item() * bsz
+            out_real = model(x_count, x_mask)
+            contrast = bidirectional_contrastive_loss(
+                z_real=out_real["z"],
+                z_fake=out_fake["z"],
+                temperature=contrast_temp,
+            )
+            loss = out_fake["loss"] + lambda_contrast * contrast
 
-    return total_loss / n_cells, total_recon / n_cells, total_kl / n_cells, total_score / n_cells
+            total_loss += loss.item() * bsz
+            total_recon += out_fake["recon_loss"].item() * bsz
+            total_kl += out_fake["kl_loss"].item() * bsz
+            total_score += out_fake["score_loss"].item() * bsz
+            total_contrast += contrast.item() * bsz
+
+    return (
+        total_loss / n_cells,
+        total_recon / n_cells,
+        total_kl / n_cells,
+        total_score / n_cells,
+        total_contrast / n_cells,
+    )
 
 
 # =========================

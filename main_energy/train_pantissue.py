@@ -92,6 +92,10 @@ def parse_args():
                         help="Detach z before score head to prevent score loss from updating encoder.")
     parser.add_argument("--no-score-detach-z", dest="score_detach_z", action="store_false",
                         help="Allow score loss to update encoder (not recommended for your current objective).")
+    parser.add_argument("--lambda-contrast", type=float, default=0.0,
+                        help="Weight of contrastive loss between real-mask and fake-mask views.")
+    parser.add_argument("--contrast-temp", type=float, default=0.1,
+                        help="Temperature for bidirectional InfoNCE contrastive loss.")
     return parser.parse_args()
 
 
@@ -196,7 +200,7 @@ def main():
             pin_memory=True, sampler=sampler, drop_last=True
         )
 
-        loss_full, loss_recon, loss_kl, loss_score = train_gmm_vae_one_epoch(
+        loss_full, loss_recon, loss_kl, loss_score, loss_contrast = train_gmm_vae_one_epoch(
             model=model,
             optimizer=optimizer,
             scaler=scaler,
@@ -211,13 +215,16 @@ def main():
             lambda_score=args.lambda_score,
             score_noise_std=args.score_noise_std,
             score_detach_z=args.score_detach_z,
+            lambda_contrast=args.lambda_contrast,
+            contrast_temp=args.contrast_temp,
         )
         print(
             f"[Epoch {epoch_id}] "
-            f"Loss={loss_full:.4f}, Recon={loss_recon:.4f}, KL={loss_kl:.4f}, Score={loss_score:.4f}"
+            f"Loss={loss_full:.4f}, Recon={loss_recon:.4f}, KL={loss_kl:.4f}, "
+            f"Score={loss_score:.4f}, Contrast={loss_contrast:.4f}"
         )
 
-        val_loss_full, val_loss_recon, val_loss_kl, val_loss_score = evaluate_gmm_vae_one_epoch(
+        val_loss_full, val_loss_recon, val_loss_kl, val_loss_score, val_loss_contrast = evaluate_gmm_vae_one_epoch(
             model=model,
             val_loader=val_loader,
             device=device,
@@ -226,10 +233,13 @@ def main():
             lambda_score=args.lambda_score,
             score_noise_std=args.score_noise_std,
             score_detach_z=args.score_detach_z,
+            lambda_contrast=args.lambda_contrast,
+            contrast_temp=args.contrast_temp,
         )
         print(
             f"[Epoch {epoch_id}] Validation Loss: "
-            f"Loss={val_loss_full:.4f}, Recon={val_loss_recon:.4f}, KL={val_loss_kl:.4f}, Score={val_loss_score:.4f}"
+            f"Loss={val_loss_full:.4f}, Recon={val_loss_recon:.4f}, KL={val_loss_kl:.4f}, "
+            f"Score={val_loss_score:.4f}, Contrast={val_loss_contrast:.4f}"
         )
         val_metric = val_loss_full
 

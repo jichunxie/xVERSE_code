@@ -26,7 +26,7 @@ stdbuf -oL -eL python -m main_energy.train_pantissue \
     --gene-ids-path "/hpc/group/xielab/xj58/xVerseAtlas/npz_tissue_dataset_donor/ensg_keys_high_quality.txt" \
     --result-dir "/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_kidney_h200" \
     --use-tissue "kidney" \
-    --num-epochs 50 \
+    --num-epochs 100 \
     --batch-size 512 \
     --val-batch-size 512 \
     --num-workers 20 \
