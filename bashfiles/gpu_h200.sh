@@ -22,7 +22,7 @@ echo ">>> Running Task: Train GMM-VAE (kidney only)"
 stdbuf -oL -eL python -m main_energy.train_pantissue \
     --data-root "/hpc/group/xielab/xj58/xVerseAtlas/npz_tissue_dataset_donor" \
     --summary-csv "/hpc/group/xielab/xj58/xVerseAtlas/npz_tissue_dataset_donor/pantissue_full_updated.csv" \
-    --cell-type-csv "/hpc/group/xielab/xj58/sparest_code/standard_type/cellxgene_cell_type_mapped.csv" \
+    --cell-type-csv "/hpc/group/xielab/xj58/xVerseAtlas/npz_tissue_dataset_donor/cellxgene_cell_type_mapped.csv" \
     --gene-ids-path "/hpc/group/xielab/xj58/xVerseAtlas/npz_tissue_dataset_donor/ensg_keys_high_quality.txt" \
     --result-dir "/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_kidney_h200" \
     --use-tissue "kidney" \
