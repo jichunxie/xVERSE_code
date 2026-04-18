@@ -1,9 +1,8 @@
-import gc
 import math
 import random
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
 import numpy as np
 import pandas as pd
@@ -11,6 +10,7 @@ import scipy.sparse as sp
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.distributed as dist
 from torch.utils.data import Dataset, Sampler
 
 
@@ -413,8 +413,6 @@ def train_gmm_vae_one_epoch(
 
     for batch_idx, (_, _, _, x_count, x_mask) in enumerate(train_loader):
         optimizer.zero_grad(set_to_none=True)
-        x_count = x_count.to(device, non_blocking=True)
-        x_mask = x_mask.to(device, non_blocking=True)
         x_mask_encoder = _random_hide_observed(
             x_mask=x_mask,
             apply_prob=mask_aug_prob,
@@ -422,6 +420,9 @@ def train_gmm_vae_one_epoch(
             min_frac=mask_aug_min_frac,
             max_frac=mask_aug_max_frac,
         )
+        x_count = x_count.to(device, non_blocking=True)
+        x_mask = x_mask.to(device, non_blocking=True)
+        x_mask_encoder = x_mask_encoder.to(device, non_blocking=True)
 
         bsz = x_count.size(0)
         n_cells += bsz
@@ -468,9 +469,16 @@ def train_gmm_vae_one_epoch(
                 f"Score={score.item():.4f}, Contrast={contrast.item():.4f}, "
                 f"||s_pred||={out_fake['score_norm_pred'].item():.4f}, ||s_tgt||={out_fake['score_norm_tgt'].item():.4f}"
             )
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+
+    if dist.is_available() and dist.is_initialized():
+        stats = torch.tensor(
+            [total_loss, total_recon, total_kl, total_score, total_contrast, float(n_cells)],
+            device=device,
+            dtype=torch.float64,
+        )
+        dist.all_reduce(stats, op=dist.ReduceOp.SUM)
+        total_loss, total_recon, total_kl, total_score, total_contrast, n_cells = stats.tolist()
+        n_cells = max(float(n_cells), 1.0)
 
     return (
         total_loss / n_cells,
@@ -500,8 +508,6 @@ def evaluate_gmm_vae_one_epoch(
 
     with torch.no_grad():
         for _, _, _, x_count, x_mask in val_loader:
-            x_count = x_count.to(device, non_blocking=True)
-            x_mask = x_mask.to(device, non_blocking=True)
             x_mask_encoder = _random_hide_observed(
                 x_mask=x_mask,
                 apply_prob=1.0,
@@ -509,6 +515,9 @@ def evaluate_gmm_vae_one_epoch(
                 min_frac=0.1,
                 max_frac=0.5,
             )
+            x_count = x_count.to(device, non_blocking=True)
+            x_mask = x_mask.to(device, non_blocking=True)
+            x_mask_encoder = x_mask_encoder.to(device, non_blocking=True)
             bsz = x_count.size(0)
             n_cells += bsz
 
@@ -535,6 +544,16 @@ def evaluate_gmm_vae_one_epoch(
             total_kl += out_fake["kl_loss"].item() * bsz
             total_score += out_fake["score_loss"].item() * bsz
             total_contrast += contrast.item() * bsz
+
+    if dist.is_available() and dist.is_initialized():
+        stats = torch.tensor(
+            [total_loss, total_recon, total_kl, total_score, total_contrast, float(n_cells)],
+            device=device,
+            dtype=torch.float64,
+        )
+        dist.all_reduce(stats, op=dist.ReduceOp.SUM)
+        total_loss, total_recon, total_kl, total_score, total_contrast, n_cells = stats.tolist()
+        n_cells = max(float(n_cells), 1.0)
 
     return (
         total_loss / n_cells,
@@ -732,7 +751,7 @@ class SparseBatchCollator:
 
 
 class BalancedSampleSampler(Sampler):
-    def __init__(self, dataset, samples_per_id=None):
+    def __init__(self, dataset, samples_per_id=None, seed: int = 0):
         self.dataset = dataset
         self.samples_by_id = defaultdict(list)
         for idx, (_, _, sample_id, _) in enumerate(dataset.index_map):
@@ -740,21 +759,81 @@ class BalancedSampleSampler(Sampler):
 
         self.sample_ids = list(self.samples_by_id.keys())
         self.samples_per_id = samples_per_id or min(len(v) for v in self.samples_by_id.values())
+        self.seed = int(seed)
+        self.epoch = 0
+
+    def set_epoch(self, epoch: int):
+        self.epoch = int(epoch)
 
     def __iter__(self):
+        rng = random.Random(self.seed + self.epoch)
         indices = []
         for sample_id in self.sample_ids:
             candidates = self.samples_by_id[sample_id]
             if len(candidates) >= self.samples_per_id:
-                selected = random.sample(candidates, self.samples_per_id)
+                selected = rng.sample(candidates, self.samples_per_id)
             else:
-                selected = random.choices(candidates, k=self.samples_per_id)
+                selected = [candidates[rng.randrange(len(candidates))] for _ in range(self.samples_per_id)]
             indices.extend(selected)
-        random.shuffle(indices)
+        rng.shuffle(indices)
         return iter(indices)
 
     def __len__(self):
         return self.samples_per_id * len(self.sample_ids)
+
+
+class DistributedBalancedSampler(Sampler):
+    def __init__(self, dataset, samples_per_id=None, num_replicas=None, rank=None, seed: int = 0):
+        if num_replicas is None:
+            if not dist.is_available() or not dist.is_initialized():
+                raise RuntimeError("Distributed package is required for DistributedBalancedSampler")
+            num_replicas = dist.get_world_size()
+        if rank is None:
+            if not dist.is_available() or not dist.is_initialized():
+                raise RuntimeError("Distributed package is required for DistributedBalancedSampler")
+            rank = dist.get_rank()
+
+        self.dataset = dataset
+        self.num_replicas = int(num_replicas)
+        self.rank = int(rank)
+        self.seed = int(seed)
+        self.epoch = 0
+
+        self.samples_by_id = defaultdict(list)
+        for idx, (_, _, sample_id, _) in enumerate(dataset.index_map):
+            self.samples_by_id[sample_id].append(idx)
+        self.sample_ids = list(self.samples_by_id.keys())
+        self.samples_per_id = samples_per_id or min(len(v) for v in self.samples_by_id.values())
+
+        self.global_num_samples = self.samples_per_id * len(self.sample_ids)
+        self.num_samples = int(math.ceil(self.global_num_samples / self.num_replicas))
+        self.total_size = self.num_samples * self.num_replicas
+
+    def set_epoch(self, epoch: int):
+        self.epoch = int(epoch)
+
+    def __iter__(self):
+        rng = random.Random(self.seed + self.epoch)
+        indices = []
+        for sample_id in self.sample_ids:
+            candidates = self.samples_by_id[sample_id]
+            if len(candidates) >= self.samples_per_id:
+                selected = rng.sample(candidates, self.samples_per_id)
+            else:
+                selected = [candidates[rng.randrange(len(candidates))] for _ in range(self.samples_per_id)]
+            indices.extend(selected)
+        rng.shuffle(indices)
+
+        if len(indices) < self.total_size:
+            indices.extend(indices[: self.total_size - len(indices)])
+        else:
+            indices = indices[: self.total_size]
+
+        rank_indices = indices[self.rank:self.total_size:self.num_replicas]
+        return iter(rank_indices)
+
+    def __len__(self):
+        return self.num_samples
 
 
 def build_cell_type_to_index(csv_path):

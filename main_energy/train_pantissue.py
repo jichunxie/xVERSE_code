@@ -19,8 +19,10 @@ import random
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
+from torch.nn.parallel import DistributedDataParallel as DDP
+import torch.distributed as dist
 from torch.amp import GradScaler
-import gc
 import time
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
@@ -34,6 +36,7 @@ from main_energy.utils_model import (
     build_pair_to_sample_id_and_paths,
     build_cell_type_to_index,
     BalancedSampleSampler,
+    DistributedBalancedSampler,
 )
 
 
@@ -56,6 +59,11 @@ def parse_args():
     parser.add_argument("--batch-size", type=int, default=512, help="Training batch size.")
     parser.add_argument("--val-batch-size", type=int, default=512, help="Validation batch size.")
     parser.add_argument("--num-workers", type=int, default=20, help="DataLoader workers for both train/val.")
+    parser.add_argument("--prefetch-factor", type=int, default=2, help="DataLoader prefetch factor (when num_workers>0).")
+    parser.add_argument("--persistent-workers", action="store_true", default=True,
+                        help="Keep DataLoader workers alive across epochs.")
+    parser.add_argument("--no-persistent-workers", dest="persistent_workers", action="store_false",
+                        help="Disable persistent DataLoader workers.")
     parser.add_argument("--samples-per-id", type=int, default=1000, help="Samples drawn per id in sampler.")
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate.")
     parser.add_argument("--weight-decay", type=float, default=1e-5, help="Weight decay.")
@@ -97,6 +105,12 @@ def parse_args():
                         help="Weight of contrastive loss between real-mask and fake-mask views.")
     parser.add_argument("--contrast-temp", type=float, default=0.1,
                         help="Temperature for bidirectional InfoNCE contrastive loss.")
+    parser.add_argument("--ddp", action="store_true", default=True,
+                        help="Use torch DistributedDataParallel when launched with torchrun.")
+    parser.add_argument("--no-ddp", dest="ddp", action="store_false",
+                        help="Disable DistributedDataParallel.")
+    parser.add_argument("--dist-backend", choices=["nccl", "gloo"], default="nccl",
+                        help="Distributed backend for DDP.")
     return parser.parse_args()
 
 
@@ -115,9 +129,39 @@ def count_parameters(model):
     return total_params, trainable_params
 
 
+def setup_distributed(args):
+    if not args.ddp:
+        return False, 0, 1, 0
+    if "RANK" not in os.environ or "WORLD_SIZE" not in os.environ:
+        # Fallback to non-DDP when not launched by torchrun.
+        return False, 0, 1, 0
+
+    rank = int(os.environ["RANK"])
+    world_size = int(os.environ["WORLD_SIZE"])
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    backend = args.dist_backend
+    if backend == "nccl" and not torch.cuda.is_available():
+        backend = "gloo"
+    if torch.cuda.is_available():
+        torch.cuda.set_device(local_rank)
+    dist.init_process_group(backend=backend, init_method="env://")
+    return True, rank, world_size, local_rank
+
+
+def is_main_process(rank: int) -> bool:
+    return rank == 0
+
+
 def main():
     args = parse_args()
-    set_seed(args.seed)
+    ddp_enabled, rank, world_size, local_rank = setup_distributed(args)
+    if args.ddp and not ddp_enabled:
+        print("[Info] --ddp is enabled by default, but torchrun env was not found. Falling back to single-process mode.")
+    set_seed(args.seed + rank)
+
+    def log(msg: str):
+        if is_main_process(rank):
+            print(msg)
 
     gene_ids_path = args.gene_ids_path or os.path.join(args.data_root, "ensg_keys_high_quality.txt")
     summary_csv_path = args.summary_csv or os.path.join(args.data_root, "pantissue_full_updated.csv")
@@ -132,19 +176,54 @@ def main():
     cell_type_to_index = build_cell_type_to_index(args.cell_type_csv)
     gene_ids = load_gene_ids(gene_ids_path)
     if args.total_gene != len(gene_ids):
-        print(f"[Info] Override total_gene from {args.total_gene} to {len(gene_ids)} based on gene id file.")
+        log(f"[Info] Override total_gene from {args.total_gene} to {len(gene_ids)} based on gene id file.")
         args.total_gene = len(gene_ids)
 
-    print("Creating Dataset...")
+    log("Creating Dataset...")
     ds = FastXVerseBatchDataset(train_pairs, gene_ids, pair_to_idx, cell_type_to_index, pair_to_tissue_id=pair_to_tissue_id)
     val_ds = FastXVerseBatchDataset(val_pairs, gene_ids, pair_to_idx, cell_type_to_index, pair_to_tissue_id=pair_to_tissue_id)
     train_collator = SparseBatchCollator(ds, num_genes=args.total_gene)
     val_collator = SparseBatchCollator(val_ds, num_genes=args.total_gene)
+
+    loader_kwargs = dict(num_workers=args.num_workers, pin_memory=True)
+    if args.num_workers > 0:
+        loader_kwargs["prefetch_factor"] = args.prefetch_factor
+        loader_kwargs["persistent_workers"] = args.persistent_workers
+
+    val_sampler = DistributedSampler(val_ds, num_replicas=world_size, rank=rank, shuffle=False) if ddp_enabled else None
     val_loader = DataLoader(
-        val_ds, batch_size=args.val_batch_size, num_workers=args.num_workers,
-        pin_memory=True, shuffle=False, drop_last=False, collate_fn=val_collator
+        val_ds,
+        batch_size=args.val_batch_size,
+        shuffle=False if val_sampler is None else False,
+        sampler=val_sampler,
+        drop_last=False,
+        collate_fn=val_collator,
+        **loader_kwargs,
     )
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    if ddp_enabled:
+        train_sampler = DistributedBalancedSampler(
+            ds,
+            samples_per_id=args.samples_per_id,
+            num_replicas=world_size,
+            rank=rank,
+            seed=args.seed,
+        )
+    else:
+        train_sampler = BalancedSampleSampler(ds, samples_per_id=args.samples_per_id, seed=args.seed)
+    train_loader = DataLoader(
+        ds,
+        batch_size=args.batch_size,
+        sampler=train_sampler,
+        drop_last=True,
+        collate_fn=train_collator,
+        **loader_kwargs,
+    )
+
+    if torch.cuda.is_available():
+        device = torch.device(f"cuda:{local_rank}" if ddp_enabled else "cuda")
+    else:
+        device = torch.device("cpu")
     model = MaskFiLMGMMVAE(
         num_genes=args.total_gene,
         latent_dim=args.latent_dim,
@@ -157,11 +236,13 @@ def main():
     ).to(device)
 
     total_params, trainable_params = count_parameters(model)
-    print(f"Total parameters: {total_params:,}")
-    print(f"Trainable parameters: {trainable_params:,}")
+    log(f"Total parameters: {total_params:,}")
+    log(f"Trainable parameters: {trainable_params:,}")
 
-    if torch.cuda.device_count() > 1:
-        print(f"Using {torch.cuda.device_count()} GPUs.")
+    if ddp_enabled:
+        model = DDP(model, device_ids=[local_rank] if torch.cuda.is_available() else None)
+    elif torch.cuda.device_count() > 1:
+        log(f"Using {torch.cuda.device_count()} GPUs.")
         model = torch.nn.DataParallel(model)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
@@ -180,7 +261,8 @@ def main():
     best_val_metric = float("inf")
 
     if os.path.exists(ckpt_path):
-        checkpoint = torch.load(ckpt_path)
+        map_location = {"cuda:%d" % 0: "cuda:%d" % local_rank} if (ddp_enabled and torch.cuda.is_available()) else device
+        checkpoint = torch.load(ckpt_path, map_location=map_location)
         model.load_state_dict(checkpoint["model_state_dict"])
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         start_round = checkpoint["epoch"] + 1
@@ -189,19 +271,17 @@ def main():
         if "scheduler_state_dict" in checkpoint:
             scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
 
-        print(f"[Resume] Loaded checkpoint from epoch {checkpoint['epoch']}, best_val_metric={best_val_metric:.4f}")
+        log(f"[Resume] Loaded checkpoint from epoch {checkpoint['epoch']}, best_val_metric={best_val_metric:.4f}")
 
     epoch_id = start_round
 
     while epoch_id <= args.num_epochs:
         start_time = time.time()
-        print(f"\n[Epoch {epoch_id}] Starting...")
+        log(f"\n[Epoch {epoch_id}] Starting...")
 
-        sampler = BalancedSampleSampler(ds, samples_per_id=args.samples_per_id)
-        train_loader = DataLoader(
-            ds, batch_size=args.batch_size, num_workers=args.num_workers,
-            pin_memory=True, sampler=sampler, drop_last=True, collate_fn=train_collator
-        )
+        train_sampler.set_epoch(epoch_id)
+        if val_sampler is not None:
+            val_sampler.set_epoch(epoch_id)
 
         loss_full, loss_recon, loss_kl, loss_score, loss_contrast = train_gmm_vae_one_epoch(
             model=model,
@@ -221,7 +301,7 @@ def main():
             lambda_contrast=args.lambda_contrast,
             contrast_temp=args.contrast_temp,
         )
-        print(
+        log(
             f"[Epoch {epoch_id}] "
             f"Loss={loss_full:.4f}, Recon={loss_recon:.4f}, KL={loss_kl:.4f}, "
             f"Score={loss_score:.4f}, Contrast={loss_contrast:.4f}"
@@ -239,7 +319,7 @@ def main():
             lambda_contrast=args.lambda_contrast,
             contrast_temp=args.contrast_temp,
         )
-        print(
+        log(
             f"[Epoch {epoch_id}] Validation Loss: "
             f"Loss={val_loss_full:.4f}, Recon={val_loss_recon:.4f}, KL={val_loss_kl:.4f}, "
             f"Score={val_loss_score:.4f}, Contrast={val_loss_contrast:.4f}"
@@ -248,9 +328,9 @@ def main():
 
         scheduler.step(val_metric)
         current_lr = optimizer.param_groups[0]['lr']
-        print(f"[Epoch {epoch_id}] Current Learning Rate: {current_lr:.6f}")
+        log(f"[Epoch {epoch_id}] Current Learning Rate: {current_lr:.6f}")
 
-        if val_metric < best_val_metric:
+        if val_metric < best_val_metric and is_main_process(rank):
             best_val_metric = val_metric
             torch.save({
                 "epoch": epoch_id,
@@ -260,24 +340,24 @@ def main():
                 "best_val_metric": best_val_metric,
                 "args": vars(args),
             }, best_ckpt_path)
-            print(f"[Best Model] Updated at epoch {epoch_id} with metric={val_metric:.4f}")
+            log(f"[Best Model] Updated at epoch {epoch_id} with metric={val_metric:.4f}")
 
-        torch.save({
-            "epoch": epoch_id,
-            "model_state_dict": model.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
-            "scheduler_state_dict": scheduler.state_dict(),
-            "best_val_metric": best_val_metric,
-            "args": vars(args),
-        }, ckpt_path)
-        print(f"[Checkpoint] Saved as {args.last_ckpt_name} at epoch {epoch_id}")
+        if is_main_process(rank):
+            torch.save({
+                "epoch": epoch_id,
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "scheduler_state_dict": scheduler.state_dict(),
+                "best_val_metric": best_val_metric,
+                "args": vars(args),
+            }, ckpt_path)
+            log(f"[Checkpoint] Saved as {args.last_ckpt_name} at epoch {epoch_id}")
 
-        del train_loader
-        gc.collect()
-        torch.cuda.empty_cache()
-
-        print(f"[Epoch {epoch_id}] Time elapsed: {time.time() - start_time:.2f}s")
+        log(f"[Epoch {epoch_id}] Time elapsed: {time.time() - start_time:.2f}s")
         epoch_id += 1
+
+    if ddp_enabled:
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":
