@@ -447,7 +447,7 @@ def train_gmm_vae_one_epoch(
     score_detach_z=True,
     lambda_contrast=0.0,
     contrast_temp=0.1,
-    lambda_real_recon=0.1,
+    lambda_real_recon=0.0,
 ):
     model.train()
     loss_fn = model.module.loss if hasattr(model, "module") else model.loss
@@ -533,16 +533,23 @@ def train_gmm_vae_one_epoch(
         interval_steps += 1
 
         if (batch_idx + 1) % 100 == 0 and is_rank0:
-            print(
+            msg = (
                 f"[Batch {batch_idx + 1}] "
                 f"Loss={loss.item():.4f}, Recon={recon.item():.4f}, KL={kl.item():.4f}, "
-                f"Score={score.item():.4f}, Contrast={contrast.item():.4f}, RealRecon={real_recon.item():.4f}, "
-                f"||s_pred||={out_fake['score_norm_pred'].item():.4f}, ||s_tgt||={out_fake['score_norm_tgt'].item():.4f}, "
+                f"Score={score.item():.4f}"
+            )
+            if lambda_contrast > 0:
+                msg += f", Contrast={contrast.item():.4f}"
+            if lambda_real_recon > 0:
+                msg += f", RealRecon={real_recon.item():.4f}"
+            msg += (
+                f", ||s_pred||={out_fake['score_norm_pred'].item():.4f}, ||s_tgt||={out_fake['score_norm_tgt'].item():.4f}, "
                 f"DataT={interval_data_t / max(interval_steps, 1):.4f}s, "
                 f"PrepT={interval_prep_t / max(interval_steps, 1):.4f}s, "
                 f"ComputeT={interval_compute_t / max(interval_steps, 1):.4f}s, "
                 f"StepT={interval_step_t / max(interval_steps, 1):.4f}s"
             )
+            print(msg)
             interval_data_t = interval_prep_t = interval_compute_t = interval_step_t = 0.0
             interval_steps = 0
 
@@ -576,7 +583,7 @@ def evaluate_gmm_vae_one_epoch(
     score_detach_z=True,
     lambda_contrast=0.0,
     contrast_temp=0.1,
-    lambda_real_recon=0.1,
+    lambda_real_recon=0.0,
 ):
     model.eval()
     loss_fn = model.module.loss if hasattr(model, "module") else model.loss

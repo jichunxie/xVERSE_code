@@ -107,7 +107,7 @@ def parse_args():
                         help="Weight of contrastive loss between real-mask and fake-mask views.")
     parser.add_argument("--contrast-temp", type=float, default=0.1,
                         help="Temperature for bidirectional InfoNCE contrastive loss.")
-    parser.add_argument("--lambda-real-recon", type=float, default=0.1,
+    parser.add_argument("--lambda-real-recon", type=float, default=0.0,
                         help="Weight of real-mask reconstruction loss term.")
     parser.add_argument("--ddp", action="store_true", default=True,
                         help="Use torch DistributedDataParallel when launched with torchrun.")
@@ -336,11 +336,14 @@ def main():
             contrast_temp=args.contrast_temp,
             lambda_real_recon=args.lambda_real_recon,
         )
-        log(
+        train_msg = (
             f"[Epoch {epoch_id}] "
             f"Loss={loss_full:.4f}, Recon={loss_recon:.4f}, KL={loss_kl:.4f}, "
-            f"Score={loss_score:.4f}, Contrast={loss_contrast:.4f}"
+            f"Score={loss_score:.4f}"
         )
+        if args.lambda_contrast > 0:
+            train_msg += f", Contrast={loss_contrast:.4f}"
+        log(train_msg)
 
         val_loss_full, val_loss_recon, val_loss_kl, val_loss_score, val_loss_contrast = evaluate_gmm_vae_one_epoch(
             model=model,
@@ -355,11 +358,14 @@ def main():
             contrast_temp=args.contrast_temp,
             lambda_real_recon=args.lambda_real_recon,
         )
-        log(
+        val_msg = (
             f"[Epoch {epoch_id}] Validation Loss: "
             f"Loss={val_loss_full:.4f}, Recon={val_loss_recon:.4f}, KL={val_loss_kl:.4f}, "
-            f"Score={val_loss_score:.4f}, Contrast={val_loss_contrast:.4f}"
+            f"Score={val_loss_score:.4f}"
         )
+        if args.lambda_contrast > 0:
+            val_msg += f", Contrast={val_loss_contrast:.4f}"
+        log(val_msg)
         val_metric = val_loss_full
 
         scheduler.step(val_metric)

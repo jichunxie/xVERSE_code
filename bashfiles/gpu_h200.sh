@@ -24,8 +24,7 @@ stdbuf -oL -eL torchrun --standalone --nproc_per_node=2 -m main_energy.train_pan
     --summary-csv "/hpc/group/xielab/xj58/xVerseAtlas/npz_tissue_dataset_donor/pantissue_full_updated.csv" \
     --cell-type-csv "/hpc/group/xielab/xj58/xVerseAtlas/npz_tissue_dataset_donor/cellxgene_cell_type_mapped.csv" \
     --gene-ids-path "/hpc/group/xielab/xj58/xVerseAtlas/npz_tissue_dataset_donor/ensg_keys_high_quality.txt" \
-    --result-dir "/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_kidney_h200" \
-    --use-tissue "kidney" \
+    --result-dir "/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_all_tissue_h200" \
     --num-epochs 100 \
     --batch-size 512 \
     --val-batch-size 512 \
@@ -48,6 +47,6 @@ stdbuf -oL -eL torchrun --standalone --nproc_per_node=2 -m main_energy.train_pan
     --mask-aug-max-frac 0.5 \
     --lambda-score 1 \
     --score-noise-std 0.1 \
-    --lambda-contrast 1.0 \
-    --lambda-real-recon 0.1 \
+    --lambda-contrast 0.0 \
+    --lambda-real-recon 0.0 \
     --contrast-temp 0.3
