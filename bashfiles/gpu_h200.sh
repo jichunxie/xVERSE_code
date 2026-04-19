@@ -46,7 +46,7 @@ stdbuf -oL -eL torchrun --standalone --nproc_per_node=2 -m main_energy.train_pan
     --mask-aug-policy xverse \
     --mask-aug-min-frac 0.1 \
     --mask-aug-max-frac 0.5 \
-    --lambda-score 0.5 \
+    --lambda-score 1 \
     --score-noise-std 0.1 \
-    --lambda-contrast 0.0 \
+    --lambda-contrast 1.0 \
     --contrast-temp 0.1
