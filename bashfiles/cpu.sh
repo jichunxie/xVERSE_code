@@ -3,7 +3,7 @@
 #SBATCH -A biostat                           
 #SBATCH -c 30                                  
 #SBATCH --mem=200G                        
-#SBATCH -t 01:00:00                            
+#SBATCH -t 05:00:00                            
 #SBATCH -J bios_cpu
 #SBATCH --output=/hpc/group/xielab/xj58/sbatch_output/%x_output_%j.txt  
 #SBATCH --error=/hpc/group/xielab/xj58/sbatch_output/%x_error_%j.txt  

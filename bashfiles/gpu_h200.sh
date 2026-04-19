@@ -18,10 +18,12 @@ conda activate SpaRest
 
 cd /hpc/group/xielab/xj58/xVERSE_code
 
-echo ">>> Running Task: Train GMM prior model (kidney only, DDP on 2x H200)"
+echo ">>> Running Task: Train GMM prior model (all tissue, DDP on 2x H200, with index cache)"
 stdbuf -oL -eL torchrun --standalone --nproc_per_node=2 -m main_energy.train_pantissue \
     --data-root "/hpc/group/xielab/xj58/xVerseAtlas/npz_tissue_dataset_donor" \
     --summary-csv "/hpc/group/xielab/xj58/xVerseAtlas/npz_tissue_dataset_donor/pantissue_full_updated.csv" \
+    --train-index-cache "/hpc/group/xielab/xj58/xVerseAtlas/npz_tissue_dataset_donor/xverse_index_cache_train_all.npz" \
+    --val-index-cache "/hpc/group/xielab/xj58/xVerseAtlas/npz_tissue_dataset_donor/xverse_index_cache_val_all.npz" \
     --cell-type-csv "/hpc/group/xielab/xj58/xVerseAtlas/npz_tissue_dataset_donor/cellxgene_cell_type_mapped.csv" \
     --gene-ids-path "/hpc/group/xielab/xj58/xVerseAtlas/npz_tissue_dataset_donor/ensg_keys_high_quality.txt" \
     --result-dir "/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_all_tissue_h200" \

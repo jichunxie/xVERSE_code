@@ -1,6 +1,8 @@
 import math
+import os
 import random
 import time
+import hashlib
 from collections import OrderedDict, defaultdict
 from typing import Dict, List
 
@@ -707,6 +709,7 @@ class FastXVerseBatchDataset(Dataset):
         pair_to_tissue_id=None,
         max_cached_blocks=8,
         filter_bad_cells=False,
+        index_cache_path=None,
     ):
         self.gene_ids = gene_ids
         self.pair_to_sample_id = pair_to_sample_id
@@ -716,6 +719,7 @@ class FastXVerseBatchDataset(Dataset):
         self.available_genes = set(available_genes) if available_genes is not None else None
         self.max_cached_blocks = max(1, int(max_cached_blocks))
         self.filter_bad_cells = bool(filter_bad_cells)
+        self.index_cache_path = index_cache_path
 
         self.index_map = []
         self.block_observed_global_idx = []
@@ -725,6 +729,10 @@ class FastXVerseBatchDataset(Dataset):
         self.block_nrows = []
         self.cache = {} if use_cache else None
         self._block_cache = OrderedDict()
+
+        self._cache_signature = self._build_cache_signature(matrix_meta_pairs)
+        if self._try_load_index_cache():
+            return
 
         for block_idx, (matrix_path, meta_path) in enumerate(matrix_meta_pairs):
             meta = np.load(meta_path, allow_pickle=True)
@@ -763,6 +771,51 @@ class FastXVerseBatchDataset(Dataset):
                 valid_rows = np.arange(n_rows, dtype=np.int64)
 
             self.index_map.extend((block_idx, int(i), sample_id, tissue_id) for i in valid_rows)
+
+    def _build_cache_signature(self, matrix_meta_pairs):
+        h = hashlib.sha1()
+        h.update(str(len(self.gene_ids)).encode("utf-8"))
+        h.update(str(self.filter_bad_cells).encode("utf-8"))
+        if self.available_genes is None:
+            h.update(b"available_genes:none")
+        else:
+            for g in sorted(self.available_genes):
+                h.update(str(g).encode("utf-8"))
+                h.update(b"\n")
+        for matrix_path, meta_path in matrix_meta_pairs:
+            h.update(str(matrix_path).encode("utf-8"))
+            h.update(b"|")
+            h.update(str(meta_path).encode("utf-8"))
+            h.update(b"|")
+            pair = (matrix_path, meta_path)
+            h.update(str(self.pair_to_sample_id.get(pair, -1)).encode("utf-8"))
+            h.update(b"|")
+            h.update(str(self.pair_to_tissue_id.get(pair, -1) if self.pair_to_tissue_id is not None else -1).encode("utf-8"))
+            h.update(b"\n")
+        return h.hexdigest()
+
+    def _try_load_index_cache(self):
+        if not self.index_cache_path:
+            return False
+        if not os.path.exists(self.index_cache_path):
+            return False
+        try:
+            with np.load(self.index_cache_path, allow_pickle=True) as npz:
+                sig = str(npz["signature"].item())
+                if sig != self._cache_signature:
+                    print(f"[Dataset] Cache signature mismatch: {self.index_cache_path}. Rebuilding from source.")
+                    return False
+                self.index_map = np.asarray(npz["index_map"], dtype=np.int64)
+                self.block_matrix_paths = [str(x) for x in npz["block_matrix_paths"].tolist()]
+                self.block_meta_paths = [str(x) for x in npz["block_meta_paths"].tolist()]
+                self.block_nrows = [int(x) for x in npz["block_nrows"].tolist()]
+                self.block_observed_global_idx = [arr.astype(np.int32, copy=False) for arr in npz["block_observed_global_idx"].tolist()]
+                self.block_local_to_rel = [arr.astype(np.int32, copy=False) for arr in npz["block_local_to_rel"].tolist()]
+            print(f"[Dataset] Loaded index cache: {self.index_cache_path}")
+            return True
+        except Exception as e:
+            print(f"[Dataset] Failed to load cache ({self.index_cache_path}): {e}. Rebuilding from source.")
+            return False
 
     @staticmethod
     def _read_sparse_npz_shape(matrix_path: str):

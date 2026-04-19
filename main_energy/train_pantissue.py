@@ -48,6 +48,10 @@ def parse_args():
                         help="Path to gene id list. Defaults to <data-root>/ensg_keys_high_quality.txt.")
     parser.add_argument("--summary-csv", default=None,
                         help="Path to dataset summary csv.")
+    parser.add_argument("--train-index-cache", default=None,
+                        help="Optional prebuilt train index cache (.npz).")
+    parser.add_argument("--val-index-cache", default=None,
+                        help="Optional prebuilt val index cache (.npz).")
     parser.add_argument("--use-tissue", default=None,
                         help="Train/validate using only a specific tissue name (e.g., kidney).")
     parser.add_argument("--cell-type-csv", default="/hpc/group/xielab/xj58/sparest_code/standard_type/cellxgene_cell_type_mapped.csv",
@@ -188,12 +192,19 @@ def main():
         args.total_gene = len(gene_ids)
 
     log("Creating Dataset...")
+    tissue_tag = "all" if args.use_tissue is None else str(args.use_tissue).strip().replace(" ", "_")
+    default_train_cache = os.path.join(args.data_root, f"xverse_index_cache_train_{tissue_tag}.npz")
+    default_val_cache = os.path.join(args.data_root, f"xverse_index_cache_val_{tissue_tag}.npz")
+    train_index_cache = args.train_index_cache or (default_train_cache if os.path.exists(default_train_cache) else None)
+    val_index_cache = args.val_index_cache or (default_val_cache if os.path.exists(default_val_cache) else None)
+    log(f"[IndexCache] train={train_index_cache if train_index_cache else 'None'}, val={val_index_cache if val_index_cache else 'None'}")
     ds = FastXVerseBatchDataset(
         train_pairs,
         gene_ids,
         pair_to_idx,
         cell_type_to_index,
         pair_to_tissue_id=pair_to_tissue_id,
+        index_cache_path=train_index_cache,
     )
     val_ds = FastXVerseBatchDataset(
         val_pairs,
@@ -201,6 +212,7 @@ def main():
         pair_to_idx,
         cell_type_to_index,
         pair_to_tissue_id=pair_to_tissue_id,
+        index_cache_path=val_index_cache,
     )
     train_collator = SparseBatchCollator(
         ds,
