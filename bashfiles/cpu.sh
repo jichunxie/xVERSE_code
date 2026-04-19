@@ -17,9 +17,10 @@ conda activate SpaRest
 # Change to working directory
 cd /hpc/group/xielab/xj58/xVERSE_code
 
-echo ">>> Building xVERSE index cache (train + val)"
-stdbuf -oL -eL python -m main_energy.build_index_cache \
+echo ">>> Compiling NPZ dataset to mask-dictionary shard format"
+stdbuf -oL -eL python -m main_energy.compile_maskdict_dataset \
     --data-root "/hpc/group/xielab/xj58/xVerseAtlas/npz_tissue_dataset_donor" \
-    --train-cache-path "/hpc/group/xielab/xj58/xVerseAtlas/npz_tissue_dataset_donor/xverse_index_cache_train_all.npz" \
-    --val-cache-path "/hpc/group/xielab/xj58/xVerseAtlas/npz_tissue_dataset_donor/xverse_index_cache_val_all.npz" \
+    --cell-type-csv "/hpc/group/xielab/xj58/xVerseAtlas/npz_tissue_dataset_donor/cellxgene_cell_type_mapped.csv" \
+    --split both \
+    --out-dir "/hpc/group/xielab/xj58/xVerseAtlas/compiled_maskdict_all" \
     --filter-bad-cells
