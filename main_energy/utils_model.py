@@ -710,6 +710,7 @@ class FastXVerseBatchDataset(Dataset):
         max_cached_blocks=8,
         filter_bad_cells=False,
         index_cache_path=None,
+        allow_stale_index_cache=False,
     ):
         self.gene_ids = gene_ids
         self.pair_to_sample_id = pair_to_sample_id
@@ -720,6 +721,7 @@ class FastXVerseBatchDataset(Dataset):
         self.max_cached_blocks = max(1, int(max_cached_blocks))
         self.filter_bad_cells = bool(filter_bad_cells)
         self.index_cache_path = index_cache_path
+        self.allow_stale_index_cache = bool(allow_stale_index_cache)
 
         self.index_map = []
         self.block_observed_global_idx = []
@@ -803,8 +805,13 @@ class FastXVerseBatchDataset(Dataset):
             with np.load(self.index_cache_path, allow_pickle=True) as npz:
                 sig = str(npz["signature"].item())
                 if sig != self._cache_signature:
-                    print(f"[Dataset] Cache signature mismatch: {self.index_cache_path}. Rebuilding from source.")
-                    return False
+                    if not self.allow_stale_index_cache:
+                        print(f"[Dataset] Cache signature mismatch: {self.index_cache_path}. Rebuilding from source.")
+                        return False
+                    print(
+                        f"[Dataset][WARN] Cache signature mismatch but --allow-stale-index-cache is enabled. "
+                        f"Using existing cache: {self.index_cache_path}"
+                    )
                 self.index_map = np.asarray(npz["index_map"], dtype=np.int64)
                 self.block_matrix_paths = [str(x) for x in npz["block_matrix_paths"].tolist()]
                 self.block_meta_paths = [str(x) for x in npz["block_meta_paths"].tolist()]

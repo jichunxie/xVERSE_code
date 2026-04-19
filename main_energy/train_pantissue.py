@@ -52,6 +52,8 @@ def parse_args():
                         help="Optional prebuilt train index cache (.npz).")
     parser.add_argument("--val-index-cache", default=None,
                         help="Optional prebuilt val index cache (.npz).")
+    parser.add_argument("--allow-stale-index-cache", action="store_true",
+                        help="Allow using index cache even when signature mismatches (use with caution).")
     parser.add_argument("--use-tissue", default=None,
                         help="Train/validate using only a specific tissue name (e.g., kidney).")
     parser.add_argument("--filter-bad-cells", action="store_true",
@@ -219,6 +221,7 @@ def main():
         pair_to_tissue_id=pair_to_tissue_id,
         filter_bad_cells=args.filter_bad_cells,
         index_cache_path=train_index_cache,
+        allow_stale_index_cache=args.allow_stale_index_cache,
     )
     val_ds = FastXVerseBatchDataset(
         val_pairs,
@@ -228,6 +231,7 @@ def main():
         pair_to_tissue_id=pair_to_tissue_id,
         filter_bad_cells=args.filter_bad_cells,
         index_cache_path=val_index_cache,
+        allow_stale_index_cache=args.allow_stale_index_cache,
     )
     train_collator = SparseBatchCollator(
         ds,
