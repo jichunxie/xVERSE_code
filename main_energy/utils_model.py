@@ -1,8 +1,7 @@
 import math
 import random
 import time
-from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections import OrderedDict, defaultdict
 from typing import Dict, List
 
 import numpy as np
@@ -706,6 +705,8 @@ class FastXVerseBatchDataset(Dataset):
         available_genes=None,
         io_workers=32,
         pair_to_tissue_id=None,
+        max_cached_blocks=8,
+        filter_bad_cells=False,
     ):
         self.gene_ids = gene_ids
         self.pair_to_sample_id = pair_to_sample_id
@@ -713,35 +714,21 @@ class FastXVerseBatchDataset(Dataset):
         self.cell_type_to_index = cell_type_to_index
         self.use_cache = use_cache
         self.available_genes = set(available_genes) if available_genes is not None else None
+        self.max_cached_blocks = max(1, int(max_cached_blocks))
+        self.filter_bad_cells = bool(filter_bad_cells)
 
-        self.block_indptr = []
-        self.block_indices = []
-        self.block_data = []
         self.index_map = []
-        self.gene_idx_maps = []
         self.block_observed_global_idx = []
         self.block_local_to_rel = []
-        self.cell_types = []
+        self.block_matrix_paths = []
+        self.block_meta_paths = []
+        self.block_nrows = []
         self.cache = {} if use_cache else None
+        self._block_cache = OrderedDict()
 
-        def load_one_block(args):
-            matrix_path, meta_path = args
-            X = sp.load_npz(matrix_path).tocsr()
+        for block_idx, (matrix_path, meta_path) in enumerate(matrix_meta_pairs):
             meta = np.load(meta_path, allow_pickle=True)
             gene_ids_available = meta["gene_ids"]
-            cell_type_array = meta["cell_type_ontology_term_id"]
-            return (X, gene_ids_available, cell_type_array, matrix_path, meta_path)
-
-        blocks = []
-        with ThreadPoolExecutor(max_workers=io_workers) as executor:
-            futures = [executor.submit(load_one_block, pair) for pair in matrix_meta_pairs]
-            for future in as_completed(futures):
-                blocks.append(future.result())
-
-        block_order = {(mat, meta): i for i, (mat, meta) in enumerate(matrix_meta_pairs)}
-        blocks.sort(key=lambda x: block_order[(x[3], x[4])])
-
-        for block_idx, (X, gene_ids_available, cell_type_array, matrix_path, meta_path) in enumerate(blocks):
             gene_to_idx = {g: i for i, g in enumerate(gene_ids_available)}
             gene_idx_array = np.full(len(self.gene_ids), -1, dtype=np.int32)
             for global_idx, gene in enumerate(self.gene_ids):
@@ -749,47 +736,73 @@ class FastXVerseBatchDataset(Dataset):
                     if self.available_genes is None or gene in self.available_genes:
                         gene_idx_array[global_idx] = gene_to_idx[gene]
 
-            self.gene_idx_maps.append(gene_idx_array)
-            self.cell_types.append(cell_type_array)
             observed_global_idx = np.where(gene_idx_array >= 0)[0].astype(np.int32, copy=False)
             observed_local_idx = gene_idx_array[observed_global_idx].astype(np.int32, copy=False)
-            local_to_rel = np.full(X.shape[1], -1, dtype=np.int32)
+            n_rows, n_cols = self._read_sparse_npz_shape(matrix_path)
+            local_to_rel = np.full(n_cols, -1, dtype=np.int32)
             if observed_local_idx.size > 0:
                 local_to_rel[observed_local_idx] = np.arange(observed_local_idx.size, dtype=np.int32)
 
             self.block_observed_global_idx.append(observed_global_idx)
             self.block_local_to_rel.append(local_to_rel)
-            self.block_indptr.append(X.indptr.astype(np.int64, copy=False))
-            self.block_indices.append(X.indices.astype(np.int32, copy=False))
-            if np.issubdtype(X.data.dtype, np.integer):
-                block_data = X.data.astype(np.uint32, copy=False)
-            else:
-                # Keep exact integer counts in compact form when possible.
-                rounded = np.rint(X.data)
-                if np.allclose(X.data, rounded):
-                    block_data = rounded.astype(np.uint32, copy=False)
-                else:
-                    block_data = X.data.astype(np.float32, copy=False)
-            self.block_data.append(block_data)
+            self.block_matrix_paths.append(matrix_path)
+            self.block_meta_paths.append(meta_path)
+            self.block_nrows.append(n_rows)
 
             pair = (matrix_path, meta_path)
             sample_id = int(self.pair_to_sample_id.get(pair, -1))
             assert sample_id >= 0, f"Sample ID not found for {pair}!"
             tissue_id = int(self.pair_to_tissue_id.get(pair, -1))
 
-            for i in range(X.shape[0]):
-                st = self.block_indptr[block_idx][i]
-                ed = self.block_indptr[block_idx][i + 1]
-                if st >= ed:
-                    max_count = 0.0
-                    sum_count = 0.0
-                else:
-                    row_vals = self.block_data[block_idx][st:ed]
-                    max_count = float(row_vals.max())
-                    sum_count = float(row_vals.sum(dtype=np.float64))
-                if (max_count > 1000) or (sum_count > 200000):
-                    continue
-                self.index_map.append((block_idx, i, sample_id, tissue_id))
+            if self.filter_bad_cells:
+                X = sp.load_npz(matrix_path).tocsr()
+                row_sum = np.asarray(X.sum(axis=1)).ravel()
+                row_max = np.asarray(X.max(axis=1).toarray()).ravel()
+                valid_rows = np.where((row_max <= 1000.0) & (row_sum <= 200000.0))[0]
+            else:
+                valid_rows = np.arange(n_rows, dtype=np.int64)
+
+            self.index_map.extend((block_idx, int(i), sample_id, tissue_id) for i in valid_rows)
+
+    @staticmethod
+    def _read_sparse_npz_shape(matrix_path: str):
+        with np.load(matrix_path, allow_pickle=False) as npz:
+            shape = npz["shape"]
+            return int(shape[0]), int(shape[1])
+
+    @staticmethod
+    def _compress_row_data_dtype(arr: np.ndarray):
+        if np.issubdtype(arr.dtype, np.integer):
+            return arr.astype(np.uint32, copy=False)
+        rounded = np.rint(arr)
+        if np.allclose(arr, rounded):
+            return rounded.astype(np.uint32, copy=False)
+        return arr.astype(np.float32, copy=False)
+
+    def _load_block(self, block_idx: int):
+        matrix_path = self.block_matrix_paths[block_idx]
+        meta_path = self.block_meta_paths[block_idx]
+        X = sp.load_npz(matrix_path).tocsr()
+        meta = np.load(meta_path, allow_pickle=True)
+        block = {
+            "indptr": X.indptr.astype(np.int64, copy=False),
+            "indices": X.indices.astype(np.int32, copy=False),
+            "data": self._compress_row_data_dtype(X.data),
+            "cell_types": np.asarray(meta["cell_type_ontology_term_id"]),
+        }
+        return block
+
+    def _get_block(self, block_idx: int):
+        block = self._block_cache.get(block_idx)
+        if block is not None:
+            self._block_cache.move_to_end(block_idx)
+            return block
+
+        block = self._load_block(block_idx)
+        self._block_cache[block_idx] = block
+        if len(self._block_cache) > self.max_cached_blocks:
+            self._block_cache.popitem(last=False)
+        return block
 
     def __len__(self):
         return len(self.index_map)
@@ -799,11 +812,12 @@ class FastXVerseBatchDataset(Dataset):
             return self.cache[idx]
 
         block_idx, local_idx, sample_id_int, tissue_id_int = self.index_map[idx]
-        cell_type_str = self.cell_types[block_idx][local_idx]
+        block = self._get_block(block_idx)
+        cell_type_str = block["cell_types"][local_idx]
         celltype_index = self.cell_type_to_index.get(cell_type_str, -1)
-        indptr = self.block_indptr[block_idx]
-        indices = self.block_indices[block_idx]
-        data = self.block_data[block_idx]
+        indptr = block["indptr"]
+        indices = block["indices"]
+        data = block["data"]
         local_to_rel = self.block_local_to_rel[block_idx]
         st = indptr[local_idx]
         ed = indptr[local_idx + 1]
