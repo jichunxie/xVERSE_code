@@ -19,7 +19,13 @@ conda activate SpaRest
 cd /hpc/group/xielab/xj58/xVERSE_code
 
 echo ">>> Running Task: Train GMM prior model (all tissue, DDP on 2x H200, with index cache)"
-stdbuf -oL -eL torchrun --standalone --nproc_per_node=2 -m main_energy.train_pantissue \
+NPROC_PER_NODE=$(python - <<'PY'
+import torch
+print(max(1, torch.cuda.device_count()))
+PY
+)
+echo ">>> Visible CUDA devices: ${NPROC_PER_NODE}"
+stdbuf -oL -eL torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" -m main_energy.train_pantissue \
     --data-root "/hpc/group/xielab/xj58/xVerseAtlas/npz_tissue_dataset_donor" \
     --summary-csv "/hpc/group/xielab/xj58/xVerseAtlas/npz_tissue_dataset_donor/pantissue_full_updated.csv" \
     --train-index-cache "/hpc/group/xielab/xj58/xVerseAtlas/npz_tissue_dataset_donor/xverse_index_cache_train_all.npz" \

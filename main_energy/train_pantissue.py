@@ -151,6 +151,17 @@ def setup_distributed(args):
     if backend == "nccl" and not torch.cuda.is_available():
         backend = "gloo"
     if torch.cuda.is_available():
+        device_count = torch.cuda.device_count()
+        if device_count <= 0:
+            raise RuntimeError("CUDA is available but no visible devices were found.")
+        if local_rank >= device_count:
+            # Guard against mismatched torchrun nproc_per_node vs visible GPU count.
+            mapped_rank = local_rank % device_count
+            print(
+                f"[WARN] LOCAL_RANK={local_rank} but only {device_count} CUDA devices are visible. "
+                f"Falling back to cuda:{mapped_rank}. Please align --nproc_per_node with visible GPU count."
+            )
+            local_rank = mapped_rank
         torch.cuda.set_device(local_rank)
     dist.init_process_group(backend=backend, init_method="env://")
     return True, rank, world_size, local_rank
