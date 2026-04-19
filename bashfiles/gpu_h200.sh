@@ -49,4 +49,5 @@ stdbuf -oL -eL torchrun --standalone --nproc_per_node=2 -m main_energy.train_pan
     --lambda-score 1 \
     --score-noise-std 0.1 \
     --lambda-contrast 1.0 \
-    --contrast-temp 0.1
+    --lambda-real-recon 0.1 \
+    --contrast-temp 0.3

@@ -107,6 +107,8 @@ def parse_args():
                         help="Weight of contrastive loss between real-mask and fake-mask views.")
     parser.add_argument("--contrast-temp", type=float, default=0.1,
                         help="Temperature for bidirectional InfoNCE contrastive loss.")
+    parser.add_argument("--lambda-real-recon", type=float, default=0.1,
+                        help="Weight of real-mask reconstruction loss term.")
     parser.add_argument("--ddp", action="store_true", default=True,
                         help="Use torch DistributedDataParallel when launched with torchrun.")
     parser.add_argument("--no-ddp", dest="ddp", action="store_false",
@@ -332,6 +334,7 @@ def main():
             score_detach_z=args.score_detach_z,
             lambda_contrast=args.lambda_contrast,
             contrast_temp=args.contrast_temp,
+            lambda_real_recon=args.lambda_real_recon,
         )
         log(
             f"[Epoch {epoch_id}] "
@@ -350,6 +353,7 @@ def main():
             score_detach_z=args.score_detach_z,
             lambda_contrast=args.lambda_contrast,
             contrast_temp=args.contrast_temp,
+            lambda_real_recon=args.lambda_real_recon,
         )
         log(
             f"[Epoch {epoch_id}] Validation Loss: "

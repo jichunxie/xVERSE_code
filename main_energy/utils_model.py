@@ -447,6 +447,7 @@ def train_gmm_vae_one_epoch(
     score_detach_z=True,
     lambda_contrast=0.0,
     contrast_temp=0.1,
+    lambda_real_recon=0.1,
 ):
     model.train()
     loss_fn = model.module.loss if hasattr(model, "module") else model.loss
@@ -482,8 +483,21 @@ def train_gmm_vae_one_epoch(
                 score_noise_std=score_noise_std,
                 score_detach_z=score_detach_z,
             )
+            need_real_view = (lambda_contrast > 0) or (lambda_real_recon > 0)
+            real_recon = torch.zeros((), device=x_count.device, dtype=out_fake["z"].dtype)
+            if need_real_view:
+                out_real = loss_fn(
+                    x_count=x_count,
+                    x_mask=x_mask,
+                    beta=0.0,
+                    encoder_mask=x_mask,
+                    recon_mask=x_mask if recon_observed_only else None,
+                    lambda_score=0.0,
+                    score_noise_std=score_noise_std,
+                    score_detach_z=score_detach_z,
+                )
+                real_recon = out_real["recon_loss"]
             if lambda_contrast > 0:
-                out_real = model(x_count, x_mask)
                 contrast = bidirectional_contrastive_loss(
                     z_real=out_real["z"],
                     z_fake=out_fake["z"],
@@ -492,7 +506,7 @@ def train_gmm_vae_one_epoch(
             else:
                 contrast = torch.zeros((), device=x_count.device, dtype=out_fake["z"].dtype)
 
-            loss = out_fake["loss"] + lambda_contrast * contrast
+            loss = out_fake["loss"] + lambda_contrast * contrast + lambda_real_recon * real_recon
             recon = out_fake["recon_loss"]
             kl = out_fake["kl_loss"]
             score = out_fake["score_loss"]
@@ -522,7 +536,7 @@ def train_gmm_vae_one_epoch(
             print(
                 f"[Batch {batch_idx + 1}] "
                 f"Loss={loss.item():.4f}, Recon={recon.item():.4f}, KL={kl.item():.4f}, "
-                f"Score={score.item():.4f}, Contrast={contrast.item():.4f}, "
+                f"Score={score.item():.4f}, Contrast={contrast.item():.4f}, RealRecon={real_recon.item():.4f}, "
                 f"||s_pred||={out_fake['score_norm_pred'].item():.4f}, ||s_tgt||={out_fake['score_norm_tgt'].item():.4f}, "
                 f"DataT={interval_data_t / max(interval_steps, 1):.4f}s, "
                 f"PrepT={interval_prep_t / max(interval_steps, 1):.4f}s, "
@@ -562,6 +576,7 @@ def evaluate_gmm_vae_one_epoch(
     score_detach_z=True,
     lambda_contrast=0.0,
     contrast_temp=0.1,
+    lambda_real_recon=0.1,
 ):
     model.eval()
     loss_fn = model.module.loss if hasattr(model, "module") else model.loss
@@ -595,8 +610,21 @@ def evaluate_gmm_vae_one_epoch(
                 score_noise_std=score_noise_std,
                 score_detach_z=score_detach_z,
             )
+            need_real_view = (lambda_contrast > 0) or (lambda_real_recon > 0)
+            real_recon = torch.zeros((), device=x_count.device, dtype=out_fake["z"].dtype)
+            if need_real_view:
+                out_real = loss_fn(
+                    x_count=x_count,
+                    x_mask=x_mask,
+                    beta=0.0,
+                    encoder_mask=x_mask,
+                    recon_mask=x_mask if recon_observed_only else None,
+                    lambda_score=0.0,
+                    score_noise_std=score_noise_std,
+                    score_detach_z=score_detach_z,
+                )
+                real_recon = out_real["recon_loss"]
             if lambda_contrast > 0:
-                out_real = model(x_count, x_mask)
                 contrast = bidirectional_contrastive_loss(
                     z_real=out_real["z"],
                     z_fake=out_fake["z"],
@@ -604,7 +632,7 @@ def evaluate_gmm_vae_one_epoch(
                 )
             else:
                 contrast = torch.zeros((), device=x_count.device, dtype=out_fake["z"].dtype)
-            loss = out_fake["loss"] + lambda_contrast * contrast
+            loss = out_fake["loss"] + lambda_contrast * contrast + lambda_real_recon * real_recon
 
             total_loss += loss.item() * bsz
             total_recon += out_fake["recon_loss"].item() * bsz
