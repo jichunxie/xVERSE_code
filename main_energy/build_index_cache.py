@@ -28,10 +28,17 @@ def _build_signature(
     pair_to_sample_id,
     pair_to_tissue_id,
     filter_bad_cells: bool,
+    available_genes=None,
 ) -> str:
     h = hashlib.sha1()
     h.update(str(len(gene_ids)).encode("utf-8"))
     h.update(str(filter_bad_cells).encode("utf-8"))
+    if available_genes is None:
+        h.update(b"available_genes:none")
+    else:
+        for g in sorted(available_genes):
+            h.update(str(g).encode("utf-8"))
+            h.update(b"\n")
     for matrix_path, meta_path in pairs:
         h.update(str(matrix_path).encode("utf-8"))
         h.update(b"|")
@@ -107,6 +114,7 @@ def build_cache_for_pairs(
         pair_to_sample_id=pair_to_sample_id,
         pair_to_tissue_id=pair_to_tissue_id,
         filter_bad_cells=filter_bad_cells,
+        available_genes=None,
     )
     index_map = np.asarray(index_map, dtype=np.int64)
 
@@ -169,4 +177,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

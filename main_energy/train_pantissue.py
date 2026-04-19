@@ -54,6 +54,8 @@ def parse_args():
                         help="Optional prebuilt val index cache (.npz).")
     parser.add_argument("--use-tissue", default=None,
                         help="Train/validate using only a specific tissue name (e.g., kidney).")
+    parser.add_argument("--filter-bad-cells", action="store_true",
+                        help="Filter cells with max count > 1000 or total count > 200000 when building dataset/index.")
     parser.add_argument("--cell-type-csv", default="/hpc/group/xielab/xj58/sparest_code/standard_type/cellxgene_cell_type_mapped.csv",
                         help="CSV containing cell-type mapping info.")
     parser.add_argument("--result-dir", default="/hpc/group/xielab/xj58/pretrain_model_celltype/pantissue_model_1118",
@@ -215,6 +217,7 @@ def main():
         pair_to_idx,
         cell_type_to_index,
         pair_to_tissue_id=pair_to_tissue_id,
+        filter_bad_cells=args.filter_bad_cells,
         index_cache_path=train_index_cache,
     )
     val_ds = FastXVerseBatchDataset(
@@ -223,6 +226,7 @@ def main():
         pair_to_idx,
         cell_type_to_index,
         pair_to_tissue_id=pair_to_tissue_id,
+        filter_bad_cells=args.filter_bad_cells,
         index_cache_path=val_index_cache,
     )
     train_collator = SparseBatchCollator(
