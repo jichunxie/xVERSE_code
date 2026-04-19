@@ -770,6 +770,7 @@ class FastXVerseBatchDataset(Dataset):
             shape = npz["shape"]
             return int(shape[0]), int(shape[1])
 
+
     @staticmethod
     def _compress_row_data_dtype(arr: np.ndarray):
         if np.issubdtype(arr.dtype, np.integer):

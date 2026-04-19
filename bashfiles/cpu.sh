@@ -17,5 +17,9 @@ conda activate SpaRest
 # Change to working directory
 cd /hpc/group/xielab/xj58/xVERSE_code
 
-echo ">>> Running Task 4: Imputation Visualization"
-stdbuf -oL -eL python -m fig5_imputation_generate_spatial.08_visualize_comparison_pearson
+echo ">>> Building xVERSE index cache (train + val)"
+stdbuf -oL -eL python -m main_energy.build_index_cache \
+    --data-root "/hpc/group/xielab/xj58/xVerseAtlas/npz_tissue_dataset_donor" \
+    --train-cache-path "/hpc/group/xielab/xj58/xVerseAtlas/npz_tissue_dataset_donor/xverse_index_cache_train_all.npz" \
+    --val-cache-path "/hpc/group/xielab/xj58/xVerseAtlas/npz_tissue_dataset_donor/xverse_index_cache_val_all.npz" \
+	--filter-bad-cells

@@ -188,8 +188,20 @@ def main():
         args.total_gene = len(gene_ids)
 
     log("Creating Dataset...")
-    ds = FastXVerseBatchDataset(train_pairs, gene_ids, pair_to_idx, cell_type_to_index, pair_to_tissue_id=pair_to_tissue_id)
-    val_ds = FastXVerseBatchDataset(val_pairs, gene_ids, pair_to_idx, cell_type_to_index, pair_to_tissue_id=pair_to_tissue_id)
+    ds = FastXVerseBatchDataset(
+        train_pairs,
+        gene_ids,
+        pair_to_idx,
+        cell_type_to_index,
+        pair_to_tissue_id=pair_to_tissue_id,
+    )
+    val_ds = FastXVerseBatchDataset(
+        val_pairs,
+        gene_ids,
+        pair_to_idx,
+        cell_type_to_index,
+        pair_to_tissue_id=pair_to_tissue_id,
+    )
     train_collator = SparseBatchCollator(
         ds,
         num_genes=args.total_gene,
