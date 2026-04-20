@@ -51,6 +51,8 @@ def parse_args():
                         help="Path to compiled dataset root (format=xverse_train_v1). If set, training reads compiled shards directly.")
     parser.add_argument("--compiled-max-cached-shards", type=int, default=8,
                         help="Max opened shard arrays cached per process for compiled dataset reading.")
+    parser.add_argument("--sampler-shard-reorder-window", type=int, default=4096,
+                        help="For compiled dataset samplers: window size for local shard-aware reordering after random sid sampling. <=1 disables.")
     parser.add_argument("--data-root", default="/hpc/group/xielab/xj58/xVerseAtlas/npz_tissue_dataset_donor",
                         help="Root directory containing gene ids and summary csv files.")
     parser.add_argument("--gene-ids-path", default=None,
@@ -332,9 +334,15 @@ def main():
                 num_replicas=world_size,
                 rank=rank,
                 seed=args.seed,
+                shard_reorder_window=args.sampler_shard_reorder_window,
             )
         else:
-            train_sampler = CompiledBalancedSampler(ds, samples_per_id=args.samples_per_id, seed=args.seed)
+            train_sampler = CompiledBalancedSampler(
+                ds,
+                samples_per_id=args.samples_per_id,
+                seed=args.seed,
+                shard_reorder_window=args.sampler_shard_reorder_window,
+            )
     else:
         if ddp_enabled:
             train_sampler = DistributedBalancedSampler(

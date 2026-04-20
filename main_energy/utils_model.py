@@ -1114,6 +1114,14 @@ class CompiledShardDataset(Dataset):
             raise IndexError(f"Index out of range: {idx}")
         return pos
 
+    def shard_ids_for_indices(self, indices: List[int]) -> np.ndarray:
+        if len(indices) == 0:
+            return np.empty((0,), dtype=np.int32)
+        arr = np.asarray(indices, dtype=np.int64)
+        ends = np.asarray(self._shard_ends, dtype=np.int64)
+        shard_ids = np.searchsorted(ends, arr, side="right").astype(np.int32, copy=False)
+        return shard_ids
+
     def get_all_sample_ids(self) -> np.ndarray:
         out = np.empty((self.total_cells,), dtype=np.int32)
         cursor = 0
@@ -1220,10 +1228,17 @@ class CompiledSparseBatchCollator:
 
 
 class CompiledBalancedSampler(Sampler):
-    def __init__(self, dataset: CompiledShardDataset, samples_per_id=None, seed: int = 0):
+    def __init__(
+        self,
+        dataset: CompiledShardDataset,
+        samples_per_id=None,
+        seed: int = 0,
+        shard_reorder_window: int = 4096,
+    ):
         self.dataset = dataset
         self.seed = int(seed)
         self.epoch = 0
+        self.shard_reorder_window = max(0, int(shard_reorder_window))
 
         sample_ids = dataset.get_all_sample_ids()
         self.samples_by_id = defaultdict(list)
@@ -1247,6 +1262,15 @@ class CompiledBalancedSampler(Sampler):
                 selected = [candidates[rng.randrange(len(candidates))] for _ in range(self.samples_per_id)]
             indices.extend(selected)
         rng.shuffle(indices)
+        if self.shard_reorder_window > 1 and len(indices) > self.shard_reorder_window:
+            w = self.shard_reorder_window
+            reordered = []
+            for st in range(0, len(indices), w):
+                chunk = indices[st:st + w]
+                shard_ids = self.dataset.shard_ids_for_indices(chunk)
+                order = np.argsort(shard_ids, kind="stable")
+                reordered.extend(chunk[int(i)] for i in order)
+            indices = reordered
         return iter(indices)
 
     def __len__(self):
@@ -1254,7 +1278,15 @@ class CompiledBalancedSampler(Sampler):
 
 
 class DistributedCompiledBalancedSampler(Sampler):
-    def __init__(self, dataset: CompiledShardDataset, samples_per_id=None, num_replicas=None, rank=None, seed: int = 0):
+    def __init__(
+        self,
+        dataset: CompiledShardDataset,
+        samples_per_id=None,
+        num_replicas=None,
+        rank=None,
+        seed: int = 0,
+        shard_reorder_window: int = 4096,
+    ):
         if num_replicas is None:
             if not dist.is_available() or not dist.is_initialized():
                 raise RuntimeError("Distributed package is required for DistributedCompiledBalancedSampler")
@@ -1269,6 +1301,7 @@ class DistributedCompiledBalancedSampler(Sampler):
         self.rank = int(rank)
         self.seed = int(seed)
         self.epoch = 0
+        self.shard_reorder_window = max(0, int(shard_reorder_window))
 
         sample_ids = dataset.get_all_sample_ids()
         self.samples_by_id = defaultdict(list)
@@ -1295,6 +1328,15 @@ class DistributedCompiledBalancedSampler(Sampler):
                 selected = [candidates[rng.randrange(len(candidates))] for _ in range(self.samples_per_id)]
             indices.extend(selected)
         rng.shuffle(indices)
+        if self.shard_reorder_window > 1 and len(indices) > self.shard_reorder_window:
+            w = self.shard_reorder_window
+            reordered = []
+            for st in range(0, len(indices), w):
+                chunk = indices[st:st + w]
+                shard_ids = self.dataset.shard_ids_for_indices(chunk)
+                order = np.argsort(shard_ids, kind="stable")
+                reordered.extend(chunk[int(i)] for i in order)
+            indices = reordered
 
         if len(indices) < self.total_size:
             indices.extend(indices[: self.total_size - len(indices)])

@@ -37,7 +37,8 @@ echo ">>> COMPILED_ROOT=${COMPILED_ROOT}"
 
 stdbuf -oL -eL torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" -m main_energy.train_pantissue \
     --compiled-dataset-root "${COMPILED_ROOT}" \
-    --compiled-max-cached-shards 8 \
+    --compiled-max-cached-shards 32 \
+    --sampler-shard-reorder-window 4096 \
     --data-root "${DATA_ROOT}" \
     --summary-csv "${SUMMARY_CSV}" \
     --filter-bad-cells \
@@ -47,8 +48,8 @@ stdbuf -oL -eL torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" -m mai
     --num-epochs 100 \
     --batch-size 512 \
     --val-batch-size 512 \
-    --num-workers 15 \
-    --val-num-workers 5 \
+    --num-workers 8 \
+    --val-num-workers 3 \
     --samples-per-id 1000 \
     --lr 3e-4 \
     --weight-decay 1e-5 \
