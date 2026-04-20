@@ -53,6 +53,8 @@ def parse_args():
                         help="Max opened shard arrays cached per process for compiled dataset reading.")
     parser.add_argument("--sampler-shard-reorder-window", type=int, default=4096,
                         help="For compiled dataset samplers: window size for local shard-aware reordering after random sid sampling. <=1 disables.")
+    parser.add_argument("--sampler-active-shards", type=int, default=0,
+                        help="For compiled dataset samplers: number of active shards per phase. >0 enables staged shard-pool ordering.")
     parser.add_argument("--data-root", default="/hpc/group/xielab/xj58/xVerseAtlas/npz_tissue_dataset_donor",
                         help="Root directory containing gene ids and summary csv files.")
     parser.add_argument("--gene-ids-path", default=None,
@@ -201,13 +203,31 @@ def main():
         if is_main_process(rank):
             print(msg)
 
-    gene_ids_path = args.gene_ids_path or os.path.join(args.data_root, "ensg_keys_high_quality.txt")
-    summary_csv_path = args.summary_csv or os.path.join(args.data_root, "pantissue_full_updated.csv")
     os.makedirs(args.result_dir, exist_ok=True)
     ckpt_path = os.path.join(args.result_dir, args.last_ckpt_name)
     best_ckpt_path = os.path.join(args.result_dir, args.best_ckpt_name)
 
     if args.compiled_dataset_root:
+        ignored = ["--data-root"]
+        if args.summary_csv is not None:
+            ignored.append("--summary-csv")
+        if args.gene_ids_path is not None:
+            ignored.append("--gene-ids-path")
+        if args.cell_type_csv != "/hpc/group/xielab/xj58/sparest_code/standard_type/cellxgene_cell_type_mapped.csv":
+            ignored.append("--cell-type-csv")
+        if args.train_index_cache is not None:
+            ignored.append("--train-index-cache")
+        if args.val_index_cache is not None:
+            ignored.append("--val-index-cache")
+        if args.allow_stale_index_cache:
+            ignored.append("--allow-stale-index-cache")
+        if args.use_tissue is not None:
+            ignored.append("--use-tissue")
+        if args.filter_bad_cells:
+            ignored.append("--filter-bad-cells")
+        if ignored:
+            log(f"[Info] Ignored in compiled mode: {', '.join(ignored)}")
+
         manifest_path = os.path.join(args.compiled_dataset_root, "manifest.json")
         if not os.path.exists(manifest_path):
             raise FileNotFoundError(f"Compiled dataset manifest not found: {manifest_path}")
@@ -224,6 +244,12 @@ def main():
             args.total_gene = compiled_num_genes
 
         log("Creating Dataset from compiled shards...")
+        log(
+            "[CompiledIO] "
+            f"max_cached_shards={args.compiled_max_cached_shards}, "
+            f"sampler_shard_reorder_window={args.sampler_shard_reorder_window}, "
+            f"sampler_active_shards={args.sampler_active_shards}"
+        )
         ds = CompiledShardDataset(
             compiled_root=args.compiled_dataset_root,
             split="train",
@@ -247,6 +273,8 @@ def main():
             apply_mask_aug=False,
         )
     else:
+        gene_ids_path = args.gene_ids_path or os.path.join(args.data_root, "ensg_keys_high_quality.txt")
+        summary_csv_path = args.summary_csv or os.path.join(args.data_root, "pantissue_full_updated.csv")
         pair_to_idx, train_pairs, val_pairs, pair_to_tissue_id, _ = build_pair_to_sample_id_and_paths(
             summary_csv_path,
             use_tissue=args.use_tissue
@@ -335,6 +363,7 @@ def main():
                 rank=rank,
                 seed=args.seed,
                 shard_reorder_window=args.sampler_shard_reorder_window,
+                active_shards=args.sampler_active_shards,
             )
         else:
             train_sampler = CompiledBalancedSampler(
@@ -342,6 +371,7 @@ def main():
                 samples_per_id=args.samples_per_id,
                 seed=args.seed,
                 shard_reorder_window=args.sampler_shard_reorder_window,
+                active_shards=args.sampler_active_shards,
             )
     else:
         if ddp_enabled:

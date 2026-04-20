@@ -1234,11 +1234,14 @@ class CompiledBalancedSampler(Sampler):
         samples_per_id=None,
         seed: int = 0,
         shard_reorder_window: int = 4096,
+        active_shards: int = 0,
     ):
         self.dataset = dataset
         self.seed = int(seed)
         self.epoch = 0
         self.shard_reorder_window = max(0, int(shard_reorder_window))
+        self.active_shards = max(0, int(active_shards))
+        self.num_shards = len(self.dataset.shards)
 
         sample_ids = dataset.get_all_sample_ids()
         self.samples_by_id = defaultdict(list)
@@ -1262,6 +1265,16 @@ class CompiledBalancedSampler(Sampler):
                 selected = [candidates[rng.randrange(len(candidates))] for _ in range(self.samples_per_id)]
             indices.extend(selected)
         rng.shuffle(indices)
+        if self.active_shards > 0 and self.num_shards > self.active_shards and len(indices) > 0:
+            shard_order = list(range(self.num_shards))
+            rng.shuffle(shard_order)
+            pool_rank_of_shard = np.empty((self.num_shards,), dtype=np.int32)
+            for rank, sid in enumerate(shard_order):
+                pool_rank_of_shard[sid] = rank // self.active_shards
+            shard_ids = self.dataset.shard_ids_for_indices(indices)
+            pool_rank = pool_rank_of_shard[shard_ids]
+            order = np.argsort(pool_rank, kind="stable")
+            indices = [indices[int(i)] for i in order]
         if self.shard_reorder_window > 1 and len(indices) > self.shard_reorder_window:
             w = self.shard_reorder_window
             reordered = []
@@ -1286,6 +1299,7 @@ class DistributedCompiledBalancedSampler(Sampler):
         rank=None,
         seed: int = 0,
         shard_reorder_window: int = 4096,
+        active_shards: int = 0,
     ):
         if num_replicas is None:
             if not dist.is_available() or not dist.is_initialized():
@@ -1302,6 +1316,8 @@ class DistributedCompiledBalancedSampler(Sampler):
         self.seed = int(seed)
         self.epoch = 0
         self.shard_reorder_window = max(0, int(shard_reorder_window))
+        self.active_shards = max(0, int(active_shards))
+        self.num_shards = len(self.dataset.shards)
 
         sample_ids = dataset.get_all_sample_ids()
         self.samples_by_id = defaultdict(list)
@@ -1328,6 +1344,16 @@ class DistributedCompiledBalancedSampler(Sampler):
                 selected = [candidates[rng.randrange(len(candidates))] for _ in range(self.samples_per_id)]
             indices.extend(selected)
         rng.shuffle(indices)
+        if self.active_shards > 0 and self.num_shards > self.active_shards and len(indices) > 0:
+            shard_order = list(range(self.num_shards))
+            rng.shuffle(shard_order)
+            pool_rank_of_shard = np.empty((self.num_shards,), dtype=np.int32)
+            for rank, sid in enumerate(shard_order):
+                pool_rank_of_shard[sid] = rank // self.active_shards
+            shard_ids = self.dataset.shard_ids_for_indices(indices)
+            pool_rank = pool_rank_of_shard[shard_ids]
+            order = np.argsort(pool_rank, kind="stable")
+            indices = [indices[int(i)] for i in order]
         if self.shard_reorder_window > 1 and len(indices) > self.shard_reorder_window:
             w = self.shard_reorder_window
             reordered = []

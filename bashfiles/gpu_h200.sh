@@ -28,28 +28,22 @@ echo ">>> Visible CUDA devices: ${NPROC_PER_NODE}"
 
 DATA_ROOT="/hpc/group/xielab/xj58/xVerseAtlas/npz_tissue_dataset_donor"
 COMPILED_ROOT="/hpc/group/xielab/xj58/xVerseAtlas/compiled_train_v1_all"
-GENE_IDS_PATH="${DATA_ROOT}/ensg_keys_high_quality.txt"
-SUMMARY_CSV="${DATA_ROOT}/pantissue_full_updated.csv"
-CELLTYPE_CSV="${DATA_ROOT}/cellxgene_cell_type_mapped.csv"
 
 echo ">>> DATA_ROOT=${DATA_ROOT}"
 echo ">>> COMPILED_ROOT=${COMPILED_ROOT}"
 
 stdbuf -oL -eL torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" -m main_energy.train_pantissue \
     --compiled-dataset-root "${COMPILED_ROOT}" \
-    --compiled-max-cached-shards 512 \
-    --sampler-shard-reorder-window 4096 \
-    --data-root "${DATA_ROOT}" \
-    --summary-csv "${SUMMARY_CSV}" \
-    --filter-bad-cells \
-    --cell-type-csv "${CELLTYPE_CSV}" \
-    --gene-ids-path "${GENE_IDS_PATH}" \
+    --compiled-max-cached-shards 2048 \
+    --sampler-shard-reorder-window 65536 \
+    --sampler-active-shards 8 \
     --result-dir "/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_all_tissue_h200" \
     --num-epochs 100 \
     --batch-size 512 \
     --val-batch-size 512 \
-    --num-workers 8 \
-    --val-num-workers 3 \
+    --num-workers 6 \
+    --val-num-workers 2 \
+    --prefetch-factor 8 \
     --samples-per-id 1000 \
     --lr 3e-4 \
     --weight-decay 1e-5 \
