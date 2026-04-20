@@ -59,7 +59,7 @@ stdbuf -oL -eL torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" -m mai
     --mask-aug-policy xverse \
     --mask-aug-min-frac 0.1 \
     --mask-aug-max-frac 0.5 \
-    --lambda-score 1 \
+    --lambda-score 0 \
     --score-noise-std 0.1 \
     --lambda-contrast 0.0 \
     --lambda-real-recon 0.0 \
