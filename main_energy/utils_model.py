@@ -3,8 +3,10 @@ import os
 import random
 import time
 import hashlib
+import json
+import bisect
 from collections import OrderedDict, defaultdict
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -1027,6 +1029,283 @@ class SparseBatchCollator:
             torch.from_numpy(x_mask),
             torch.from_numpy(x_mask_encoder),
         )
+
+
+class CompiledShardDataset(Dataset):
+    """
+    Read-only dataset for compiled xverse_train_v1 shards.
+    Output tuple matches training loop expectations:
+    (sample_id, tissue_id, celltype_id, nz_gene_global_idx, nz_value)
+    """
+
+    def __init__(
+        self,
+        compiled_root: str,
+        split: str = "train",
+        max_cached_shards: int = 8,
+    ):
+        self.compiled_root = str(compiled_root)
+        self.split = str(split)
+        self.max_cached_shards = max(1, int(max_cached_shards))
+
+        manifest_path = os.path.join(self.compiled_root, "manifest.json")
+        if not os.path.exists(manifest_path):
+            raise FileNotFoundError(f"manifest.json not found in {self.compiled_root}")
+        with open(manifest_path, "r") as f:
+            manifest = json.load(f)
+
+        fmt = manifest.get("format")
+        if fmt != "xverse_train_v1":
+            raise ValueError(f"Unsupported compiled dataset format: {fmt}")
+
+        split_obj = manifest.get("splits", {}).get(self.split)
+        if split_obj is None:
+            raise ValueError(f"Split '{self.split}' not found in manifest.")
+
+        self.global_num_genes = int(manifest.get("global_num_genes", -1))
+        self.total_cells = int(split_obj.get("num_cells", 0))
+        if self.global_num_genes <= 0:
+            raise ValueError("Invalid global_num_genes in manifest.")
+
+        shard_rows = split_obj.get("shards", [])
+        self.shards = sorted(shard_rows, key=lambda x: int(x["global_cell_start"]))
+        self._shard_starts = [int(x["global_cell_start"]) for x in self.shards]
+        self._shard_ends = [int(x["global_cell_end"]) for x in self.shards]
+        if self._shard_ends and self._shard_ends[-1] != self.total_cells:
+            raise ValueError(
+                f"Manifest inconsistency: last shard end={self._shard_ends[-1]} vs total_cells={self.total_cells}"
+            )
+
+        self._shard_cache = OrderedDict()
+
+    def __len__(self):
+        return self.total_cells
+
+    def _load_shard_arrays(self, shard_idx: int):
+        rec = self.shards[shard_idx]
+        shard_dir = rec["path"]
+        arrays = {
+            "cell_ptr": np.load(os.path.join(shard_dir, "cell_ptr.npy"), mmap_mode="r"),
+            "gene_idx": np.load(os.path.join(shard_dir, "gene_idx.npy"), mmap_mode="r"),
+            "gene_val": np.load(os.path.join(shard_dir, "gene_val.npy"), mmap_mode="r"),
+            "celltype_id": np.load(os.path.join(shard_dir, "celltype_id.npy"), mmap_mode="r"),
+            "sample_id": np.load(os.path.join(shard_dir, "sample_id.npy"), mmap_mode="r"),
+            "tissue_id": np.load(os.path.join(shard_dir, "tissue_id.npy"), mmap_mode="r"),
+        }
+        return arrays
+
+    def _get_shard_arrays(self, shard_idx: int):
+        arrays = self._shard_cache.get(shard_idx)
+        if arrays is not None:
+            self._shard_cache.move_to_end(shard_idx)
+            return arrays
+
+        arrays = self._load_shard_arrays(shard_idx)
+        self._shard_cache[shard_idx] = arrays
+        if len(self._shard_cache) > self.max_cached_shards:
+            self._shard_cache.popitem(last=False)
+        return arrays
+
+    def _locate_shard(self, idx: int) -> int:
+        pos = bisect.bisect_right(self._shard_starts, int(idx)) - 1
+        if pos < 0 or pos >= len(self.shards):
+            raise IndexError(f"Index out of range: {idx}")
+        if int(idx) >= self._shard_ends[pos]:
+            raise IndexError(f"Index out of range: {idx}")
+        return pos
+
+    def get_all_sample_ids(self) -> np.ndarray:
+        out = np.empty((self.total_cells,), dtype=np.int32)
+        cursor = 0
+        for shard_idx, rec in enumerate(self.shards):
+            arrays = self._get_shard_arrays(shard_idx)
+            sids = np.asarray(arrays["sample_id"], dtype=np.int32)
+            n = int(sids.size)
+            out[cursor:cursor + n] = sids
+            cursor += n
+        return out
+
+    def __getitem__(self, idx):
+        idx = int(idx)
+        if idx < 0 or idx >= self.total_cells:
+            raise IndexError(f"Index out of range: {idx}")
+
+        shard_idx = self._locate_shard(idx)
+        rec = self.shards[shard_idx]
+        local_idx = idx - int(rec["global_cell_start"])
+        arrays = self._get_shard_arrays(shard_idx)
+
+        cell_ptr = arrays["cell_ptr"]
+        st = int(cell_ptr[local_idx])
+        ed = int(cell_ptr[local_idx + 1])
+        if st < ed:
+            nz_gene_global_idx = np.asarray(arrays["gene_idx"][st:ed], dtype=np.int32)
+            nz_value = np.asarray(arrays["gene_val"][st:ed])
+        else:
+            nz_gene_global_idx = np.empty((0,), dtype=np.int32)
+            nz_value = np.empty((0,), dtype=np.uint16)
+
+        sample_id_int = int(arrays["sample_id"][local_idx])
+        tissue_id_int = int(arrays["tissue_id"][local_idx])
+        celltype_index = int(arrays["celltype_id"][local_idx])
+
+        return (
+            sample_id_int,
+            tissue_id_int,
+            celltype_index,
+            nz_gene_global_idx,
+            nz_value,
+        )
+
+
+class CompiledSparseBatchCollator:
+    """
+    Collator for CompiledShardDataset. Produces model-ready tensors:
+    - x_count: (B, G) float32
+    - x_mask: (B, G) bool
+    - x_mask_encoder: optional augmented mask for encoder input
+    """
+
+    def __init__(
+        self,
+        num_genes: int,
+        apply_mask_aug: bool = False,
+        mask_aug_prob: float = 1.0,
+        mask_aug_policy: str = "xverse",
+        mask_aug_min_frac: float = 0.1,
+        mask_aug_max_frac: float = 0.5,
+    ):
+        self.num_genes = int(num_genes)
+        self.apply_mask_aug = bool(apply_mask_aug)
+        self.mask_aug_prob = float(mask_aug_prob)
+        self.mask_aug_policy = str(mask_aug_policy)
+        self.mask_aug_min_frac = float(mask_aug_min_frac)
+        self.mask_aug_max_frac = float(mask_aug_max_frac)
+
+    def __call__(self, batch):
+        bsz = len(batch)
+        x_count = np.zeros((bsz, self.num_genes), dtype=np.float32)
+        x_mask = np.zeros((bsz, self.num_genes), dtype=np.bool_)
+        sample_ids = np.empty((bsz,), dtype=np.int64)
+        tissue_ids = np.empty((bsz,), dtype=np.int64)
+        celltype_ids = np.empty((bsz,), dtype=np.int64)
+
+        for i, (sample_id_int, tissue_id_int, celltype_index, nz_gene_global_idx, nz_value) in enumerate(batch):
+            sample_ids[i] = sample_id_int
+            tissue_ids[i] = tissue_id_int
+            celltype_ids[i] = celltype_index
+            if nz_gene_global_idx.size > 0:
+                x_mask[i, nz_gene_global_idx] = True
+                x_count[i, nz_gene_global_idx] = nz_value
+
+        if self.apply_mask_aug:
+            x_mask_encoder = SparseBatchCollator._random_hide_observed_numpy(
+                x_mask=x_mask,
+                apply_prob=self.mask_aug_prob,
+                policy=self.mask_aug_policy,
+                min_frac=self.mask_aug_min_frac,
+                max_frac=self.mask_aug_max_frac,
+            )
+        else:
+            x_mask_encoder = x_mask
+
+        return (
+            torch.from_numpy(sample_ids),
+            torch.from_numpy(tissue_ids),
+            torch.from_numpy(celltype_ids),
+            torch.from_numpy(x_count),
+            torch.from_numpy(x_mask),
+            torch.from_numpy(x_mask_encoder),
+        )
+
+
+class CompiledBalancedSampler(Sampler):
+    def __init__(self, dataset: CompiledShardDataset, samples_per_id=None, seed: int = 0):
+        self.dataset = dataset
+        self.seed = int(seed)
+        self.epoch = 0
+
+        sample_ids = dataset.get_all_sample_ids()
+        self.samples_by_id = defaultdict(list)
+        for idx, sid in enumerate(sample_ids.tolist()):
+            self.samples_by_id[int(sid)].append(idx)
+
+        self.sample_ids = list(self.samples_by_id.keys())
+        self.samples_per_id = samples_per_id or min(len(v) for v in self.samples_by_id.values())
+
+    def set_epoch(self, epoch: int):
+        self.epoch = int(epoch)
+
+    def __iter__(self):
+        rng = random.Random(self.seed + self.epoch)
+        indices = []
+        for sample_id in self.sample_ids:
+            candidates = self.samples_by_id[sample_id]
+            if len(candidates) >= self.samples_per_id:
+                selected = rng.sample(candidates, self.samples_per_id)
+            else:
+                selected = [candidates[rng.randrange(len(candidates))] for _ in range(self.samples_per_id)]
+            indices.extend(selected)
+        rng.shuffle(indices)
+        return iter(indices)
+
+    def __len__(self):
+        return self.samples_per_id * len(self.sample_ids)
+
+
+class DistributedCompiledBalancedSampler(Sampler):
+    def __init__(self, dataset: CompiledShardDataset, samples_per_id=None, num_replicas=None, rank=None, seed: int = 0):
+        if num_replicas is None:
+            if not dist.is_available() or not dist.is_initialized():
+                raise RuntimeError("Distributed package is required for DistributedCompiledBalancedSampler")
+            num_replicas = dist.get_world_size()
+        if rank is None:
+            if not dist.is_available() or not dist.is_initialized():
+                raise RuntimeError("Distributed package is required for DistributedCompiledBalancedSampler")
+            rank = dist.get_rank()
+
+        self.dataset = dataset
+        self.num_replicas = int(num_replicas)
+        self.rank = int(rank)
+        self.seed = int(seed)
+        self.epoch = 0
+
+        sample_ids = dataset.get_all_sample_ids()
+        self.samples_by_id = defaultdict(list)
+        for idx, sid in enumerate(sample_ids.tolist()):
+            self.samples_by_id[int(sid)].append(idx)
+        self.sample_ids = list(self.samples_by_id.keys())
+        self.samples_per_id = samples_per_id or min(len(v) for v in self.samples_by_id.values())
+
+        self.global_num_samples = self.samples_per_id * len(self.sample_ids)
+        self.num_samples = int(math.ceil(self.global_num_samples / self.num_replicas))
+        self.total_size = self.num_samples * self.num_replicas
+
+    def set_epoch(self, epoch: int):
+        self.epoch = int(epoch)
+
+    def __iter__(self):
+        rng = random.Random(self.seed + self.epoch)
+        indices = []
+        for sample_id in self.sample_ids:
+            candidates = self.samples_by_id[sample_id]
+            if len(candidates) >= self.samples_per_id:
+                selected = rng.sample(candidates, self.samples_per_id)
+            else:
+                selected = [candidates[rng.randrange(len(candidates))] for _ in range(self.samples_per_id)]
+            indices.extend(selected)
+        rng.shuffle(indices)
+
+        if len(indices) < self.total_size:
+            indices.extend(indices[: self.total_size - len(indices)])
+        else:
+            indices = indices[: self.total_size]
+
+        rank_indices = indices[self.rank:self.total_size:self.num_replicas]
+        return iter(rank_indices)
+
+    def __len__(self):
+        return self.num_samples
 
 
 class BalancedSampleSampler(Sampler):

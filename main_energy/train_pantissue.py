@@ -16,6 +16,7 @@
 import argparse
 import os
 import random
+import json
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
@@ -33,15 +34,23 @@ from main_energy.utils_model import (
     evaluate_gmm_vae_one_epoch,
     FastXVerseBatchDataset,
     SparseBatchCollator,
+    CompiledShardDataset,
+    CompiledSparseBatchCollator,
     build_pair_to_sample_id_and_paths,
     build_cell_type_to_index,
     BalancedSampleSampler,
     DistributedBalancedSampler,
+    CompiledBalancedSampler,
+    DistributedCompiledBalancedSampler,
 )
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train the mask-FiLM GMM-VAE with original xVERSE data pipeline.")
+    parser.add_argument("--compiled-dataset-root", default=None,
+                        help="Path to compiled dataset root (format=xverse_train_v1). If set, training reads compiled shards directly.")
+    parser.add_argument("--compiled-max-cached-shards", type=int, default=8,
+                        help="Max opened shard arrays cached per process for compiled dataset reading.")
     parser.add_argument("--data-root", default="/hpc/group/xielab/xj58/xVerseAtlas/npz_tissue_dataset_donor",
                         help="Root directory containing gene ids and summary csv files.")
     parser.add_argument("--gene-ids-path", default=None,
@@ -196,57 +205,97 @@ def main():
     ckpt_path = os.path.join(args.result_dir, args.last_ckpt_name)
     best_ckpt_path = os.path.join(args.result_dir, args.best_ckpt_name)
 
-    pair_to_idx, train_pairs, val_pairs, pair_to_tissue_id, _ = build_pair_to_sample_id_and_paths(
-        summary_csv_path,
-        use_tissue=args.use_tissue
-    )
-    cell_type_to_index = build_cell_type_to_index(args.cell_type_csv)
-    gene_ids = load_gene_ids(gene_ids_path)
-    if args.total_gene != len(gene_ids):
-        log(f"[Info] Override total_gene from {args.total_gene} to {len(gene_ids)} based on gene id file.")
-        args.total_gene = len(gene_ids)
+    if args.compiled_dataset_root:
+        manifest_path = os.path.join(args.compiled_dataset_root, "manifest.json")
+        if not os.path.exists(manifest_path):
+            raise FileNotFoundError(f"Compiled dataset manifest not found: {manifest_path}")
+        with open(manifest_path, "r") as f:
+            manifest = json.load(f)
+        fmt = manifest.get("format")
+        if fmt != "xverse_train_v1":
+            raise ValueError(f"Unsupported compiled dataset format: {fmt}")
+        compiled_num_genes = int(manifest.get("global_num_genes", -1))
+        if compiled_num_genes <= 0:
+            raise ValueError("Invalid global_num_genes in compiled manifest.")
+        if args.total_gene != compiled_num_genes:
+            log(f"[Info] Override total_gene from {args.total_gene} to {compiled_num_genes} based on compiled manifest.")
+            args.total_gene = compiled_num_genes
 
-    log("Creating Dataset...")
-    tissue_tag = "all" if args.use_tissue is None else str(args.use_tissue).strip().replace(" ", "_")
-    default_train_cache = os.path.join(args.data_root, f"xverse_index_cache_train_{tissue_tag}.npz")
-    default_val_cache = os.path.join(args.data_root, f"xverse_index_cache_val_{tissue_tag}.npz")
-    train_index_cache = args.train_index_cache or (default_train_cache if os.path.exists(default_train_cache) else None)
-    val_index_cache = args.val_index_cache or (default_val_cache if os.path.exists(default_val_cache) else None)
-    log(f"[IndexCache] train={train_index_cache if train_index_cache else 'None'}, val={val_index_cache if val_index_cache else 'None'}")
-    ds = FastXVerseBatchDataset(
-        train_pairs,
-        gene_ids,
-        pair_to_idx,
-        cell_type_to_index,
-        pair_to_tissue_id=pair_to_tissue_id,
-        filter_bad_cells=args.filter_bad_cells,
-        index_cache_path=train_index_cache,
-        allow_stale_index_cache=args.allow_stale_index_cache,
-    )
-    val_ds = FastXVerseBatchDataset(
-        val_pairs,
-        gene_ids,
-        pair_to_idx,
-        cell_type_to_index,
-        pair_to_tissue_id=pair_to_tissue_id,
-        filter_bad_cells=args.filter_bad_cells,
-        index_cache_path=val_index_cache,
-        allow_stale_index_cache=args.allow_stale_index_cache,
-    )
-    train_collator = SparseBatchCollator(
-        ds,
-        num_genes=args.total_gene,
-        apply_mask_aug=True,
-        mask_aug_prob=args.mask_aug_prob,
-        mask_aug_policy=args.mask_aug_policy,
-        mask_aug_min_frac=args.mask_aug_min_frac,
-        mask_aug_max_frac=args.mask_aug_max_frac,
-    )
-    val_collator = SparseBatchCollator(
-        val_ds,
-        num_genes=args.total_gene,
-        apply_mask_aug=False,
-    )
+        log("Creating Dataset from compiled shards...")
+        ds = CompiledShardDataset(
+            compiled_root=args.compiled_dataset_root,
+            split="train",
+            max_cached_shards=args.compiled_max_cached_shards,
+        )
+        val_ds = CompiledShardDataset(
+            compiled_root=args.compiled_dataset_root,
+            split="val",
+            max_cached_shards=args.compiled_max_cached_shards,
+        )
+        train_collator = CompiledSparseBatchCollator(
+            num_genes=args.total_gene,
+            apply_mask_aug=True,
+            mask_aug_prob=args.mask_aug_prob,
+            mask_aug_policy=args.mask_aug_policy,
+            mask_aug_min_frac=args.mask_aug_min_frac,
+            mask_aug_max_frac=args.mask_aug_max_frac,
+        )
+        val_collator = CompiledSparseBatchCollator(
+            num_genes=args.total_gene,
+            apply_mask_aug=False,
+        )
+    else:
+        pair_to_idx, train_pairs, val_pairs, pair_to_tissue_id, _ = build_pair_to_sample_id_and_paths(
+            summary_csv_path,
+            use_tissue=args.use_tissue
+        )
+        cell_type_to_index = build_cell_type_to_index(args.cell_type_csv)
+        gene_ids = load_gene_ids(gene_ids_path)
+        if args.total_gene != len(gene_ids):
+            log(f"[Info] Override total_gene from {args.total_gene} to {len(gene_ids)} based on gene id file.")
+            args.total_gene = len(gene_ids)
+
+        log("Creating Dataset...")
+        tissue_tag = "all" if args.use_tissue is None else str(args.use_tissue).strip().replace(" ", "_")
+        default_train_cache = os.path.join(args.data_root, f"xverse_index_cache_train_{tissue_tag}.npz")
+        default_val_cache = os.path.join(args.data_root, f"xverse_index_cache_val_{tissue_tag}.npz")
+        train_index_cache = args.train_index_cache or (default_train_cache if os.path.exists(default_train_cache) else None)
+        val_index_cache = args.val_index_cache or (default_val_cache if os.path.exists(default_val_cache) else None)
+        log(f"[IndexCache] train={train_index_cache if train_index_cache else 'None'}, val={val_index_cache if val_index_cache else 'None'}")
+        ds = FastXVerseBatchDataset(
+            train_pairs,
+            gene_ids,
+            pair_to_idx,
+            cell_type_to_index,
+            pair_to_tissue_id=pair_to_tissue_id,
+            filter_bad_cells=args.filter_bad_cells,
+            index_cache_path=train_index_cache,
+            allow_stale_index_cache=args.allow_stale_index_cache,
+        )
+        val_ds = FastXVerseBatchDataset(
+            val_pairs,
+            gene_ids,
+            pair_to_idx,
+            cell_type_to_index,
+            pair_to_tissue_id=pair_to_tissue_id,
+            filter_bad_cells=args.filter_bad_cells,
+            index_cache_path=val_index_cache,
+            allow_stale_index_cache=args.allow_stale_index_cache,
+        )
+        train_collator = SparseBatchCollator(
+            ds,
+            num_genes=args.total_gene,
+            apply_mask_aug=True,
+            mask_aug_prob=args.mask_aug_prob,
+            mask_aug_policy=args.mask_aug_policy,
+            mask_aug_min_frac=args.mask_aug_min_frac,
+            mask_aug_max_frac=args.mask_aug_max_frac,
+        )
+        val_collator = SparseBatchCollator(
+            val_ds,
+            num_genes=args.total_gene,
+            apply_mask_aug=False,
+        )
 
     loader_kwargs = dict(num_workers=args.num_workers, pin_memory=True)
     if args.num_workers > 0:
@@ -275,16 +324,28 @@ def main():
         **val_loader_kwargs,
     )
 
-    if ddp_enabled:
-        train_sampler = DistributedBalancedSampler(
-            ds,
-            samples_per_id=args.samples_per_id,
-            num_replicas=world_size,
-            rank=rank,
-            seed=args.seed,
-        )
+    if args.compiled_dataset_root:
+        if ddp_enabled:
+            train_sampler = DistributedCompiledBalancedSampler(
+                ds,
+                samples_per_id=args.samples_per_id,
+                num_replicas=world_size,
+                rank=rank,
+                seed=args.seed,
+            )
+        else:
+            train_sampler = CompiledBalancedSampler(ds, samples_per_id=args.samples_per_id, seed=args.seed)
     else:
-        train_sampler = BalancedSampleSampler(ds, samples_per_id=args.samples_per_id, seed=args.seed)
+        if ddp_enabled:
+            train_sampler = DistributedBalancedSampler(
+                ds,
+                samples_per_id=args.samples_per_id,
+                num_replicas=world_size,
+                rank=rank,
+                seed=args.seed,
+            )
+        else:
+            train_sampler = BalancedSampleSampler(ds, samples_per_id=args.samples_per_id, seed=args.seed)
     train_loader = DataLoader(
         ds,
         batch_size=args.batch_size,

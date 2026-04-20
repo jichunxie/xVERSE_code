@@ -25,15 +25,24 @@ print(max(1, torch.cuda.device_count()))
 PY
 )
 echo ">>> Visible CUDA devices: ${NPROC_PER_NODE}"
+
+DATA_ROOT="/hpc/group/xielab/xj58/xVerseAtlas/npz_tissue_dataset_donor"
+COMPILED_ROOT="/hpc/group/xielab/xj58/xVerseAtlas/compiled_train_v1_all"
+GENE_IDS_PATH="${DATA_ROOT}/ensg_keys_high_quality.txt"
+SUMMARY_CSV="${DATA_ROOT}/pantissue_full_updated.csv"
+CELLTYPE_CSV="${DATA_ROOT}/cellxgene_cell_type_mapped.csv"
+
+echo ">>> DATA_ROOT=${DATA_ROOT}"
+echo ">>> COMPILED_ROOT=${COMPILED_ROOT}"
+
 stdbuf -oL -eL torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" -m main_energy.train_pantissue \
-    --data-root "/hpc/group/xielab/xj58/xVerseAtlas/npz_tissue_dataset_donor" \
-    --summary-csv "/hpc/group/xielab/xj58/xVerseAtlas/npz_tissue_dataset_donor/pantissue_full_updated.csv" \
-    --train-index-cache "/hpc/group/xielab/xj58/xVerseAtlas/npz_tissue_dataset_donor/xverse_index_cache_train_all.npz" \
-    --val-index-cache "/hpc/group/xielab/xj58/xVerseAtlas/npz_tissue_dataset_donor/xverse_index_cache_val_all.npz" \
-    --allow-stale-index-cache \
+    --compiled-dataset-root "${COMPILED_ROOT}" \
+    --compiled-max-cached-shards 8 \
+    --data-root "${DATA_ROOT}" \
+    --summary-csv "${SUMMARY_CSV}" \
     --filter-bad-cells \
-    --cell-type-csv "/hpc/group/xielab/xj58/xVerseAtlas/npz_tissue_dataset_donor/cellxgene_cell_type_mapped.csv" \
-    --gene-ids-path "/hpc/group/xielab/xj58/xVerseAtlas/npz_tissue_dataset_donor/ensg_keys_high_quality.txt" \
+    --cell-type-csv "${CELLTYPE_CSV}" \
+    --gene-ids-path "${GENE_IDS_PATH}" \
     --result-dir "/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_all_tissue_h200" \
     --num-epochs 100 \
     --batch-size 512 \
