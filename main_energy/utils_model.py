@@ -108,59 +108,64 @@ class GaussianMixturePrior(nn.Module):
             self.register_parameter("prior_factor", None)
 
     def _cache_matrices(self):
-        # (K, D)
-        logvar = self.prior_logvar.float()
-        d_inv = torch.exp(-logvar)
-        logdet_base = logvar.sum(dim=-1)  # (K,)
+        device_type = self.prior_mu.device.type
+        with torch.amp.autocast(device_type=device_type, enabled=False):
+            # (K, D)
+            logvar = self.prior_logvar.float()
+            d_inv = torch.exp(-logvar)
+            logdet_base = logvar.sum(dim=-1)  # (K,)
 
-        if self.R <= 0:
+            if self.R <= 0:
+                return {
+                    "d_inv": d_inv,
+                    "dinv_u": None,
+                    "inv_s": None,
+                    "logdet_extra": torch.zeros_like(logdet_base),
+                }
+
+            # U: (K, D, R)
+            u = self.prior_factor.float()
+            dinv_u = d_inv.unsqueeze(-1) * u  # (K, D, R)
+            # S = I + U^T D^{-1} U  -> (K, R, R)
+            ut_dinv_u = torch.einsum("kdr,kds->krs", u, dinv_u)
+            eye = torch.eye(self.R, device=ut_dinv_u.device, dtype=ut_dinv_u.dtype).unsqueeze(0)
+            s = ut_dinv_u + eye
+            # Numerical jitter for safety.
+            s = s + 1e-6 * eye
+            chol_s = torch.linalg.cholesky(s)
+            inv_s = torch.cholesky_inverse(chol_s)
+            logdet_extra = 2.0 * torch.log(torch.diagonal(chol_s, dim1=-2, dim2=-1)).sum(dim=-1)  # (K,)
             return {
                 "d_inv": d_inv,
-                "dinv_u": None,
-                "inv_s": None,
-                "logdet_extra": torch.zeros_like(logdet_base),
+                "dinv_u": dinv_u,
+                "inv_s": inv_s,
+                "logdet_extra": logdet_extra,
             }
 
-        # U: (K, D, R)
-        u = self.prior_factor.float()
-        dinv_u = d_inv.unsqueeze(-1) * u  # (K, D, R)
-        # S = I + U^T D^{-1} U  -> (K, R, R)
-        ut_dinv_u = torch.einsum("kdr,kds->krs", u, dinv_u)
-        eye = torch.eye(self.R, device=ut_dinv_u.device, dtype=ut_dinv_u.dtype).unsqueeze(0)
-        s = ut_dinv_u + eye
-        # Numerical jitter for safety.
-        s = s + 1e-6 * eye
-        chol_s = torch.linalg.cholesky(s)
-        inv_s = torch.cholesky_inverse(chol_s)
-        logdet_extra = 2.0 * torch.log(torch.diagonal(chol_s, dim1=-2, dim2=-1)).sum(dim=-1)  # (K,)
-        return {
-            "d_inv": d_inv,
-            "dinv_u": dinv_u,
-            "inv_s": inv_s,
-            "logdet_extra": logdet_extra,
-        }
-
     def component_log_prob(self, z: torch.Tensor) -> torch.Tensor:
-        z_exp = z.float().unsqueeze(1)  # (B, 1, D)
-        mu = self.prior_mu.float().unsqueeze(0)  # (1, K, D)
-        delta = z_exp - mu  # (B, K, D)
+        device_type = z.device.type
+        with torch.amp.autocast(device_type=device_type, enabled=False):
+            z_exp = z.float().unsqueeze(1)  # (B, 1, D)
+            mu = self.prior_mu.float().unsqueeze(0)  # (1, K, D)
+            delta = z_exp - mu  # (B, K, D)
 
-        cache = self._cache_matrices()
-        d_inv = cache["d_inv"].unsqueeze(0)  # (1, K, D)
-        delta_d = delta * d_inv  # (B, K, D)
-        quad = (delta * delta_d).sum(dim=-1)  # (B, K)
+            cache = self._cache_matrices()
+            d_inv = cache["d_inv"].unsqueeze(0)  # (1, K, D)
+            delta_d = delta * d_inv  # (B, K, D)
+            quad = (delta * delta_d).sum(dim=-1)  # (B, K)
 
-        if self.R > 0:
-            # t = U^T D^{-1} delta  -> (B, K, R)
-            u = self.prior_factor.float()  # (K, D, R)
-            t = torch.einsum("bkd,kdr->bkr", delta_d, u)
-            inv_s = cache["inv_s"]  # (K, R, R)
-            quad_corr = torch.einsum("bkr,krs,bks->bk", t, inv_s, t)
-            quad = quad - quad_corr
+            if self.R > 0:
+                # t = U^T D^{-1} delta  -> (B, K, R)
+                u = self.prior_factor.float()  # (K, D, R)
+                t = torch.einsum("bkd,kdr->bkr", delta_d, u)
+                inv_s = cache["inv_s"]  # (K, R, R)
+                quad_corr = torch.einsum("bkr,krs,bks->bk", t, inv_s, t)
+                quad = quad - quad_corr
 
-        log_det = self.prior_logvar.sum(dim=-1) + cache["logdet_extra"]  # (K,)
-        log_norm = self.D * math.log(2.0 * math.pi)
-        return -0.5 * (quad + log_det.unsqueeze(0) + log_norm)
+            log_det = self.prior_logvar.float().sum(dim=-1) + cache["logdet_extra"]  # (K,)
+            log_norm = self.D * math.log(2.0 * math.pi)
+            out = -0.5 * (quad + log_det.unsqueeze(0) + log_norm)
+        return out
 
     def log_prob(self, z: torch.Tensor) -> torch.Tensor:
         log_weights = F.log_softmax(self.pi_logits, dim=0).unsqueeze(0)  # (1, K)
@@ -171,31 +176,33 @@ class GaussianMixturePrior(nn.Module):
         """
         Analytic score of GMM prior: grad_z log p(z), shape (B, D).
         """
-        z_exp = z.float().unsqueeze(1)  # (B, 1, D)
-        mu = self.prior_mu.float().unsqueeze(0)  # (1, K, D)
-        delta = z_exp - mu  # (B, K, D)
-        cache = self._cache_matrices()
-        d_inv = cache["d_inv"].unsqueeze(0)  # (1, K, D)
-        delta_d = delta * d_inv  # (B, K, D)
+        device_type = z.device.type
+        with torch.amp.autocast(device_type=device_type, enabled=False):
+            z_exp = z.float().unsqueeze(1)  # (B, 1, D)
+            mu = self.prior_mu.float().unsqueeze(0)  # (1, K, D)
+            delta = z_exp - mu  # (B, K, D)
+            cache = self._cache_matrices()
+            d_inv = cache["d_inv"].unsqueeze(0)  # (1, K, D)
+            delta_d = delta * d_inv  # (B, K, D)
 
-        log_weights = F.log_softmax(self.pi_logits, dim=0).unsqueeze(0)  # (1, K)
-        log_comp = self.component_log_prob(z)  # (B, K)
-        log_post = log_weights + log_comp
-        resp = torch.softmax(log_post, dim=1).unsqueeze(-1)  # (B, K, 1)
+            log_weights = F.log_softmax(self.pi_logits.float(), dim=0).unsqueeze(0)  # (1, K)
+            log_comp = self.component_log_prob(z)  # (B, K)
+            log_post = log_weights + log_comp
+            resp = torch.softmax(log_post, dim=1).unsqueeze(-1)  # (B, K, 1)
 
-        inv_delta = delta_d
-        if self.R > 0:
-            inv_s = cache["inv_s"]  # (K, R, R)
-            # t = U^T D^{-1} delta  -> (B, K, R)
-            t = torch.einsum("bkd,kdr->bkr", delta_d, self.prior_factor.float())
-            # s = inv(S) t
-            s = torch.einsum("krs,bks->bkr", inv_s, t)
-            # correction = D^{-1} U s
-            corr = torch.einsum("kdr,bkr->bkd", cache["dinv_u"], s)
-            inv_delta = delta_d - corr
+            inv_delta = delta_d
+            if self.R > 0:
+                inv_s = cache["inv_s"]  # (K, R, R)
+                # t = U^T D^{-1} delta  -> (B, K, R)
+                t = torch.einsum("bkd,kdr->bkr", delta_d, self.prior_factor.float())
+                # s = inv(S) t
+                s = torch.einsum("krs,bks->bkr", inv_s, t)
+                # correction = D^{-1} U s
+                corr = torch.einsum("kdr,bkr->bkd", cache["dinv_u"], s)
+                inv_delta = delta_d - corr
 
-        per_comp_score = -inv_delta  # grad_z log N = -Sigma^{-1}(z-mu)
-        score = (resp * per_comp_score).sum(dim=1)  # (B, D)
+            per_comp_score = -inv_delta  # grad_z log N = -Sigma^{-1}(z-mu)
+            score = (resp * per_comp_score).sum(dim=1)  # (B, D)
         return score.to(z.dtype)
 
     def component_covariances(self) -> torch.Tensor:
