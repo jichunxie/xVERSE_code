@@ -89,26 +89,78 @@ class FiLMMaskEncoder(nn.Module):
 
 class GaussianMixturePrior(nn.Module):
     """
-    Learnable diagonal-covariance GMM prior.
+    Learnable low-rank-covariance GMM prior.
+    Component covariance:
+        Sigma_k = diag(exp(prior_logvar_k)) + U_k U_k^T
     """
 
-    def __init__(self, num_components: int, latent_dim: int):
+    def __init__(self, num_components: int, latent_dim: int, cov_rank: int = 8):
         super().__init__()
         self.K = num_components
         self.D = latent_dim
+        self.R = max(0, int(cov_rank))
         self.pi_logits = nn.Parameter(torch.zeros(num_components))
         self.prior_mu = nn.Parameter(torch.randn(num_components, latent_dim) * 0.01)
         self.prior_logvar = nn.Parameter(torch.zeros(num_components, latent_dim))
+        if self.R > 0:
+            self.prior_factor = nn.Parameter(torch.randn(num_components, latent_dim, self.R) * 0.01)
+        else:
+            self.register_parameter("prior_factor", None)
+
+    def _cache_matrices(self):
+        # (K, D)
+        logvar = self.prior_logvar.float()
+        d_inv = torch.exp(-logvar)
+        logdet_base = logvar.sum(dim=-1)  # (K,)
+
+        if self.R <= 0:
+            return {
+                "d_inv": d_inv,
+                "dinv_u": None,
+                "inv_s": None,
+                "logdet_extra": torch.zeros_like(logdet_base),
+            }
+
+        # U: (K, D, R)
+        u = self.prior_factor.float()
+        dinv_u = d_inv.unsqueeze(-1) * u  # (K, D, R)
+        # S = I + U^T D^{-1} U  -> (K, R, R)
+        ut_dinv_u = torch.einsum("kdr,kds->krs", u, dinv_u)
+        eye = torch.eye(self.R, device=ut_dinv_u.device, dtype=ut_dinv_u.dtype).unsqueeze(0)
+        s = ut_dinv_u + eye
+        # Numerical jitter for safety.
+        s = s + 1e-6 * eye
+        chol_s = torch.linalg.cholesky(s)
+        inv_s = torch.cholesky_inverse(chol_s)
+        logdet_extra = 2.0 * torch.log(torch.diagonal(chol_s, dim1=-2, dim2=-1)).sum(dim=-1)  # (K,)
+        return {
+            "d_inv": d_inv,
+            "dinv_u": dinv_u,
+            "inv_s": inv_s,
+            "logdet_extra": logdet_extra,
+        }
 
     def component_log_prob(self, z: torch.Tensor) -> torch.Tensor:
-        z_exp = z.unsqueeze(1)  # (B, 1, D)
-        mu = self.prior_mu.unsqueeze(0)  # (1, K, D)
-        logvar = self.prior_logvar.unsqueeze(0)  # (1, K, D)
-        inv_var = torch.exp(-logvar)
-        quad = ((z_exp - mu) ** 2) * inv_var
-        log_det = logvar.sum(dim=-1)
+        z_exp = z.float().unsqueeze(1)  # (B, 1, D)
+        mu = self.prior_mu.float().unsqueeze(0)  # (1, K, D)
+        delta = z_exp - mu  # (B, K, D)
+
+        cache = self._cache_matrices()
+        d_inv = cache["d_inv"].unsqueeze(0)  # (1, K, D)
+        delta_d = delta * d_inv  # (B, K, D)
+        quad = (delta * delta_d).sum(dim=-1)  # (B, K)
+
+        if self.R > 0:
+            # t = U^T D^{-1} delta  -> (B, K, R)
+            u = self.prior_factor.float()  # (K, D, R)
+            t = torch.einsum("bkd,kdr->bkr", delta_d, u)
+            inv_s = cache["inv_s"]  # (K, R, R)
+            quad_corr = torch.einsum("bkr,krs,bks->bk", t, inv_s, t)
+            quad = quad - quad_corr
+
+        log_det = self.prior_logvar.sum(dim=-1) + cache["logdet_extra"]  # (K,)
         log_norm = self.D * math.log(2.0 * math.pi)
-        return -0.5 * (quad.sum(dim=-1) + log_det + log_norm)
+        return -0.5 * (quad + log_det.unsqueeze(0) + log_norm)
 
     def log_prob(self, z: torch.Tensor) -> torch.Tensor:
         log_weights = F.log_softmax(self.pi_logits, dim=0).unsqueeze(0)  # (1, K)
@@ -119,19 +171,52 @@ class GaussianMixturePrior(nn.Module):
         """
         Analytic score of GMM prior: grad_z log p(z), shape (B, D).
         """
-        z_exp = z.unsqueeze(1)  # (B, 1, D)
-        mu = self.prior_mu.unsqueeze(0)  # (1, K, D)
-        logvar = self.prior_logvar.unsqueeze(0)  # (1, K, D)
-        var = torch.exp(logvar)
+        z_exp = z.float().unsqueeze(1)  # (B, 1, D)
+        mu = self.prior_mu.float().unsqueeze(0)  # (1, K, D)
+        delta = z_exp - mu  # (B, K, D)
+        cache = self._cache_matrices()
+        d_inv = cache["d_inv"].unsqueeze(0)  # (1, K, D)
+        delta_d = delta * d_inv  # (B, K, D)
 
         log_weights = F.log_softmax(self.pi_logits, dim=0).unsqueeze(0)  # (1, K)
         log_comp = self.component_log_prob(z)  # (B, K)
         log_post = log_weights + log_comp
         resp = torch.softmax(log_post, dim=1).unsqueeze(-1)  # (B, K, 1)
 
-        per_comp_score = (mu - z_exp) / (var + 1e-8)  # (B, K, D)
+        inv_delta = delta_d
+        if self.R > 0:
+            inv_s = cache["inv_s"]  # (K, R, R)
+            # t = U^T D^{-1} delta  -> (B, K, R)
+            t = torch.einsum("bkd,kdr->bkr", delta_d, self.prior_factor.float())
+            # s = inv(S) t
+            s = torch.einsum("krs,bks->bkr", inv_s, t)
+            # correction = D^{-1} U s
+            corr = torch.einsum("kdr,bkr->bkd", cache["dinv_u"], s)
+            inv_delta = delta_d - corr
+
+        per_comp_score = -inv_delta  # grad_z log N = -Sigma^{-1}(z-mu)
         score = (resp * per_comp_score).sum(dim=1)  # (B, D)
-        return score
+        return score.to(z.dtype)
+
+    def component_covariances(self) -> torch.Tensor:
+        # (K, D, D)
+        diag_cov = torch.diag_embed(torch.exp(self.prior_logvar.float()))
+        if self.R <= 0:
+            return diag_cov
+        f = self.prior_factor.float()
+        low_rank_cov = torch.einsum("kdr,ksr->kds", f, f)
+        return diag_cov + low_rank_cov
+
+    def global_covariance(self) -> torch.Tensor:
+        w = torch.softmax(self.pi_logits.float(), dim=0)  # (K,)
+        cov_k = self.component_covariances()  # (K, D, D)
+        mu = self.prior_mu.float()
+        mean = (w.unsqueeze(1) * mu).sum(dim=0)  # (D,)
+        second = (
+            w.unsqueeze(1).unsqueeze(2)
+            * (cov_k + mu.unsqueeze(2) * mu.unsqueeze(1))
+        ).sum(dim=0)
+        return second - mean.unsqueeze(1) * mean.unsqueeze(0)
 
 
 class PoissonDecoder(nn.Module):
@@ -159,6 +244,7 @@ class MaskFiLMGMMVAE(nn.Module):
         dec_hidden_dim: int = 1024,
         dropout: float = 0.1,
         prior_type: str = "gmm",
+        prior_cov_rank: int = 8,
     ):
         super().__init__()
         if prior_type not in ("gmm", "gaussian"):
@@ -171,7 +257,11 @@ class MaskFiLMGMMVAE(nn.Module):
             mask_hidden_dim=mask_hidden_dim,
             dropout=dropout,
         )
-        self.prior = GaussianMixturePrior(num_components=num_components, latent_dim=latent_dim)
+        self.prior = GaussianMixturePrior(
+            num_components=num_components,
+            latent_dim=latent_dim,
+            cov_rank=prior_cov_rank,
+        )
         self.decoder = PoissonDecoder(
             latent_dim=latent_dim,
             num_genes=num_genes,
@@ -215,6 +305,8 @@ class MaskFiLMGMMVAE(nn.Module):
         lambda_score: float = 0.0,
         score_noise_std: float = 0.1,
         score_detach_z: bool = True,
+        lambda_cov: float = 0.0,
+        cov_use_mu: bool = True,
     ) -> Dict[str, torch.Tensor]:
         if encoder_mask is None:
             encoder_mask = x_mask
@@ -245,6 +337,9 @@ class MaskFiLMGMMVAE(nn.Module):
         score_loss = torch.zeros((), device=z.device, dtype=z.dtype)
         score_norm_pred = torch.zeros((), device=z.device, dtype=z.dtype)
         score_norm_tgt = torch.zeros((), device=z.device, dtype=z.dtype)
+        cov_loss = torch.zeros((), device=z.device, dtype=z.dtype)
+        cov_offdiag_post = torch.zeros((), device=z.device, dtype=z.dtype)
+        cov_offdiag_prior = torch.zeros((), device=z.device, dtype=z.dtype)
 
         if lambda_score > 0:
             z_for_score = z.detach() if score_detach_z else z
@@ -259,13 +354,31 @@ class MaskFiLMGMMVAE(nn.Module):
             score_norm_pred = score_pred.norm(dim=-1).mean()
             score_norm_tgt = score_tgt.norm(dim=-1).mean()
 
-        total_loss = recon_loss + beta * kl_loss + lambda_score * score_loss
+        if lambda_cov > 0:
+            cov_src = mu if cov_use_mu else z
+            post_cov = batch_covariance(cov_src.float())
+            if self.prior_type == "gmm":
+                prior_cov = self.prior.global_covariance().float()
+            else:
+                d = int(cov_src.size(-1))
+                prior_cov = torch.eye(d, device=cov_src.device, dtype=torch.float32)
+
+            post_off = offdiag_part(post_cov)
+            prior_off = offdiag_part(prior_cov)
+            cov_loss = F.mse_loss(post_off, prior_off)
+            cov_offdiag_post = post_off.abs().mean().to(z.dtype)
+            cov_offdiag_prior = prior_off.abs().mean().to(z.dtype)
+
+        total_loss = recon_loss + beta * kl_loss + lambda_score * score_loss + lambda_cov * cov_loss
 
         return {
             "loss": total_loss,
             "recon_loss": recon_loss,
             "kl_loss": kl_loss,
             "score_loss": score_loss,
+            "cov_loss": cov_loss,
+            "cov_offdiag_post": cov_offdiag_post,
+            "cov_offdiag_prior": cov_offdiag_prior,
             "score_norm_pred": score_norm_pred,
             "score_norm_tgt": score_norm_tgt,
             "log_q_mean": log_q.mean(),
@@ -289,6 +402,19 @@ def gaussian_log_prob_diag(z: torch.Tensor, mu: torch.Tensor, logvar: torch.Tens
     log_det = logvar.sum(dim=-1)
     d = z.size(-1)
     return -0.5 * (quad.sum(dim=-1) + log_det + d * math.log(2.0 * math.pi))
+
+
+def batch_covariance(x: torch.Tensor) -> torch.Tensor:
+    if x.dim() != 2:
+        raise ValueError(f"Expected 2D tensor for covariance, got shape={tuple(x.shape)}")
+    bsz = x.size(0)
+    xc = x - x.mean(dim=0, keepdim=True)
+    denom = max(bsz - 1, 1)
+    return (xc.transpose(0, 1) @ xc) / float(denom)
+
+
+def offdiag_part(m: torch.Tensor) -> torch.Tensor:
+    return m - torch.diag_embed(torch.diagonal(m, dim1=-2, dim2=-1))
 
 
 def poisson_nll(x_count: torch.Tensor, rate: torch.Tensor) -> torch.Tensor:
@@ -451,10 +577,12 @@ def train_gmm_vae_one_epoch(
     lambda_contrast=0.0,
     contrast_temp=0.1,
     lambda_real_recon=0.0,
+    lambda_cov=0.0,
+    cov_use_mu=True,
 ):
     model.train()
     loss_fn = model.module.loss if hasattr(model, "module") else model.loss
-    total_loss = total_recon = total_kl = total_score = total_contrast = 0.0
+    total_loss = total_recon = total_kl = total_score = total_contrast = total_cov = 0.0
     n_cells = 0
     is_rank0 = (not dist.is_available()) or (not dist.is_initialized()) or (dist.get_rank() == 0)
     iter_end_t = time.perf_counter()
@@ -485,6 +613,8 @@ def train_gmm_vae_one_epoch(
                 lambda_score=lambda_score,
                 score_noise_std=score_noise_std,
                 score_detach_z=score_detach_z,
+                lambda_cov=lambda_cov,
+                cov_use_mu=cov_use_mu,
             )
             need_real_view = (lambda_contrast > 0) or (lambda_real_recon > 0)
             real_recon = torch.zeros((), device=x_count.device, dtype=out_fake["z"].dtype)
@@ -498,6 +628,8 @@ def train_gmm_vae_one_epoch(
                     lambda_score=0.0,
                     score_noise_std=score_noise_std,
                     score_detach_z=score_detach_z,
+                    lambda_cov=0.0,
+                    cov_use_mu=cov_use_mu,
                 )
                 real_recon = out_real["recon_loss"]
             if lambda_contrast > 0:
@@ -513,6 +645,7 @@ def train_gmm_vae_one_epoch(
             recon = out_fake["recon_loss"]
             kl = out_fake["kl_loss"]
             score = out_fake["score_loss"]
+            cov = out_fake["cov_loss"]
 
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
@@ -526,6 +659,7 @@ def train_gmm_vae_one_epoch(
         total_kl += kl.item() * bsz
         total_score += score.item() * bsz
         total_contrast += contrast.item() * bsz
+        total_cov += cov.item() * bsz
         step_t = time.perf_counter() - step_start_t
         iter_end_t = time.perf_counter()
 
@@ -539,7 +673,7 @@ def train_gmm_vae_one_epoch(
             msg = (
                 f"[Batch {batch_idx + 1}] "
                 f"Loss={loss.item():.4f}, Recon={recon.item():.4f}, KL={kl.item():.4f}, "
-                f"Score={score.item():.4f}"
+                f"Score={score.item():.4f}, Cov={cov.item():.4f}"
             )
             if lambda_contrast > 0:
                 msg += f", Contrast={contrast.item():.4f}"
@@ -547,6 +681,7 @@ def train_gmm_vae_one_epoch(
                 msg += f", RealRecon={real_recon.item():.4f}"
             msg += (
                 f", ||s_pred||={out_fake['score_norm_pred'].item():.4f}, ||s_tgt||={out_fake['score_norm_tgt'].item():.4f}, "
+                f"||cov_post_off||={out_fake['cov_offdiag_post'].item():.6f}, ||cov_prior_off||={out_fake['cov_offdiag_prior'].item():.6f}, "
                 f"DataT={interval_data_t / max(interval_steps, 1):.4f}s, "
                 f"PrepT={interval_prep_t / max(interval_steps, 1):.4f}s, "
                 f"ComputeT={interval_compute_t / max(interval_steps, 1):.4f}s, "
@@ -558,12 +693,12 @@ def train_gmm_vae_one_epoch(
 
     if dist.is_available() and dist.is_initialized():
         stats = torch.tensor(
-            [total_loss, total_recon, total_kl, total_score, total_contrast, float(n_cells)],
+            [total_loss, total_recon, total_kl, total_score, total_contrast, total_cov, float(n_cells)],
             device=device,
             dtype=torch.float64,
         )
         dist.all_reduce(stats, op=dist.ReduceOp.SUM)
-        total_loss, total_recon, total_kl, total_score, total_contrast, n_cells = stats.tolist()
+        total_loss, total_recon, total_kl, total_score, total_contrast, total_cov, n_cells = stats.tolist()
         n_cells = max(float(n_cells), 1.0)
 
     return (
@@ -572,6 +707,7 @@ def train_gmm_vae_one_epoch(
         total_kl / n_cells,
         total_score / n_cells,
         total_contrast / n_cells,
+        total_cov / n_cells,
     )
 
 
@@ -587,10 +723,12 @@ def evaluate_gmm_vae_one_epoch(
     lambda_contrast=0.0,
     contrast_temp=0.1,
     lambda_real_recon=0.0,
+    lambda_cov=0.0,
+    cov_use_mu=True,
 ):
     model.eval()
     loss_fn = model.module.loss if hasattr(model, "module") else model.loss
-    total_loss = total_recon = total_kl = total_score = total_contrast = 0.0
+    total_loss = total_recon = total_kl = total_score = total_contrast = total_cov = 0.0
     n_cells = 0
     is_rank0 = (not dist.is_available()) or (not dist.is_initialized()) or (dist.get_rank() == 0)
     iter_end_t = time.perf_counter()
@@ -619,6 +757,8 @@ def evaluate_gmm_vae_one_epoch(
                 lambda_score=lambda_score,
                 score_noise_std=score_noise_std,
                 score_detach_z=score_detach_z,
+                lambda_cov=lambda_cov,
+                cov_use_mu=cov_use_mu,
             )
             need_real_view = (lambda_contrast > 0) or (lambda_real_recon > 0)
             real_recon = torch.zeros((), device=x_count.device, dtype=out_fake["z"].dtype)
@@ -632,6 +772,8 @@ def evaluate_gmm_vae_one_epoch(
                     lambda_score=0.0,
                     score_noise_std=score_noise_std,
                     score_detach_z=score_detach_z,
+                    lambda_cov=0.0,
+                    cov_use_mu=cov_use_mu,
                 )
                 real_recon = out_real["recon_loss"]
             if lambda_contrast > 0:
@@ -649,6 +791,7 @@ def evaluate_gmm_vae_one_epoch(
             total_kl += out_fake["kl_loss"].item() * bsz
             total_score += out_fake["score_loss"].item() * bsz
             total_contrast += contrast.item() * bsz
+            total_cov += out_fake["cov_loss"].item() * bsz
             compute_t = time.perf_counter() - compute_start_t
             step_t = time.perf_counter() - step_start_t
             iter_end_t = time.perf_counter()
@@ -672,12 +815,12 @@ def evaluate_gmm_vae_one_epoch(
 
     if dist.is_available() and dist.is_initialized():
         stats = torch.tensor(
-            [total_loss, total_recon, total_kl, total_score, total_contrast, float(n_cells)],
+            [total_loss, total_recon, total_kl, total_score, total_contrast, total_cov, float(n_cells)],
             device=device,
             dtype=torch.float64,
         )
         dist.all_reduce(stats, op=dist.ReduceOp.SUM)
-        total_loss, total_recon, total_kl, total_score, total_contrast, n_cells = stats.tolist()
+        total_loss, total_recon, total_kl, total_score, total_contrast, total_cov, n_cells = stats.tolist()
         n_cells = max(float(n_cells), 1.0)
 
     return (
@@ -686,6 +829,7 @@ def evaluate_gmm_vae_one_epoch(
         total_kl / n_cells,
         total_score / n_cells,
         total_contrast / n_cells,
+        total_cov / n_cells,
     )
 
 

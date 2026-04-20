@@ -102,6 +102,8 @@ def parse_args():
                         help="Latent prior type. 'gaussian' uses N(0,I) with closed-form KL.")
     parser.add_argument("--latent-dim", type=int, default=128, help="Latent dim.")
     parser.add_argument("--num-components", type=int, default=16, help="GMM component count K.")
+    parser.add_argument("--prior-cov-rank", type=int, default=8,
+                        help="Low-rank size R for each GMM component covariance: diag + U U^T.")
     parser.add_argument("--expr-hidden-dim", type=int, default=1024, help="Expression encoder hidden dim.")
     parser.add_argument("--mask-hidden-dim", type=int, default=512, help="Mask encoder hidden dim.")
     parser.add_argument("--dec-hidden-dim", type=int, default=1024, help="Decoder hidden dim.")
@@ -118,6 +120,12 @@ def parse_args():
                         help="Maximum fraction of observed genes to hide when mask augmentation is applied.")
     parser.add_argument("--lambda-score", type=float, default=0.0,
                         help="Weight of auxiliary score loss. Keep small when enabled.")
+    parser.add_argument("--lambda-cov", type=float, default=0.0,
+                        help="Weight of posterior-prior covariance matching loss (off-diagonal covariance).")
+    parser.add_argument("--cov-use-mu", action="store_true", default=True,
+                        help="Use posterior mean mu for covariance matching (recommended).")
+    parser.add_argument("--cov-use-z", dest="cov_use_mu", action="store_false",
+                        help="Use sampled z for covariance matching.")
     parser.add_argument("--score-noise-std", type=float, default=0.1,
                         help="Gaussian noise std for score head training.")
     parser.add_argument("--score-detach-z", action="store_true", default=True,
@@ -401,6 +409,7 @@ def main():
         num_genes=args.total_gene,
         latent_dim=args.latent_dim,
         num_components=args.num_components,
+        prior_cov_rank=args.prior_cov_rank,
         expr_hidden_dim=args.expr_hidden_dim,
         mask_hidden_dim=args.mask_hidden_dim,
         dec_hidden_dim=args.dec_hidden_dim,
@@ -459,7 +468,7 @@ def main():
         if val_sampler is not None:
             val_sampler.set_epoch(epoch_id)
 
-        loss_full, loss_recon, loss_kl, loss_score, loss_contrast = train_gmm_vae_one_epoch(
+        loss_full, loss_recon, loss_kl, loss_score, loss_contrast, loss_cov = train_gmm_vae_one_epoch(
             model=model,
             optimizer=optimizer,
             scaler=scaler,
@@ -477,17 +486,19 @@ def main():
             lambda_contrast=args.lambda_contrast,
             contrast_temp=args.contrast_temp,
             lambda_real_recon=args.lambda_real_recon,
+            lambda_cov=args.lambda_cov,
+            cov_use_mu=args.cov_use_mu,
         )
         train_msg = (
             f"[Epoch {epoch_id}] "
             f"Loss={loss_full:.4f}, Recon={loss_recon:.4f}, KL={loss_kl:.4f}, "
-            f"Score={loss_score:.4f}"
+            f"Score={loss_score:.4f}, Cov={loss_cov:.4f}"
         )
         if args.lambda_contrast > 0:
             train_msg += f", Contrast={loss_contrast:.4f}"
         log(train_msg)
 
-        val_loss_full, val_loss_recon, val_loss_kl, val_loss_score, val_loss_contrast = evaluate_gmm_vae_one_epoch(
+        val_loss_full, val_loss_recon, val_loss_kl, val_loss_score, val_loss_contrast, val_loss_cov = evaluate_gmm_vae_one_epoch(
             model=model,
             val_loader=val_loader,
             device=device,
@@ -499,11 +510,13 @@ def main():
             lambda_contrast=args.lambda_contrast,
             contrast_temp=args.contrast_temp,
             lambda_real_recon=args.lambda_real_recon,
+            lambda_cov=args.lambda_cov,
+            cov_use_mu=args.cov_use_mu,
         )
         val_msg = (
             f"[Epoch {epoch_id}] Validation Loss: "
             f"Loss={val_loss_full:.4f}, Recon={val_loss_recon:.4f}, KL={val_loss_kl:.4f}, "
-            f"Score={val_loss_score:.4f}"
+            f"Score={val_loss_score:.4f}, Cov={val_loss_cov:.4f}"
         )
         if args.lambda_contrast > 0:
             val_msg += f", Contrast={val_loss_contrast:.4f}"
