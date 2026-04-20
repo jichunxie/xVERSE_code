@@ -294,15 +294,15 @@ def gaussian_log_prob_diag(z: torch.Tensor, mu: torch.Tensor, logvar: torch.Tens
 def poisson_nll(x_count: torch.Tensor, rate: torch.Tensor) -> torch.Tensor:
     x = x_count.float()
     r = torch.clamp(rate, min=1e-8)
-    nll = r - x * torch.log(r) + torch.lgamma(x + 1.0)
-    return nll.sum(dim=-1).mean()
+    nll = r - x * torch.log(r)
+    return nll.mean()
 
 
 def poisson_nll_masked(x_count: torch.Tensor, rate: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     x = x_count.float()
     r = torch.clamp(rate, min=1e-8)
     m = mask.float()
-    nll = r - x * torch.log(r) + torch.lgamma(x + 1.0)
+    nll = r - x * torch.log(r)
     nll = nll * m
     denom = torch.clamp(m.sum(), min=1.0)
     return nll.sum() / denom
