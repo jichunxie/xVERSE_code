@@ -34,9 +34,9 @@ echo ">>> COMPILED_ROOT=${COMPILED_ROOT}"
 
 stdbuf -oL -eL torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" -m main_energy.train_pantissue \
     --compiled-dataset-root "${COMPILED_ROOT}" \
-    --compiled-max-cached-shards 2048 \
+    --compiled-max-cached-shards 4092 \
     --sampler-shard-reorder-window 65536 \
-    --sampler-active-shards 8 \
+    --sampler-active-shards 4 \
     --result-dir "/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_all_tissue_h200" \
     --num-epochs 100 \
     --batch-size 512 \
