@@ -458,6 +458,37 @@ def bidirectional_contrastive_loss(z_real: torch.Tensor, z_fake: torch.Tensor, t
     return 0.5 * (loss_12 + loss_21)
 
 
+def gmm_collapse_diagnostics(prior: GaussianMixturePrior, z: torch.Tensor, active_thresh: float = 1e-3) -> Dict[str, float]:
+    with torch.no_grad():
+        pi = torch.softmax(prior.pi_logits.float(), dim=0)  # (K,)
+        pi_entropy = float((-(pi * torch.log(pi + 1e-12))).sum().item())
+        k_eff = float(torch.exp(torch.tensor(pi_entropy, device=pi.device)).item())
+
+        log_w = torch.log(pi + 1e-12).unsqueeze(0)  # (1, K)
+        log_comp = prior.component_log_prob(z.detach())  # (B, K)
+        resp = torch.softmax(log_w + log_comp, dim=1)  # (B, K)
+        usage = resp.mean(dim=0)  # (K,)
+        active_comp = int((usage > float(active_thresh)).sum().item())
+        resp_top1 = float(resp.max(dim=1).values.mean().item())
+
+        mu = prior.prior_mu.float()  # (K, D)
+        if mu.size(0) > 1:
+            dmat = torch.cdist(mu, mu, p=2)
+            inf = torch.tensor(float("inf"), device=dmat.device, dtype=dmat.dtype)
+            dmat = dmat + torch.eye(dmat.size(0), device=dmat.device, dtype=dmat.dtype) * inf
+            min_mu_dist = float(torch.min(dmat).item())
+        else:
+            min_mu_dist = 0.0
+
+    return {
+        "pi_entropy": pi_entropy,
+        "k_eff": k_eff,
+        "active_comp": active_comp,
+        "resp_top1": resp_top1,
+        "min_mu_dist": min_mu_dist,
+    }
+
+
 # =========================
 # Training / evaluation (for GMM-VAE)
 # =========================
@@ -589,27 +620,20 @@ def train_gmm_vae_one_epoch(
 ):
     model.train()
     loss_fn = model.module.loss if hasattr(model, "module") else model.loss
+    prior_ref = model.module.prior if hasattr(model, "module") else model.prior
     total_loss = total_recon = total_kl = total_score = total_contrast = total_cov = 0.0
     n_cells = 0
     is_rank0 = (not dist.is_available()) or (not dist.is_initialized()) or (dist.get_rank() == 0)
-    iter_end_t = time.perf_counter()
-    interval_data_t = interval_prep_t = interval_compute_t = interval_step_t = 0.0
-    interval_steps = 0
 
     for batch_idx, (_, _, _, x_count, x_mask, x_mask_encoder) in enumerate(train_loader):
-        step_start_t = time.perf_counter()
-        data_t = step_start_t - iter_end_t
-        prep_start_t = step_start_t
         optimizer.zero_grad(set_to_none=True)
         x_count = x_count.to(device, non_blocking=True)
         x_mask = x_mask.to(device, non_blocking=True)
         x_mask_encoder = x_mask_encoder.to(device, non_blocking=True)
-        prep_t = time.perf_counter() - prep_start_t
 
         bsz = x_count.size(0)
         n_cells += bsz
 
-        compute_start_t = time.perf_counter()
         with torch.amp.autocast(device_type='cuda', enabled=scaler.is_enabled()):
             out_fake = loss_fn(
                 x_count=x_count,
@@ -659,7 +683,6 @@ def train_gmm_vae_one_epoch(
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         scaler.step(optimizer)
         scaler.update()
-        compute_t = time.perf_counter() - compute_start_t
 
         total_loss += loss.item() * bsz
         total_recon += recon.item() * bsz
@@ -667,14 +690,6 @@ def train_gmm_vae_one_epoch(
         total_score += score.item() * bsz
         total_contrast += contrast.item() * bsz
         total_cov += cov.item() * bsz
-        step_t = time.perf_counter() - step_start_t
-        iter_end_t = time.perf_counter()
-
-        interval_data_t += data_t
-        interval_prep_t += prep_t
-        interval_compute_t += compute_t
-        interval_step_t += step_t
-        interval_steps += 1
 
         if (batch_idx + 1) % 100 == 0 and is_rank0:
             msg = (
@@ -688,15 +703,16 @@ def train_gmm_vae_one_epoch(
                 msg += f", RealRecon={real_recon.item():.4f}"
             msg += (
                 f", ||s_pred||={out_fake['score_norm_pred'].item():.4f}, ||s_tgt||={out_fake['score_norm_tgt'].item():.4f}, "
-                f"||cov_post_off||={out_fake['cov_offdiag_post'].item():.6f}, ||cov_prior_off||={out_fake['cov_offdiag_prior'].item():.6f}, "
-                f"DataT={interval_data_t / max(interval_steps, 1):.4f}s, "
-                f"PrepT={interval_prep_t / max(interval_steps, 1):.4f}s, "
-                f"ComputeT={interval_compute_t / max(interval_steps, 1):.4f}s, "
-                f"StepT={interval_step_t / max(interval_steps, 1):.4f}s"
+                f"||cov_post_off||={out_fake['cov_offdiag_post'].item():.6f}, ||cov_prior_off||={out_fake['cov_offdiag_prior'].item():.6f}"
             )
+            if getattr(model.module if hasattr(model, "module") else model, "prior_type", None) == "gmm":
+                diag = gmm_collapse_diagnostics(prior=prior_ref, z=out_fake["z"])
+                msg += (
+                    f", piH={diag['pi_entropy']:.3f}, K_eff={diag['k_eff']:.2f}, "
+                    f"activeK={diag['active_comp']}, respTop1={diag['resp_top1']:.3f}, "
+                    f"minMuDist={diag['min_mu_dist']:.3f}"
+                )
             print(msg)
-            interval_data_t = interval_prep_t = interval_compute_t = interval_step_t = 0.0
-            interval_steps = 0
 
     if dist.is_available() and dist.is_initialized():
         stats = torch.tensor(
@@ -735,26 +751,19 @@ def evaluate_gmm_vae_one_epoch(
 ):
     model.eval()
     loss_fn = model.module.loss if hasattr(model, "module") else model.loss
+    prior_ref = model.module.prior if hasattr(model, "module") else model.prior
     total_loss = total_recon = total_kl = total_score = total_contrast = total_cov = 0.0
     n_cells = 0
     is_rank0 = (not dist.is_available()) or (not dist.is_initialized()) or (dist.get_rank() == 0)
-    iter_end_t = time.perf_counter()
-    interval_data_t = interval_prep_t = interval_compute_t = interval_step_t = 0.0
-    interval_steps = 0
 
     with torch.no_grad():
         for batch_idx, (_, _, _, x_count, x_mask, x_mask_encoder) in enumerate(val_loader):
-            step_start_t = time.perf_counter()
-            data_t = step_start_t - iter_end_t
-            prep_start_t = step_start_t
             x_count = x_count.to(device, non_blocking=True)
             x_mask = x_mask.to(device, non_blocking=True)
             x_mask_encoder = x_mask_encoder.to(device, non_blocking=True)
-            prep_t = time.perf_counter() - prep_start_t
             bsz = x_count.size(0)
             n_cells += bsz
 
-            compute_start_t = time.perf_counter()
             out_fake = loss_fn(
                 x_count=x_count,
                 x_mask=x_mask,
@@ -799,26 +808,22 @@ def evaluate_gmm_vae_one_epoch(
             total_score += out_fake["score_loss"].item() * bsz
             total_contrast += contrast.item() * bsz
             total_cov += out_fake["cov_loss"].item() * bsz
-            compute_t = time.perf_counter() - compute_start_t
-            step_t = time.perf_counter() - step_start_t
-            iter_end_t = time.perf_counter()
-
-            interval_data_t += data_t
-            interval_prep_t += prep_t
-            interval_compute_t += compute_t
-            interval_step_t += step_t
-            interval_steps += 1
 
             if (batch_idx + 1) % 100 == 0 and is_rank0:
-                print(
+                msg = (
                     f"[Val Batch {batch_idx + 1}] "
-                    f"DataT={interval_data_t / max(interval_steps, 1):.4f}s, "
-                    f"PrepT={interval_prep_t / max(interval_steps, 1):.4f}s, "
-                    f"ComputeT={interval_compute_t / max(interval_steps, 1):.4f}s, "
-                    f"StepT={interval_step_t / max(interval_steps, 1):.4f}s"
+                    f"Loss={loss.item():.4f}, Recon={out_fake['recon_loss'].item():.4f}, "
+                    f"KL={out_fake['kl_loss'].item():.4f}, Score={out_fake['score_loss'].item():.4f}, "
+                    f"Cov={out_fake['cov_loss'].item():.4f}"
                 )
-                interval_data_t = interval_prep_t = interval_compute_t = interval_step_t = 0.0
-                interval_steps = 0
+                if getattr(model.module if hasattr(model, "module") else model, "prior_type", None) == "gmm":
+                    diag = gmm_collapse_diagnostics(prior=prior_ref, z=out_fake["z"])
+                    msg += (
+                        f", piH={diag['pi_entropy']:.3f}, K_eff={diag['k_eff']:.2f}, "
+                        f"activeK={diag['active_comp']}, respTop1={diag['resp_top1']:.3f}, "
+                        f"minMuDist={diag['min_mu_dist']:.3f}"
+                    )
+                print(msg)
 
     if dist.is_available() and dist.is_initialized():
         stats = torch.tensor(
