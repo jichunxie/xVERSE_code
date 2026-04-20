@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH -p scavenger-h200                      
 #SBATCH -A scavenger-h200                             
-#SBATCH --gres=gpu:h200:2
+#SBATCH --gres=gpu:h200:1
 #SBATCH -c 20                                 
 #SBATCH --mem=300G                        
 #SBATCH -t 23:00:00                            
