@@ -225,6 +225,17 @@ class GaussianMixturePrior(nn.Module):
         ).sum(dim=0)
         return second - mean.unsqueeze(1) * mean.unsqueeze(0)
 
+    def posterior_responsibilities(self, z: torch.Tensor, temperature: float = 1.0) -> torch.Tensor:
+        t = max(float(temperature), 1e-6)
+        log_weights = F.log_softmax(self.pi_logits.float(), dim=0).unsqueeze(0)  # (1, K)
+        log_comp = self.component_log_prob(z)  # (B, K)
+        logits = (log_weights + log_comp) / t
+        return torch.softmax(logits, dim=1)
+
+    def clamp_logvar_(self, min_val: float = -6.0, max_val: float = 4.0):
+        with torch.no_grad():
+            self.prior_logvar.clamp_(min=min_val, max=max_val)
+
 
 class PoissonDecoder(nn.Module):
     def __init__(self, latent_dim: int, num_genes: int, hidden_dim: int = 1024, dropout: float = 0.1):
@@ -314,6 +325,10 @@ class MaskFiLMGMMVAE(nn.Module):
         score_detach_z: bool = True,
         lambda_cov: float = 0.0,
         cov_use_mu: bool = True,
+        lambda_resp_entropy: float = 0.0,
+        resp_temperature: float = 1.0,
+        prior_logvar_min: float = -6.0,
+        prior_logvar_max: float = 4.0,
     ) -> Dict[str, torch.Tensor]:
         if encoder_mask is None:
             encoder_mask = x_mask
@@ -338,6 +353,7 @@ class MaskFiLMGMMVAE(nn.Module):
             zero_logvar = torch.zeros_like(z)
             log_p = gaussian_log_prob_diag(z=z, mu=zero_mu, logvar=zero_logvar)
         else:
+            self.prior.clamp_logvar_(min_val=prior_logvar_min, max_val=prior_logvar_max)
             log_q = gaussian_log_prob_diag(z=z, mu=mu, logvar=logvar)
             log_p = self.prior.log_prob(z)
             kl_loss = (log_q - log_p).mean()
@@ -347,6 +363,8 @@ class MaskFiLMGMMVAE(nn.Module):
         cov_loss = torch.zeros((), device=z.device, dtype=z.dtype)
         cov_offdiag_post = torch.zeros((), device=z.device, dtype=z.dtype)
         cov_offdiag_prior = torch.zeros((), device=z.device, dtype=z.dtype)
+        resp_entropy = torch.zeros((), device=z.device, dtype=z.dtype)
+        resp_top1 = torch.zeros((), device=z.device, dtype=z.dtype)
 
         if lambda_score > 0:
             z_for_score = z.detach() if score_detach_z else z
@@ -376,7 +394,21 @@ class MaskFiLMGMMVAE(nn.Module):
             cov_offdiag_post = post_off.abs().mean().to(z.dtype)
             cov_offdiag_prior = prior_off.abs().mean().to(z.dtype)
 
-        total_loss = recon_loss + beta * kl_loss + lambda_score * score_loss + lambda_cov * cov_loss
+        resp_entropy_loss = torch.zeros((), device=z.device, dtype=z.dtype)
+        if self.prior_type == "gmm" and lambda_resp_entropy > 0:
+            resp = self.prior.posterior_responsibilities(z=z, temperature=resp_temperature)
+            resp_entropy = (-(resp * torch.log(resp + 1e-12)).sum(dim=1)).mean().to(z.dtype)
+            resp_top1 = resp.max(dim=1).values.mean().to(z.dtype)
+            # maximize entropy => minimize negative entropy
+            resp_entropy_loss = -resp_entropy
+
+        total_loss = (
+            recon_loss
+            + beta * kl_loss
+            + lambda_score * score_loss
+            + lambda_cov * cov_loss
+            + lambda_resp_entropy * resp_entropy_loss
+        )
 
         return {
             "loss": total_loss,
@@ -386,6 +418,8 @@ class MaskFiLMGMMVAE(nn.Module):
             "cov_loss": cov_loss,
             "cov_offdiag_post": cov_offdiag_post,
             "cov_offdiag_prior": cov_offdiag_prior,
+            "resp_entropy": resp_entropy,
+            "resp_top1": resp_top1,
             "score_norm_pred": score_norm_pred,
             "score_norm_tgt": score_norm_tgt,
             "log_q_mean": log_q.mean(),
@@ -474,8 +508,8 @@ def gmm_collapse_diagnostics(prior: GaussianMixturePrior, z: torch.Tensor, activ
         mu = prior.prior_mu.float()  # (K, D)
         if mu.size(0) > 1:
             dmat = torch.cdist(mu, mu, p=2)
-            inf = torch.tensor(float("inf"), device=dmat.device, dtype=dmat.dtype)
-            dmat = dmat + torch.eye(dmat.size(0), device=dmat.device, dtype=dmat.dtype) * inf
+            diag_mask = torch.eye(dmat.size(0), device=dmat.device, dtype=torch.bool)
+            dmat = dmat.masked_fill(diag_mask, float("inf"))
             min_mu_dist = float(torch.min(dmat).item())
         else:
             min_mu_dist = 0.0
@@ -617,6 +651,10 @@ def train_gmm_vae_one_epoch(
     lambda_real_recon=0.0,
     lambda_cov=0.0,
     cov_use_mu=True,
+    lambda_resp_entropy=0.0,
+    resp_temperature=1.0,
+    prior_logvar_min=-6.0,
+    prior_logvar_max=4.0,
 ):
     model.train()
     loss_fn = model.module.loss if hasattr(model, "module") else model.loss
@@ -646,6 +684,10 @@ def train_gmm_vae_one_epoch(
                 score_detach_z=score_detach_z,
                 lambda_cov=lambda_cov,
                 cov_use_mu=cov_use_mu,
+                lambda_resp_entropy=lambda_resp_entropy,
+                resp_temperature=resp_temperature,
+                prior_logvar_min=prior_logvar_min,
+                prior_logvar_max=prior_logvar_max,
             )
             need_real_view = (lambda_contrast > 0) or (lambda_real_recon > 0)
             real_recon = torch.zeros((), device=x_count.device, dtype=out_fake["z"].dtype)
@@ -661,6 +703,10 @@ def train_gmm_vae_one_epoch(
                     score_detach_z=score_detach_z,
                     lambda_cov=0.0,
                     cov_use_mu=cov_use_mu,
+                    lambda_resp_entropy=0.0,
+                    resp_temperature=resp_temperature,
+                    prior_logvar_min=prior_logvar_min,
+                    prior_logvar_max=prior_logvar_max,
                 )
                 real_recon = out_real["recon_loss"]
             if lambda_contrast > 0:
@@ -703,7 +749,8 @@ def train_gmm_vae_one_epoch(
                 msg += f", RealRecon={real_recon.item():.4f}"
             msg += (
                 f", ||s_pred||={out_fake['score_norm_pred'].item():.4f}, ||s_tgt||={out_fake['score_norm_tgt'].item():.4f}, "
-                f"||cov_post_off||={out_fake['cov_offdiag_post'].item():.6f}, ||cov_prior_off||={out_fake['cov_offdiag_prior'].item():.6f}"
+                f"||cov_post_off||={out_fake['cov_offdiag_post'].item():.6f}, ||cov_prior_off||={out_fake['cov_offdiag_prior'].item():.6f}, "
+                f"respH={out_fake['resp_entropy'].item():.4f}, respTop1Batch={out_fake['resp_top1'].item():.4f}"
             )
             if getattr(model.module if hasattr(model, "module") else model, "prior_type", None) == "gmm":
                 diag = gmm_collapse_diagnostics(prior=prior_ref, z=out_fake["z"])
@@ -748,6 +795,10 @@ def evaluate_gmm_vae_one_epoch(
     lambda_real_recon=0.0,
     lambda_cov=0.0,
     cov_use_mu=True,
+    lambda_resp_entropy=0.0,
+    resp_temperature=1.0,
+    prior_logvar_min=-6.0,
+    prior_logvar_max=4.0,
 ):
     model.eval()
     loss_fn = model.module.loss if hasattr(model, "module") else model.loss
@@ -775,6 +826,10 @@ def evaluate_gmm_vae_one_epoch(
                 score_detach_z=score_detach_z,
                 lambda_cov=lambda_cov,
                 cov_use_mu=cov_use_mu,
+                lambda_resp_entropy=lambda_resp_entropy,
+                resp_temperature=resp_temperature,
+                prior_logvar_min=prior_logvar_min,
+                prior_logvar_max=prior_logvar_max,
             )
             need_real_view = (lambda_contrast > 0) or (lambda_real_recon > 0)
             real_recon = torch.zeros((), device=x_count.device, dtype=out_fake["z"].dtype)
@@ -790,6 +845,10 @@ def evaluate_gmm_vae_one_epoch(
                     score_detach_z=score_detach_z,
                     lambda_cov=0.0,
                     cov_use_mu=cov_use_mu,
+                    lambda_resp_entropy=0.0,
+                    resp_temperature=resp_temperature,
+                    prior_logvar_min=prior_logvar_min,
+                    prior_logvar_max=prior_logvar_max,
                 )
                 real_recon = out_real["recon_loss"]
             if lambda_contrast > 0:

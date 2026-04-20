@@ -122,6 +122,14 @@ def parse_args():
                         help="Weight of auxiliary score loss. Keep small when enabled.")
     parser.add_argument("--lambda-cov", type=float, default=0.0,
                         help="Weight of posterior-prior covariance matching loss (off-diagonal covariance).")
+    parser.add_argument("--lambda-resp-entropy", type=float, default=0.0,
+                        help="Weight for responsibility entropy maximization to prevent single-component collapse.")
+    parser.add_argument("--resp-temperature", type=float, default=1.0,
+                        help="Temperature for posterior responsibilities used by entropy regularization (>1 softens).")
+    parser.add_argument("--prior-logvar-min", type=float, default=-6.0,
+                        help="Lower clamp bound for GMM prior log-variance.")
+    parser.add_argument("--prior-logvar-max", type=float, default=4.0,
+                        help="Upper clamp bound for GMM prior log-variance.")
     parser.add_argument("--cov-use-mu", action="store_true", default=True,
                         help="Use posterior mean mu for covariance matching (recommended).")
     parser.add_argument("--cov-use-z", dest="cov_use_mu", action="store_false",
@@ -488,6 +496,10 @@ def main():
             lambda_real_recon=args.lambda_real_recon,
             lambda_cov=args.lambda_cov,
             cov_use_mu=args.cov_use_mu,
+            lambda_resp_entropy=args.lambda_resp_entropy,
+            resp_temperature=args.resp_temperature,
+            prior_logvar_min=args.prior_logvar_min,
+            prior_logvar_max=args.prior_logvar_max,
         )
         train_msg = (
             f"[Epoch {epoch_id}] "
@@ -512,6 +524,10 @@ def main():
             lambda_real_recon=args.lambda_real_recon,
             lambda_cov=args.lambda_cov,
             cov_use_mu=args.cov_use_mu,
+            lambda_resp_entropy=args.lambda_resp_entropy,
+            resp_temperature=args.resp_temperature,
+            prior_logvar_min=args.prior_logvar_min,
+            prior_logvar_max=args.prior_logvar_max,
         )
         val_msg = (
             f"[Epoch {epoch_id}] Validation Loss: "
