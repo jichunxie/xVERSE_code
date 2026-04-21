@@ -77,6 +77,7 @@ def parse_args():
                         help="Directory for checkpoints.")
     parser.add_argument("--total-gene", type=int, default=17999, help="Total number of genes.")
     parser.add_argument("--num-epochs", type=int, default=100, help="Training epochs.")
+    parser.add_argument("--val-every", type=int, default=1, help="Run validation every N epochs.")
     parser.add_argument("--batch-size", type=int, default=512, help="Training batch size.")
     parser.add_argument("--val-batch-size", type=int, default=512, help="Validation batch size.")
     parser.add_argument("--num-workers", type=int, default=20, help="DataLoader workers for both train/val.")
@@ -699,51 +700,57 @@ def main():
             train_msg += f", Contrast={loss_contrast:.4f}"
         log(train_msg)
 
-        val_loss_full, val_loss_recon, val_loss_kl, val_loss_score, val_loss_contrast, val_loss_cov = evaluate_gmm_vae_one_epoch(
-            model=model,
-            val_loader=val_loader,
-            device=device,
-            beta_kl=beta_t,
-            recon_observed_only=args.recon_observed_only,
-            lambda_score=args.lambda_score,
-            score_noise_std=args.score_noise_std,
-            score_detach_z=args.score_detach_z,
-            lambda_contrast=args.lambda_contrast,
-            contrast_temp=args.contrast_temp,
-            lambda_real_recon=args.lambda_real_recon,
-            lambda_cov=args.lambda_cov,
-            cov_use_mu=args.cov_use_mu,
-            lambda_resp_entropy=args.lambda_resp_entropy,
-            lambda_resp_balance=args.lambda_resp_balance,
-            resp_temperature=args.resp_temperature,
-            prior_logvar_min=args.prior_logvar_min,
-            prior_logvar_max=args.prior_logvar_max,
-        )
-        val_msg = (
-            f"[Epoch {epoch_id}] Validation Loss: "
-            f"Loss={val_loss_full:.4f}, Recon={val_loss_recon:.4f}, KL={val_loss_kl:.4f}, "
-            f"Score={val_loss_score:.4f}, Cov={val_loss_cov:.4f}"
-        )
-        if args.lambda_contrast > 0:
-            val_msg += f", Contrast={val_loss_contrast:.4f}"
-        log(val_msg)
-        val_metric = val_loss_full
+        do_val = (int(args.val_every) <= 1) or (epoch_id % int(args.val_every) == 0) or (epoch_id == args.num_epochs)
+        if do_val:
+            val_loss_full, val_loss_recon, val_loss_kl, val_loss_score, val_loss_contrast, val_loss_cov = evaluate_gmm_vae_one_epoch(
+                model=model,
+                val_loader=val_loader,
+                device=device,
+                beta_kl=beta_t,
+                recon_observed_only=args.recon_observed_only,
+                lambda_score=args.lambda_score,
+                score_noise_std=args.score_noise_std,
+                score_detach_z=args.score_detach_z,
+                lambda_contrast=args.lambda_contrast,
+                contrast_temp=args.contrast_temp,
+                lambda_real_recon=args.lambda_real_recon,
+                lambda_cov=args.lambda_cov,
+                cov_use_mu=args.cov_use_mu,
+                lambda_resp_entropy=args.lambda_resp_entropy,
+                lambda_resp_balance=args.lambda_resp_balance,
+                resp_temperature=args.resp_temperature,
+                prior_logvar_min=args.prior_logvar_min,
+                prior_logvar_max=args.prior_logvar_max,
+            )
+            val_msg = (
+                f"[Epoch {epoch_id}] Validation Loss: "
+                f"Loss={val_loss_full:.4f}, Recon={val_loss_recon:.4f}, KL={val_loss_kl:.4f}, "
+                f"Score={val_loss_score:.4f}, Cov={val_loss_cov:.4f}"
+            )
+            if args.lambda_contrast > 0:
+                val_msg += f", Contrast={val_loss_contrast:.4f}"
+            log(val_msg)
+            val_metric = val_loss_full
 
-        scheduler.step(val_metric)
-        current_lr = optimizer.param_groups[0]['lr']
-        log(f"[Epoch {epoch_id}] Current Learning Rate: {current_lr:.6f}")
+            scheduler.step(val_metric)
+            current_lr = optimizer.param_groups[0]['lr']
+            log(f"[Epoch {epoch_id}] Current Learning Rate: {current_lr:.6f}")
 
-        if val_metric < best_val_metric and is_main_process(rank):
-            best_val_metric = val_metric
-            torch.save({
-                "epoch": epoch_id,
-                "model_state_dict": model.state_dict(),
-                "optimizer_state_dict": optimizer.state_dict(),
-                "scheduler_state_dict": scheduler.state_dict(),
-                "best_val_metric": best_val_metric,
-                "args": vars(args),
-            }, best_ckpt_path)
-            log(f"[Best Model] Updated at epoch {epoch_id} with metric={val_metric:.4f}")
+            if val_metric < best_val_metric and is_main_process(rank):
+                best_val_metric = val_metric
+                torch.save({
+                    "epoch": epoch_id,
+                    "model_state_dict": model.state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "scheduler_state_dict": scheduler.state_dict(),
+                    "best_val_metric": best_val_metric,
+                    "args": vars(args),
+                }, best_ckpt_path)
+                log(f"[Best Model] Updated at epoch {epoch_id} with metric={val_metric:.4f}")
+        else:
+            log(f"[Epoch {epoch_id}] Skip validation (val_every={args.val_every}).")
+            current_lr = optimizer.param_groups[0]['lr']
+            log(f"[Epoch {epoch_id}] Current Learning Rate: {current_lr:.6f}")
 
         if is_main_process(rank):
             torch.save({
