@@ -644,7 +644,12 @@ def main():
         start_time = time.time()
         log(f"\n[Epoch {epoch_id}] Starting...")
         beta_end = args.beta_kl if args.beta_kl_end is None else args.beta_kl_end
-        if args.beta_kl_warmup_epochs > 0:
+        kmeans_after_warmup_mode = bool(args.gmm_kmeans_init and args.gmm_kmeans_warmup_epochs > 0)
+        if kmeans_after_warmup_mode:
+            # Mode A (chosen): train normally, then run KMeans after warmup epochs.
+            # In this mode we disable KL warmup to avoid mixing two curricula.
+            beta_t = beta_end
+        elif args.beta_kl_warmup_epochs > 0:
             alpha = min(1.0, max(0.0, (epoch_id - 1) / float(args.beta_kl_warmup_epochs)))
             beta_t = args.beta_kl_start + (beta_end - args.beta_kl_start) * alpha
         else:
