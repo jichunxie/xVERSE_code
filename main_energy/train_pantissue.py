@@ -116,6 +116,8 @@ def parse_args():
                         help="Max train batches scanned for KMeans initialization.")
     parser.add_argument("--gmm-kmeans-iters", type=int, default=30,
                         help="KMeans iterations for GMM initialization.")
+    parser.add_argument("--gmm-kmeans-warmup-epochs", type=int, default=0,
+                        help="Run KMeans initialization after this many warmup epochs. 0 means initialize before epoch 1.")
     parser.add_argument("--expr-hidden-dim", type=int, default=1024, help="Expression encoder hidden dim.")
     parser.add_argument("--mask-hidden-dim", type=int, default=512, help="Mask encoder hidden dim.")
     parser.add_argument("--dec-hidden-dim", type=int, default=1024, help="Decoder hidden dim.")
@@ -564,6 +566,7 @@ def main():
     start_round = 1
     best_val_metric = float("inf")
     did_resume = False
+    kmeans_initialized = False
 
     if os.path.exists(ckpt_path):
         map_location = {"cuda:%d" % 0: "cuda:%d" % local_rank} if (ddp_enabled and torch.cuda.is_available()) else device
@@ -579,10 +582,16 @@ def main():
         log(f"[Resume] Loaded checkpoint from epoch {checkpoint['epoch']}, best_val_metric={best_val_metric:.4f}")
         did_resume = True
 
-    if args.gmm_kmeans_init and (not did_resume) and args.prior_type == "gmm":
+    def run_kmeans_init_once(tag: str):
+        nonlocal kmeans_initialized
+        if kmeans_initialized:
+            return
+        if not (args.gmm_kmeans_init and (not did_resume) and args.prior_type == "gmm"):
+            return
         inited = False
         if ddp_enabled:
             if is_main_process(rank):
+                log(f"[KMeansInit] Triggered at {tag}")
                 inited = kmeans_init_gmm_prior(
                     model=model,
                     train_loader=train_loader,
@@ -607,8 +616,10 @@ def main():
                 dist.broadcast(base.prior.prior_factor.data, src=0)
             if is_main_process(rank):
                 log(f"[KMeansInit] broadcast done, enabled={bool(flag.item())}")
+            kmeans_initialized = bool(flag.item())
         else:
-            kmeans_init_gmm_prior(
+            log(f"[KMeansInit] Triggered at {tag}")
+            inited = kmeans_init_gmm_prior(
                 model=model,
                 train_loader=train_loader,
                 train_sampler=train_sampler,
@@ -622,6 +633,10 @@ def main():
                 prior_logvar_max=args.prior_logvar_max,
                 log_fn=log,
             )
+            kmeans_initialized = bool(inited)
+
+    if args.gmm_kmeans_warmup_epochs <= 0:
+        run_kmeans_init_once(tag="pre-epoch-1")
 
     epoch_id = start_round
 
@@ -639,6 +654,8 @@ def main():
         train_sampler.set_epoch(epoch_id)
         if val_sampler is not None:
             val_sampler.set_epoch(epoch_id)
+        if args.gmm_kmeans_warmup_epochs > 0 and (epoch_id == args.gmm_kmeans_warmup_epochs + 1):
+            run_kmeans_init_once(tag=f"epoch-{epoch_id}-start")
 
         loss_full, loss_recon, loss_kl, loss_score, loss_contrast, loss_cov = train_gmm_vae_one_epoch(
             model=model,
