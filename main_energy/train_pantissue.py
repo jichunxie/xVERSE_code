@@ -138,6 +138,8 @@ def parse_args():
                         help="Weight of posterior-prior covariance matching loss (off-diagonal covariance).")
     parser.add_argument("--lambda-resp-entropy", type=float, default=0.0,
                         help="Weight for responsibility entropy maximization to prevent single-component collapse.")
+    parser.add_argument("--lambda-resp-balance", type=float, default=0.0,
+                        help="Weight for batch-average responsibility balancing toward uniform component usage.")
     parser.add_argument("--resp-temperature", type=float, default=1.0,
                         help="Temperature for posterior responsibilities used by entropy regularization (>1 softens).")
     parser.add_argument("--prior-logvar-min", type=float, default=-6.0,
@@ -683,6 +685,7 @@ def main():
             lambda_cov=args.lambda_cov,
             cov_use_mu=args.cov_use_mu,
             lambda_resp_entropy=args.lambda_resp_entropy,
+            lambda_resp_balance=args.lambda_resp_balance,
             resp_temperature=args.resp_temperature,
             prior_logvar_min=args.prior_logvar_min,
             prior_logvar_max=args.prior_logvar_max,
@@ -711,6 +714,7 @@ def main():
             lambda_cov=args.lambda_cov,
             cov_use_mu=args.cov_use_mu,
             lambda_resp_entropy=args.lambda_resp_entropy,
+            lambda_resp_balance=args.lambda_resp_balance,
             resp_temperature=args.resp_temperature,
             prior_logvar_min=args.prior_logvar_min,
             prior_logvar_max=args.prior_logvar_max,

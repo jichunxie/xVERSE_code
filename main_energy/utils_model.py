@@ -326,6 +326,7 @@ class MaskFiLMGMMVAE(nn.Module):
         lambda_cov: float = 0.0,
         cov_use_mu: bool = True,
         lambda_resp_entropy: float = 0.0,
+        lambda_resp_balance: float = 0.0,
         resp_temperature: float = 1.0,
         prior_logvar_min: float = -6.0,
         prior_logvar_max: float = 4.0,
@@ -365,6 +366,7 @@ class MaskFiLMGMMVAE(nn.Module):
         cov_offdiag_prior = torch.zeros((), device=z.device, dtype=z.dtype)
         resp_entropy = torch.zeros((), device=z.device, dtype=z.dtype)
         resp_top1 = torch.zeros((), device=z.device, dtype=z.dtype)
+        resp_balance_loss = torch.zeros((), device=z.device, dtype=z.dtype)
 
         if lambda_score > 0:
             z_for_score = z.detach() if score_detach_z else z
@@ -395,12 +397,20 @@ class MaskFiLMGMMVAE(nn.Module):
             cov_offdiag_prior = prior_off.abs().mean().to(z.dtype)
 
         resp_entropy_loss = torch.zeros((), device=z.device, dtype=z.dtype)
-        if self.prior_type == "gmm" and lambda_resp_entropy > 0:
+        if self.prior_type == "gmm" and (lambda_resp_entropy > 0 or lambda_resp_balance > 0):
             resp = self.prior.posterior_responsibilities(z=z, temperature=resp_temperature)
             resp_entropy = (-(resp * torch.log(resp + 1e-12)).sum(dim=1)).mean().to(z.dtype)
             resp_top1 = resp.max(dim=1).values.mean().to(z.dtype)
             # maximize entropy => minimize negative entropy
             resp_entropy_loss = -resp_entropy
+            if lambda_resp_balance > 0:
+                usage = resp.mean(dim=0)  # (K,)
+                target = torch.full_like(usage, 1.0 / float(usage.numel()))
+                resp_balance_loss = F.kl_div(
+                    torch.log(usage + 1e-12),
+                    target,
+                    reduction="sum",
+                ).to(z.dtype)
 
         total_loss = (
             recon_loss
@@ -408,6 +418,7 @@ class MaskFiLMGMMVAE(nn.Module):
             + lambda_score * score_loss
             + lambda_cov * cov_loss
             + lambda_resp_entropy * resp_entropy_loss
+            + lambda_resp_balance * resp_balance_loss
         )
 
         return {
@@ -420,6 +431,7 @@ class MaskFiLMGMMVAE(nn.Module):
             "cov_offdiag_prior": cov_offdiag_prior,
             "resp_entropy": resp_entropy,
             "resp_top1": resp_top1,
+            "resp_balance_loss": resp_balance_loss,
             "score_norm_pred": score_norm_pred,
             "score_norm_tgt": score_norm_tgt,
             "log_q_mean": log_q.mean(),
@@ -652,6 +664,7 @@ def train_gmm_vae_one_epoch(
     lambda_cov=0.0,
     cov_use_mu=True,
     lambda_resp_entropy=0.0,
+    lambda_resp_balance=0.0,
     resp_temperature=1.0,
     prior_logvar_min=-6.0,
     prior_logvar_max=4.0,
@@ -685,6 +698,7 @@ def train_gmm_vae_one_epoch(
                 lambda_cov=lambda_cov,
                 cov_use_mu=cov_use_mu,
                 lambda_resp_entropy=lambda_resp_entropy,
+                lambda_resp_balance=lambda_resp_balance,
                 resp_temperature=resp_temperature,
                 prior_logvar_min=prior_logvar_min,
                 prior_logvar_max=prior_logvar_max,
@@ -704,6 +718,7 @@ def train_gmm_vae_one_epoch(
                     lambda_cov=0.0,
                     cov_use_mu=cov_use_mu,
                     lambda_resp_entropy=0.0,
+                    lambda_resp_balance=0.0,
                     resp_temperature=resp_temperature,
                     prior_logvar_min=prior_logvar_min,
                     prior_logvar_max=prior_logvar_max,
@@ -750,7 +765,8 @@ def train_gmm_vae_one_epoch(
             msg += (
                 f", ||s_pred||={out_fake['score_norm_pred'].item():.4f}, ||s_tgt||={out_fake['score_norm_tgt'].item():.4f}, "
                 f"||cov_post_off||={out_fake['cov_offdiag_post'].item():.6f}, ||cov_prior_off||={out_fake['cov_offdiag_prior'].item():.6f}, "
-                f"respH={out_fake['resp_entropy'].item():.4f}, respTop1Batch={out_fake['resp_top1'].item():.4f}"
+                f"respH={out_fake['resp_entropy'].item():.4f}, respBal={out_fake['resp_balance_loss'].item():.4f}, "
+                f"respTop1Batch={out_fake['resp_top1'].item():.4f}"
             )
             if getattr(model.module if hasattr(model, "module") else model, "prior_type", None) == "gmm":
                 diag = gmm_collapse_diagnostics(prior=prior_ref, z=out_fake["z"])
@@ -796,6 +812,7 @@ def evaluate_gmm_vae_one_epoch(
     lambda_cov=0.0,
     cov_use_mu=True,
     lambda_resp_entropy=0.0,
+    lambda_resp_balance=0.0,
     resp_temperature=1.0,
     prior_logvar_min=-6.0,
     prior_logvar_max=4.0,
@@ -827,6 +844,7 @@ def evaluate_gmm_vae_one_epoch(
                 lambda_cov=lambda_cov,
                 cov_use_mu=cov_use_mu,
                 lambda_resp_entropy=lambda_resp_entropy,
+                lambda_resp_balance=lambda_resp_balance,
                 resp_temperature=resp_temperature,
                 prior_logvar_min=prior_logvar_min,
                 prior_logvar_max=prior_logvar_max,
@@ -846,6 +864,7 @@ def evaluate_gmm_vae_one_epoch(
                     lambda_cov=0.0,
                     cov_use_mu=cov_use_mu,
                     lambda_resp_entropy=0.0,
+                    lambda_resp_balance=0.0,
                     resp_temperature=resp_temperature,
                     prior_logvar_min=prior_logvar_min,
                     prior_logvar_max=prior_logvar_max,
