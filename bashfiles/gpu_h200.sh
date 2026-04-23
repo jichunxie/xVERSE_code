@@ -57,7 +57,7 @@ stdbuf -oL -eL torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" -m mai
     --expr-hidden-dim 1536 \
     --mask-hidden-dim 512 \
     --dec-hidden-dim 1536 \
-    --beta-kl 0.1 \
+    --beta-kl 0.01 \
     --beta-kl-warmup-epochs 0 \
     --recon-observed-only \
     --mask-aug-prob 1.0 \
@@ -65,7 +65,7 @@ stdbuf -oL -eL torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" -m mai
     --mask-aug-min-frac 0.1 \
     --mask-aug-max-frac 0.5 \
     --lambda-score 0.01 \
-    --lambda-cov 0.01 \
+    --lambda-cov 0.001 \
     --lambda-resp-entropy 0.0 \
     --lambda-resp-balance 1.0 \
     --lambda-resp-confidence 0.05 \
