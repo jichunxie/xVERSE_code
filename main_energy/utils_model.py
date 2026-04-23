@@ -167,6 +167,41 @@ class GaussianMixturePrior(nn.Module):
             out = -0.5 * (quad + log_det.unsqueeze(0) + log_norm)
         return out
 
+    def component_log_prob_aligned(self, z_comp: torch.Tensor) -> torch.Tensor:
+        """
+        Aligned component log-probability for z sampled per component.
+        Input:
+            z_comp: (B, K, D), where z_comp[:, k, :] is evaluated under component k.
+        Output:
+            log_prob: (B, K)
+        """
+        device_type = z_comp.device.type
+        with torch.amp.autocast(device_type=device_type, enabled=False):
+            zc = z_comp.float()
+            if zc.dim() != 3 or zc.size(1) != self.K or zc.size(2) != self.D:
+                raise ValueError(
+                    f"Expected z_comp shape (B,{self.K},{self.D}), got {tuple(zc.shape)}"
+                )
+            mu = self.prior_mu.float().unsqueeze(0)  # (1, K, D)
+            delta = zc - mu  # (B, K, D)
+
+            cache = self._cache_matrices()
+            d_inv = cache["d_inv"].unsqueeze(0)  # (1, K, D)
+            delta_d = delta * d_inv  # (B, K, D)
+            quad = (delta * delta_d).sum(dim=-1)  # (B, K)
+
+            if self.R > 0:
+                u = self.prior_factor.float()  # (K, D, R)
+                t = torch.einsum("bkd,kdr->bkr", delta_d, u)  # (B, K, R)
+                inv_s = cache["inv_s"]  # (K, R, R)
+                quad_corr = torch.einsum("bkr,krs,bks->bk", t, inv_s, t)
+                quad = quad - quad_corr
+
+            log_det = self.prior_logvar.float().sum(dim=-1) + cache["logdet_extra"]  # (K,)
+            log_norm = self.D * math.log(2.0 * math.pi)
+            out = -0.5 * (quad + log_det.unsqueeze(0) + log_norm)
+        return out
+
     def log_prob(self, z: torch.Tensor, topk: int = 0) -> torch.Tensor:
         log_weights = F.log_softmax(self.pi_logits, dim=0).unsqueeze(0)  # (1, K)
         log_comp = self.component_log_prob(z)  # (B, K)
@@ -298,6 +333,12 @@ class MaskFiLMGMMVAE(nn.Module):
             hidden_dim=dec_hidden_dim,
             dropout=dropout,
         )
+        self.num_components = int(num_components)
+        self.latent_dim = int(latent_dim)
+        if self.prior_type == "gmm":
+            self.post_c_logits = nn.Linear(expr_hidden_dim, num_components)
+            self.post_mu = nn.Linear(expr_hidden_dim, num_components * latent_dim)
+            self.post_logvar = nn.Linear(expr_hidden_dim, num_components * latent_dim)
         # Library-size head from latent z.
         self.library_head = nn.Linear(latent_dim, 1)
         self.score_head = MLP(
@@ -310,13 +351,44 @@ class MaskFiLMGMMVAE(nn.Module):
     def forward(self, x_count: torch.Tensor, x_mask: torch.Tensor, x_expr: torch.Tensor = None) -> Dict[str, torch.Tensor]:
         if x_expr is None:
             x_expr = torch.log1p(x_count.float())
-        mu, logvar = self.encoder(x_expr=x_expr, x_mask=x_mask.float(), return_hidden=False)
-        z = reparameterize(mu, logvar)
+        mu_enc, logvar_enc, h = self.encoder(x_expr=x_expr, x_mask=x_mask.float(), return_hidden=True)
+        if self.prior_type == "gmm":
+            bsz = h.size(0)
+            k = self.num_components
+            d = self.latent_dim
+            q_c_logits = self.post_c_logits(h)  # (B, K)
+            q_c = torch.softmax(q_c_logits, dim=-1)
+            mu_comp = self.post_mu(h).view(bsz, k, d)
+            logvar_comp = torch.clamp(self.post_logvar(h).view(bsz, k, d), min=-8.0, max=8.0)
+            std_comp = torch.exp(0.5 * logvar_comp)
+            eps = torch.randn_like(std_comp)
+            z_comp = mu_comp + eps * std_comp  # (B, K, D)
+            if self.training:
+                c_sel = F.gumbel_softmax(q_c_logits, tau=1.0, hard=False, dim=-1)  # (B, K)
+            else:
+                hard_idx = torch.argmax(q_c, dim=-1)
+                c_sel = F.one_hot(hard_idx, num_classes=k).to(z_comp.dtype)
+            z = torch.sum(c_sel.unsqueeze(-1) * z_comp, dim=1)  # (B, D)
+
+            # Moment-matched aggregate posterior stats for compatibility logging.
+            mu = torch.sum(q_c.unsqueeze(-1) * mu_comp, dim=1)
+            second = torch.sum(q_c.unsqueeze(-1) * (torch.exp(logvar_comp) + mu_comp * mu_comp), dim=1)
+            var = torch.clamp(second - mu * mu, min=1e-8)
+            logvar = torch.log(var)
+        else:
+            mu = mu_enc
+            logvar = logvar_enc
+            z = reparameterize(mu, logvar)
+            q_c_logits = None
+            q_c = None
+            mu_comp = None
+            logvar_comp = None
+            z_comp = None
         gene_logits = self.decoder(z)
         library_size = F.softplus(self.library_head(z)) + 1e-8
         gene_probs = F.softmax(gene_logits, dim=-1)
         rate = gene_probs * library_size
-        return {
+        out = {
             "mu": mu,
             "logvar": logvar,
             "z": z,
@@ -324,6 +396,17 @@ class MaskFiLMGMMVAE(nn.Module):
             "gene_logits": gene_logits,
             "rate": rate,
         }
+        if self.prior_type == "gmm":
+            out.update(
+                {
+                    "q_c_logits": q_c_logits,
+                    "q_c": q_c,
+                    "mu_comp": mu_comp,
+                    "logvar_comp": logvar_comp,
+                    "z_comp": z_comp,
+                }
+            )
+        return out
 
     def loss(
         self,
@@ -368,9 +451,23 @@ class MaskFiLMGMMVAE(nn.Module):
             log_p = gaussian_log_prob_diag(z=z, mu=zero_mu, logvar=zero_logvar)
         else:
             self.prior.clamp_logvar_(min_val=prior_logvar_min, max_val=prior_logvar_max)
-            log_q = gaussian_log_prob_diag(z=z, mu=mu, logvar=logvar)
-            log_p = self.prior.log_prob(z, topk=resp_topk)
-            kl_loss = (log_q - log_p).mean()
+            q_c_logits = out["q_c_logits"]  # (B, K)
+            q_c = out["q_c"]  # (B, K)
+            mu_comp = out["mu_comp"]  # (B, K, D)
+            logvar_comp = out["logvar_comp"]  # (B, K, D)
+            z_comp = out["z_comp"]  # (B, K, D)
+
+            log_q_c = F.log_softmax(q_c_logits, dim=-1)  # (B, K)
+            log_p_c = F.log_softmax(self.prior.pi_logits, dim=0).unsqueeze(0)  # (1, K)
+            kl_c = (q_c * (log_q_c - log_p_c)).sum(dim=1).mean()
+
+            log_q_z_given_c = gaussian_log_prob_diag(z=z_comp, mu=mu_comp, logvar=logvar_comp)  # (B, K)
+            log_p_z_given_c = self.prior.component_log_prob_aligned(z_comp)  # (B, K)
+            kl_z = (q_c * (log_q_z_given_c - log_p_z_given_c)).sum(dim=1).mean()
+
+            kl_loss = kl_c + kl_z
+            log_q = (q_c * (log_q_c + log_q_z_given_c)).sum(dim=1)
+            log_p = (q_c * (log_p_c + log_p_z_given_c)).sum(dim=1)
         score_loss = torch.zeros((), device=z.device, dtype=z.dtype)
         score_norm_pred = torch.zeros((), device=z.device, dtype=z.dtype)
         score_norm_tgt = torch.zeros((), device=z.device, dtype=z.dtype)
@@ -411,7 +508,20 @@ class MaskFiLMGMMVAE(nn.Module):
             cov_offdiag_prior = prior_off.abs().mean().to(z.dtype)
 
         if self.prior_type == "gmm" and (lambda_resp_balance > 0 or lambda_resp_confidence > 0):
-            resp = self.prior.posterior_responsibilities(z=z, temperature=resp_temperature, topk=resp_topk)
+            if "q_c" in out:
+                q_logits = out["q_c_logits"]
+                t = max(float(resp_temperature), 1e-6)
+                logits = q_logits / t
+                k_keep = int(resp_topk)
+                if k_keep > 0 and k_keep < logits.size(1):
+                    top_vals, top_idx = torch.topk(logits, k=k_keep, dim=1, largest=True, sorted=False)
+                    top_resp = torch.softmax(top_vals, dim=1)
+                    resp = torch.zeros_like(logits)
+                    resp.scatter_(1, top_idx, top_resp)
+                else:
+                    resp = torch.softmax(logits, dim=1)
+            else:
+                resp = self.prior.posterior_responsibilities(z=z, temperature=resp_temperature, topk=resp_topk)
             resp_entropy = (-(resp * torch.log(resp + 1e-12)).sum(dim=1)).mean().to(z.dtype)
             resp_top1 = resp.max(dim=1).values.mean().to(z.dtype)
             # minimize entropy => encourage each cell to use fewer components
