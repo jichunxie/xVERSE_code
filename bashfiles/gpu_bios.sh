@@ -17,22 +17,71 @@ conda activate SpaRest
 
 cd /hpc/group/xielab/xj58/xVERSE_code
 
+echo ">>> Running Task: Train GMM prior model (all tissue, DDP on H200, compiled dataset mode)"
+NPROC_PER_NODE=$(python - <<'PY'
+import torch
+print(max(1, torch.cuda.device_count()))
+PY
+)
+echo ">>> Visible CUDA devices: ${NPROC_PER_NODE}"
+
+DATA_ROOT="/hpc/group/xielab/xj58/xVerseAtlas/npz_tissue_dataset_donor"
 COMPILED_ROOT="/hpc/group/xielab/xj58/xVerseAtlas/compiled_train_v1_all"
-CKPT_PATH="/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_all_tissue_h200/best_model.pth"
-CELLTYPE_CSV="/hpc/group/xielab/xj58/xVerseAtlas/npz_tissue_dataset_donor/cellxgene_cell_type_mapped.csv"
 
-echo ">>> Running Task: Analyze dominant GMM component by cell type"
-echo ">>> CKPT_PATH=${CKPT_PATH}"
+echo ">>> DATA_ROOT=${DATA_ROOT}"
 echo ">>> COMPILED_ROOT=${COMPILED_ROOT}"
-stdbuf -oL -eL python -m main_energy.analyze_gmm_component_by_celltype \
-    --ckpt-path "${CKPT_PATH}" \
+
+stdbuf -oL -eL torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" -m main_energy.train_pantissue \
     --compiled-dataset-root "${COMPILED_ROOT}" \
-    --split val \
-    --batch-size 1024 \
-    --num-workers 4 \
-    --cell-type-csv "${CELLTYPE_CSV}"
-
-echo "=========================================================="
-echo "Analysis finished."
-echo "=========================================================="
-
+    --compiled-max-cached-shards 4092 \
+    --sampler-shard-reorder-window 4096 \
+    --sampler-active-shards 64 \
+    --result-dir "/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_all_tissue_h200" \
+    --num-epochs 100 \
+    --val-every 10 \
+    --batch-size 8192 \
+    --val-batch-size 8192 \
+    --num-workers 8 \
+    --val-num-workers 5 \
+    --prefetch-factor 8 \
+    --samples-per-id 500 \
+    --lr 3e-4 \
+    --weight-decay 1e-5 \
+    --prior-type gmm \
+    --latent-dim 128 \
+    --num-components 16 \
+    --prior-cov-rank 2 \
+    --prior-logvar-min -6 \
+    --prior-logvar-max 4 \
+    --expr-hidden-dim 1536 \
+    --mask-hidden-dim 512 \
+    --dec-hidden-dim 1536 \
+    --beta-kl 0.1 \
+    --gmm-kmeans-init \
+    --gmm-kmeans-max-samples 200000 \
+    --gmm-kmeans-max-batches 300 \
+    --gmm-kmeans-iters 30 \
+    --gmm-kmeans-warmup-epochs 1 \
+    --recon-observed-only \
+    --mask-aug-prob 1.0 \
+    --mask-aug-policy xverse \
+    --mask-aug-min-frac 0.1 \
+    --mask-aug-max-frac 0.5 \
+    --lambda-score 0 \
+    --lambda-cov 0.001 \
+    --lambda-resp-entropy 0.0 \
+    --lambda-resp-balance 1.0 \
+    --lambda-resp-confidence 0.05 \
+    --resp-temperature 0.9 \
+    --resp-topk 2 \
+    --lambda-geo-local 0.01 \
+    --lambda-geo-rank 0.05 \
+    --geo-knn-k 16 \
+    --geo-margin 0.2 \
+    --geo-anchor-count 256 \
+    --geo-feature-topk 512 \
+    --geo-use-mu \
+    --score-noise-std 0.1 \
+    --lambda-contrast 0.0 \
+    --lambda-real-recon 0.0 \
+    --contrast-temp 0.3
