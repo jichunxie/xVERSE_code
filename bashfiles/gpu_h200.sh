@@ -58,6 +58,7 @@ stdbuf -oL -eL torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" -m mai
     --mask-hidden-dim 512 \
     --dec-hidden-dim 1536 \
     --beta-kl 0.1 \
+    --beta-kl-warmup-epochs 0 \
     --recon-observed-only \
     --mask-aug-prob 1.0 \
     --mask-aug-policy xverse \
