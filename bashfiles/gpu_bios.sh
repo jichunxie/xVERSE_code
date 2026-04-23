@@ -57,7 +57,6 @@ stdbuf -oL -eL torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" -m mai
     --mask-hidden-dim 512 \
     --dec-hidden-dim 1536 \
     --beta-kl 0.1 \
-    --gmm-kmeans-init \
     --gmm-kmeans-max-samples 200000 \
     --gmm-kmeans-max-batches 300 \
     --gmm-kmeans-iters 30 \
@@ -74,8 +73,8 @@ stdbuf -oL -eL torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" -m mai
     --lambda-resp-confidence 0.05 \
     --resp-temperature 0.9 \
     --resp-topk 2 \
-    --lambda-geo-local 0.01 \
-    --lambda-geo-rank 0.05 \
+    --lambda-geo-local 0 \
+    --lambda-geo-rank 0 \
     --geo-knn-k 16 \
     --geo-margin 0.2 \
     --geo-anchor-count 256 \

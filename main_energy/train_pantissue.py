@@ -109,16 +109,6 @@ def parse_args():
     parser.add_argument("--num-components", type=int, default=16, help="GMM component count K.")
     parser.add_argument("--prior-cov-rank", type=int, default=8,
                         help="Low-rank size R for each GMM component covariance: diag + U U^T.")
-    parser.add_argument("--gmm-kmeans-init", action="store_true", default=False,
-                        help="Initialize GMM prior with KMeans on encoder means from training data.")
-    parser.add_argument("--gmm-kmeans-max-samples", type=int, default=200000,
-                        help="Max number of samples used for KMeans initialization.")
-    parser.add_argument("--gmm-kmeans-max-batches", type=int, default=300,
-                        help="Max train batches scanned for KMeans initialization.")
-    parser.add_argument("--gmm-kmeans-iters", type=int, default=30,
-                        help="KMeans iterations for GMM initialization.")
-    parser.add_argument("--gmm-kmeans-warmup-epochs", type=int, default=0,
-                        help="Run KMeans initialization after this many warmup epochs. 0 means initialize before epoch 1.")
     parser.add_argument("--expr-hidden-dim", type=int, default=1024, help="Expression encoder hidden dim.")
     parser.add_argument("--mask-hidden-dim", type=int, default=512, help="Mask encoder hidden dim.")
     parser.add_argument("--dec-hidden-dim", type=int, default=1024, help="Decoder hidden dim.")
@@ -151,22 +141,6 @@ def parse_args():
                         help="Lower clamp bound for GMM prior log-variance.")
     parser.add_argument("--prior-logvar-max", type=float, default=4.0,
                         help="Upper clamp bound for GMM prior log-variance.")
-    parser.add_argument("--lambda-geo-local", type=float, default=0.0,
-                        help="Weight for local graph-neighbor smoothness in latent space.")
-    parser.add_argument("--lambda-geo-rank", type=float, default=0.0,
-                        help="Weight for geodesic-inspired triplet ranking loss in latent space.")
-    parser.add_argument("--geo-knn-k", type=int, default=16,
-                        help="kNN size for batch graph used by geodesic regularization.")
-    parser.add_argument("--geo-margin", type=float, default=0.2,
-                        help="Margin for geodesic triplet ranking loss.")
-    parser.add_argument("--geo-anchor-count", type=int, default=256,
-                        help="Max anchors per batch for geodesic regularization (caps O(N^2) cost).")
-    parser.add_argument("--geo-feature-topk", type=int, default=512,
-                        help="Top variable genes used to build batch graph space.")
-    parser.add_argument("--geo-use-mu", action="store_true", default=True,
-                        help="Use posterior mean mu for geodesic regularization (recommended).")
-    parser.add_argument("--geo-use-z", dest="geo_use_mu", action="store_false",
-                        help="Use sampled z for geodesic regularization.")
     parser.add_argument("--cov-use-mu", action="store_true", default=True,
                         help="Use posterior mean mu for covariance matching (recommended).")
     parser.add_argument("--cov-use-z", dest="cov_use_mu", action="store_false",
@@ -239,105 +213,6 @@ def setup_distributed(args):
 
 def is_main_process(rank: int) -> bool:
     return rank == 0
-
-
-def _unwrap_model(model):
-    return model.module if hasattr(model, "module") else model
-
-
-def _kmeans_torch(x: torch.Tensor, k: int, iters: int, seed: int):
-    n = x.size(0)
-    if n < k:
-        raise ValueError(f"Not enough points for KMeans: n={n}, k={k}")
-    g = torch.Generator(device=x.device)
-    g.manual_seed(int(seed))
-    centers = x[torch.randperm(n, generator=g, device=x.device)[:k]].clone()
-    assign = torch.zeros((n,), dtype=torch.long, device=x.device)
-
-    for _ in range(max(1, int(iters))):
-        dist2 = torch.cdist(x, centers, p=2) ** 2
-        assign = torch.argmin(dist2, dim=1)
-        new_centers = torch.zeros_like(centers)
-        counts = torch.bincount(assign, minlength=k).to(x.dtype).unsqueeze(1)
-        new_centers.index_add_(0, assign, x)
-        non_empty = counts.squeeze(1) > 0
-        new_centers[non_empty] = new_centers[non_empty] / counts[non_empty]
-        if (~non_empty).any():
-            refill = x[torch.randperm(n, generator=g, device=x.device)[: int((~non_empty).sum().item())]]
-            new_centers[~non_empty] = refill
-        centers = new_centers
-    return centers, assign
-
-
-def kmeans_init_gmm_prior(
-    model,
-    train_loader,
-    train_sampler,
-    device,
-    num_components: int,
-    max_samples: int,
-    max_batches: int,
-    iters: int,
-    seed: int,
-    prior_logvar_min: float,
-    prior_logvar_max: float,
-    log_fn=print,
-):
-    base = _unwrap_model(model)
-    if getattr(base, "prior_type", None) != "gmm":
-        return False
-
-    if hasattr(train_sampler, "set_epoch"):
-        train_sampler.set_epoch(0)
-
-    base.eval()
-    latents = []
-    seen = 0
-    with torch.no_grad():
-        for bidx, (_, _, _, x_count, x_mask, _) in enumerate(train_loader):
-            if bidx >= int(max_batches) or seen >= int(max_samples):
-                break
-            x_count = x_count.to(device, non_blocking=True)
-            x_mask = x_mask.to(device, non_blocking=True)
-            out = base.forward(x_count=x_count, x_mask=x_mask)
-            mu = out["mu"].detach().float()
-            if seen + mu.size(0) > int(max_samples):
-                mu = mu[: int(max_samples) - seen]
-            latents.append(mu)
-            seen += mu.size(0)
-    if seen < int(num_components):
-        log_fn(f"[KMeansInit][WARN] samples={seen} < K={num_components}, skip.")
-        base.train()
-        return False
-
-    x = torch.cat(latents, dim=0)
-    centers, assign = _kmeans_torch(x=x, k=int(num_components), iters=int(iters), seed=int(seed))
-    counts = torch.bincount(assign, minlength=int(num_components)).float()
-    pi = (counts + 1.0) / (counts.sum() + float(num_components))
-    pi_logits = torch.log(pi)
-
-    d = x.size(1)
-    var = torch.zeros((int(num_components), d), device=x.device, dtype=x.dtype)
-    for k in range(int(num_components)):
-        idx = (assign == k).nonzero(as_tuple=False).flatten()
-        if idx.numel() <= 1:
-            var[k] = torch.ones((d,), device=x.device, dtype=x.dtype)
-        else:
-            var[k] = torch.clamp(torch.var(x[idx], dim=0, unbiased=False), min=1e-4)
-    logvar = torch.log(var).clamp(min=float(prior_logvar_min), max=float(prior_logvar_max))
-
-    base.prior.pi_logits.data.copy_(pi_logits.to(base.prior.pi_logits.dtype))
-    base.prior.prior_mu.data.copy_(centers.to(base.prior.prior_mu.dtype))
-    base.prior.prior_logvar.data.copy_(logvar.to(base.prior.prior_logvar.dtype))
-    if getattr(base.prior, "prior_factor", None) is not None:
-        base.prior.prior_factor.data.zero_()
-
-    log_fn(
-        f"[KMeansInit] done: samples={seen}, K={num_components}, "
-        f"pi_min={pi.min().item():.4f}, pi_max={pi.max().item():.4f}"
-    )
-    base.train()
-    return True
 
 
 def main():
@@ -588,8 +463,6 @@ def main():
 
     start_round = 1
     best_val_metric = float("inf")
-    did_resume = False
-    kmeans_initialized = False
 
     if os.path.exists(ckpt_path):
         map_location = {"cuda:%d" % 0: "cuda:%d" % local_rank} if (ddp_enabled and torch.cuda.is_available()) else device
@@ -603,63 +476,6 @@ def main():
             scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
 
         log(f"[Resume] Loaded checkpoint from epoch {checkpoint['epoch']}, best_val_metric={best_val_metric:.4f}")
-        did_resume = True
-
-    def run_kmeans_init_once(tag: str):
-        nonlocal kmeans_initialized
-        if kmeans_initialized:
-            return
-        if not (args.gmm_kmeans_init and (not did_resume) and args.prior_type == "gmm"):
-            return
-        inited = False
-        if ddp_enabled:
-            if is_main_process(rank):
-                log(f"[KMeansInit] Triggered at {tag}")
-                inited = kmeans_init_gmm_prior(
-                    model=model,
-                    train_loader=train_loader,
-                    train_sampler=train_sampler,
-                    device=device,
-                    num_components=args.num_components,
-                    max_samples=args.gmm_kmeans_max_samples,
-                    max_batches=args.gmm_kmeans_max_batches,
-                    iters=args.gmm_kmeans_iters,
-                    seed=args.seed,
-                    prior_logvar_min=args.prior_logvar_min,
-                    prior_logvar_max=args.prior_logvar_max,
-                    log_fn=log,
-                )
-            flag = torch.tensor([1 if inited else 0], device=device, dtype=torch.int64)
-            dist.broadcast(flag, src=0)
-            base = _unwrap_model(model)
-            dist.broadcast(base.prior.pi_logits.data, src=0)
-            dist.broadcast(base.prior.prior_mu.data, src=0)
-            dist.broadcast(base.prior.prior_logvar.data, src=0)
-            if getattr(base.prior, "prior_factor", None) is not None:
-                dist.broadcast(base.prior.prior_factor.data, src=0)
-            if is_main_process(rank):
-                log(f"[KMeansInit] broadcast done, enabled={bool(flag.item())}")
-            kmeans_initialized = bool(flag.item())
-        else:
-            log(f"[KMeansInit] Triggered at {tag}")
-            inited = kmeans_init_gmm_prior(
-                model=model,
-                train_loader=train_loader,
-                train_sampler=train_sampler,
-                device=device,
-                num_components=args.num_components,
-                max_samples=args.gmm_kmeans_max_samples,
-                max_batches=args.gmm_kmeans_max_batches,
-                iters=args.gmm_kmeans_iters,
-                seed=args.seed,
-                prior_logvar_min=args.prior_logvar_min,
-                prior_logvar_max=args.prior_logvar_max,
-                log_fn=log,
-            )
-            kmeans_initialized = bool(inited)
-
-    if args.gmm_kmeans_warmup_epochs <= 0:
-        run_kmeans_init_once(tag="pre-epoch-1")
 
     epoch_id = start_round
 
@@ -667,12 +483,7 @@ def main():
         start_time = time.time()
         log(f"\n[Epoch {epoch_id}] Starting...")
         beta_end = args.beta_kl if args.beta_kl_end is None else args.beta_kl_end
-        kmeans_after_warmup_mode = bool(args.gmm_kmeans_init and args.gmm_kmeans_warmup_epochs > 0)
-        if kmeans_after_warmup_mode:
-            # Mode A (chosen): train normally, then run KMeans after warmup epochs.
-            # In this mode we disable KL warmup to avoid mixing two curricula.
-            beta_t = beta_end
-        elif args.beta_kl_warmup_epochs > 0:
+        if args.beta_kl_warmup_epochs > 0:
             alpha = min(1.0, max(0.0, (epoch_id - 1) / float(args.beta_kl_warmup_epochs)))
             beta_t = args.beta_kl_start + (beta_end - args.beta_kl_start) * alpha
         else:
@@ -682,8 +493,6 @@ def main():
         train_sampler.set_epoch(epoch_id)
         if val_sampler is not None:
             val_sampler.set_epoch(epoch_id)
-        if args.gmm_kmeans_warmup_epochs > 0 and (epoch_id == args.gmm_kmeans_warmup_epochs + 1):
-            run_kmeans_init_once(tag=f"epoch-{epoch_id}-start")
 
         loss_full, loss_recon, loss_kl, loss_score, loss_contrast, loss_cov = train_gmm_vae_one_epoch(
             model=model,
@@ -712,13 +521,6 @@ def main():
             resp_topk=args.resp_topk,
             prior_logvar_min=args.prior_logvar_min,
             prior_logvar_max=args.prior_logvar_max,
-            lambda_geo_local=args.lambda_geo_local,
-            lambda_geo_rank=args.lambda_geo_rank,
-            geo_knn_k=args.geo_knn_k,
-            geo_margin=args.geo_margin,
-            geo_anchor_count=args.geo_anchor_count,
-            geo_feature_topk=args.geo_feature_topk,
-            geo_use_mu=args.geo_use_mu,
         )
         train_msg = (
             f"[Epoch {epoch_id}] "
@@ -752,13 +554,6 @@ def main():
                 resp_topk=args.resp_topk,
                 prior_logvar_min=args.prior_logvar_min,
                 prior_logvar_max=args.prior_logvar_max,
-                lambda_geo_local=args.lambda_geo_local,
-                lambda_geo_rank=args.lambda_geo_rank,
-                geo_knn_k=args.geo_knn_k,
-                geo_margin=args.geo_margin,
-                geo_anchor_count=args.geo_anchor_count,
-                geo_feature_topk=args.geo_feature_topk,
-                geo_use_mu=args.geo_use_mu,
             )
             val_msg = (
                 f"[Epoch {epoch_id}] Validation Loss: "
