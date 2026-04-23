@@ -69,7 +69,6 @@ stdbuf -oL -eL torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" -m mai
     --lambda-resp-balance 1.0 \
     --lambda-resp-confidence 0.05 \
     --resp-temperature 0.9 \
-    --resp-topk 2 \
     --score-noise-std 0.1 \
     --lambda-contrast 0.1 \
     --lambda-real-recon 0.0 \
