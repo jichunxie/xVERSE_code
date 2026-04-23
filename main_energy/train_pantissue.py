@@ -129,10 +129,18 @@ def parse_args():
                         help="Weight of posterior-prior covariance matching loss (off-diagonal covariance).")
     parser.add_argument("--lambda-resp-balance", type=float, default=0.0,
                         help="Weight for batch-average responsibility balancing toward uniform component usage.")
+    parser.add_argument("--lambda-resp-balance-warmup-epochs", type=int, default=0,
+                        help="Linear warmup epochs for lambda-resp-balance from 0 to target. <=0 disables warmup.")
     parser.add_argument("--lambda-resp-confidence", type=float, default=0.0,
                         help="Weight for per-cell responsibility entropy minimization (encourages sparse/peaky assignments).")
+    parser.add_argument("--lambda-resp-confidence-warmup-epochs", type=int, default=0,
+                        help="Linear warmup epochs for lambda-resp-confidence from 0 to target. <=0 disables warmup.")
     parser.add_argument("--resp-temperature", type=float, default=1.0,
                         help="Temperature for posterior responsibilities used by entropy regularization (>1 softens).")
+    parser.add_argument("--resp-temperature-start", type=float, default=None,
+                        help="Optional start value for responsibility temperature schedule. Defaults to --resp-temperature.")
+    parser.add_argument("--resp-temperature-warmup-epochs", type=int, default=0,
+                        help="Linear warmup epochs for resp temperature from start to --resp-temperature. <=0 disables schedule.")
     parser.add_argument("--resp-topk", type=int, default=0,
                         help="Top-k routing for GMM responsibilities/log_prob in KL. 0 disables, 1/2 recommended.")
     parser.add_argument("--prior-logvar-min", type=float, default=-6.0,
@@ -211,6 +219,12 @@ def setup_distributed(args):
 
 def is_main_process(rank: int) -> bool:
     return rank == 0
+
+
+def _linear_warmup_scale(epoch_id: int, warmup_epochs: int) -> float:
+    if warmup_epochs <= 0:
+        return 1.0
+    return float(min(1.0, max(0.0, (epoch_id - 1) / float(warmup_epochs))))
 
 
 def main():
@@ -476,7 +490,22 @@ def main():
             beta_t = args.beta_kl_start + (beta_end - args.beta_kl_start) * alpha
         else:
             beta_t = beta_end
-        log(f"[Epoch {epoch_id}] beta_kl={beta_t:.6f}")
+        bal_scale = _linear_warmup_scale(epoch_id, int(args.lambda_resp_balance_warmup_epochs))
+        conf_scale = _linear_warmup_scale(epoch_id, int(args.lambda_resp_confidence_warmup_epochs))
+        lambda_resp_balance_t = float(args.lambda_resp_balance) * bal_scale
+        lambda_resp_confidence_t = float(args.lambda_resp_confidence) * conf_scale
+
+        resp_temp_start = float(args.resp_temperature) if args.resp_temperature_start is None else float(args.resp_temperature_start)
+        resp_temp_end = float(args.resp_temperature)
+        temp_scale = _linear_warmup_scale(epoch_id, int(args.resp_temperature_warmup_epochs))
+        resp_temperature_t = resp_temp_start + (resp_temp_end - resp_temp_start) * temp_scale
+
+        log(
+            f"[Epoch {epoch_id}] beta_kl={beta_t:.6f}, "
+            f"lambda_resp_balance={lambda_resp_balance_t:.6f}, "
+            f"lambda_resp_confidence={lambda_resp_confidence_t:.6f}, "
+            f"resp_temperature={resp_temperature_t:.6f}"
+        )
 
         train_sampler.set_epoch(epoch_id)
         if val_sampler is not None:
@@ -502,9 +531,9 @@ def main():
             lambda_real_recon=args.lambda_real_recon,
             lambda_cov=args.lambda_cov,
             cov_use_mu=args.cov_use_mu,
-            lambda_resp_balance=args.lambda_resp_balance,
-            lambda_resp_confidence=args.lambda_resp_confidence,
-            resp_temperature=args.resp_temperature,
+            lambda_resp_balance=lambda_resp_balance_t,
+            lambda_resp_confidence=lambda_resp_confidence_t,
+            resp_temperature=resp_temperature_t,
             resp_topk=args.resp_topk,
             prior_logvar_min=args.prior_logvar_min,
             prior_logvar_max=args.prior_logvar_max,
@@ -534,9 +563,9 @@ def main():
                 lambda_real_recon=args.lambda_real_recon,
                 lambda_cov=args.lambda_cov,
                 cov_use_mu=args.cov_use_mu,
-                lambda_resp_balance=args.lambda_resp_balance,
-                lambda_resp_confidence=args.lambda_resp_confidence,
-                resp_temperature=args.resp_temperature,
+                lambda_resp_balance=lambda_resp_balance_t,
+                lambda_resp_confidence=lambda_resp_confidence_t,
+                resp_temperature=resp_temperature_t,
                 resp_topk=args.resp_topk,
                 prior_logvar_min=args.prior_logvar_min,
                 prior_logvar_max=args.prior_logvar_max,

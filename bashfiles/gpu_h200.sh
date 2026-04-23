@@ -46,30 +46,34 @@ stdbuf -oL -eL torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" -m mai
     --val-num-workers 5 \
     --prefetch-factor 8 \
     --samples-per-id 500 \
-    --lr 3e-4 \
+    --lr 1e-4 \
     --weight-decay 1e-5 \
     --prior-type gmm \
     --latent-dim 128 \
     --num-components 16 \
     --prior-cov-rank 2 \
-    --prior-logvar-min -6 \
+    --prior-logvar-min -3 \
     --prior-logvar-max 4 \
     --expr-hidden-dim 1536 \
     --mask-hidden-dim 512 \
     --dec-hidden-dim 1536 \
-    --beta-kl 0.01 \
+    --beta-kl 0.1 \
     --beta-kl-warmup-epochs 0 \
     --recon-observed-only \
     --mask-aug-prob 1.0 \
     --mask-aug-policy xverse \
     --mask-aug-min-frac 0.1 \
     --mask-aug-max-frac 0.5 \
-    --lambda-score 0.01 \
-    --lambda-cov 0.001 \
-    --lambda-resp-balance 1.0 \
-    --lambda-resp-confidence 0.05 \
-    --resp-temperature 0.9 \
+    --lambda-score 0 \
+    --lambda-cov 0 \
+    --lambda-resp-balance 0.05 \
+    --lambda-resp-balance-warmup-epochs 5 \
+    --lambda-resp-confidence 0.005 \
+    --lambda-resp-confidence-warmup-epochs 10 \
+    --resp-temperature 1.0 \
+    --resp-temperature-start 1.3 \
+    --resp-temperature-warmup-epochs 10 \
     --score-noise-std 0.1 \
-    --lambda-contrast 0.1 \
+    --lambda-contrast 0.0 \
     --lambda-real-recon 0.0 \
     --contrast-temp 0.3
