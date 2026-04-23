@@ -45,7 +45,7 @@ stdbuf -oL -eL torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" -m mai
     --val-num-workers 5 \
     --prefetch-factor 8 \
     --samples-per-id 500 \
-    --lr 3e-4 \
+    --lr 1e-4 \
     --weight-decay 1e-5 \
     --prior-type gmm \
     --latent-dim 128 \
@@ -64,11 +64,11 @@ stdbuf -oL -eL torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" -m mai
     --mask-aug-min-frac 0.1 \
     --mask-aug-max-frac 0.5 \
     --lambda-score 0.001 \
-    --lambda-cov 0.01 \
+    --lambda-cov 0 \
     --lambda-resp-entropy 0.0 \
     --lambda-resp-balance 1.0 \
-    --lambda-resp-confidence 0.05 \
-    --resp-temperature 0.9 \
+    --lambda-resp-confidence 0.01 \
+    --resp-temperature 1 \
     --score-noise-std 0.1 \
     --lambda-contrast 0.1 \
     --lambda-real-recon 0.0 \
