@@ -2,9 +2,9 @@
 #SBATCH -p biostat-gpu                     
 #SBATCH -A biostat                           
 #SBATCH --gres=gpu:1                        
-#SBATCH -c 10                                
-#SBATCH --mem=100G                        
-#SBATCH -t 1:00:00                            
+#SBATCH -c 20                                
+#SBATCH --mem=200G                        
+#SBATCH -t 20:00:00                            
 #SBATCH -J bios
 #SBATCH --output=/hpc/group/xielab/xj58/sbatch_output/%x_output_%j.txt  
 #SBATCH --error=/hpc/group/xielab/xj58/sbatch_output/%x_error_%j.txt  
@@ -57,30 +57,20 @@ stdbuf -oL -eL torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" -m mai
     --mask-hidden-dim 512 \
     --dec-hidden-dim 1536 \
     --beta-kl 0.1 \
-    --gmm-kmeans-max-samples 200000 \
-    --gmm-kmeans-max-batches 300 \
-    --gmm-kmeans-iters 30 \
-    --gmm-kmeans-warmup-epochs 1 \
     --recon-observed-only \
     --mask-aug-prob 1.0 \
     --mask-aug-policy xverse \
     --mask-aug-min-frac 0.1 \
     --mask-aug-max-frac 0.5 \
-    --lambda-score 0 \
+    --lambda-score 0.01 \
     --lambda-cov 0.001 \
     --lambda-resp-entropy 0.0 \
     --lambda-resp-balance 1.0 \
     --lambda-resp-confidence 0.05 \
     --resp-temperature 0.9 \
     --resp-topk 2 \
-    --lambda-geo-local 0 \
-    --lambda-geo-rank 0 \
-    --geo-knn-k 16 \
-    --geo-margin 0.2 \
-    --geo-anchor-count 256 \
-    --geo-feature-topk 512 \
-    --geo-use-mu \
     --score-noise-std 0.1 \
-    --lambda-contrast 0.0 \
+    --lambda-contrast 0.1 \
     --lambda-real-recon 0.0 \
     --contrast-temp 0.3
+
