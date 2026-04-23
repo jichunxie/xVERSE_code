@@ -39,10 +39,10 @@ stdbuf -oL -eL torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" -m mai
     --sampler-active-shards 64 \
     --result-dir "/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_all_tissue_h200" \
     --num-epochs 100 \
-    --val-every 5 \
-    --batch-size 2048 \
-    --val-batch-size 2048 \
-    --num-workers 10 \
+    --val-every 10 \
+    --batch-size 8192 \
+    --val-batch-size 8192 \
+    --num-workers 8 \
     --val-num-workers 5 \
     --prefetch-factor 8 \
     --samples-per-id 500 \
@@ -54,9 +54,9 @@ stdbuf -oL -eL torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" -m mai
     --prior-cov-rank 2 \
     --prior-logvar-min -6 \
     --prior-logvar-max 4 \
-    --expr-hidden-dim 1024 \
+    --expr-hidden-dim 1536 \
     --mask-hidden-dim 512 \
-    --dec-hidden-dim 1024 \
+    --dec-hidden-dim 1536 \
     --beta-kl 0.1 \
     --gmm-kmeans-init \
     --gmm-kmeans-max-samples 200000 \
@@ -70,9 +70,18 @@ stdbuf -oL -eL torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" -m mai
     --mask-aug-max-frac 0.5 \
     --lambda-score 0 \
     --lambda-cov 0.001 \
-    --lambda-resp-entropy 0.001 \
+    --lambda-resp-entropy 0.0 \
     --lambda-resp-balance 1.0 \
-    --resp-temperature 3.0 \
+    --lambda-resp-confidence 0.05 \
+    --resp-temperature 0.9 \
+    --resp-topk 2 \
+    --lambda-geo-local 0.01 \
+    --lambda-geo-rank 0.05 \
+    --geo-knn-k 16 \
+    --geo-margin 0.2 \
+    --geo-anchor-count 256 \
+    --geo-feature-topk 512 \
+    --geo-use-mu \
     --score-noise-std 0.1 \
     --lambda-contrast 0.0 \
     --lambda-real-recon 0.0 \

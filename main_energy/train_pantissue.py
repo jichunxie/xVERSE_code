@@ -141,12 +141,32 @@ def parse_args():
                         help="Weight for responsibility entropy maximization to prevent single-component collapse.")
     parser.add_argument("--lambda-resp-balance", type=float, default=0.0,
                         help="Weight for batch-average responsibility balancing toward uniform component usage.")
+    parser.add_argument("--lambda-resp-confidence", type=float, default=0.0,
+                        help="Weight for per-cell responsibility entropy minimization (encourages sparse/peaky assignments).")
     parser.add_argument("--resp-temperature", type=float, default=1.0,
                         help="Temperature for posterior responsibilities used by entropy regularization (>1 softens).")
+    parser.add_argument("--resp-topk", type=int, default=0,
+                        help="Top-k routing for GMM responsibilities/log_prob in KL. 0 disables, 1/2 recommended.")
     parser.add_argument("--prior-logvar-min", type=float, default=-6.0,
                         help="Lower clamp bound for GMM prior log-variance.")
     parser.add_argument("--prior-logvar-max", type=float, default=4.0,
                         help="Upper clamp bound for GMM prior log-variance.")
+    parser.add_argument("--lambda-geo-local", type=float, default=0.0,
+                        help="Weight for local graph-neighbor smoothness in latent space.")
+    parser.add_argument("--lambda-geo-rank", type=float, default=0.0,
+                        help="Weight for geodesic-inspired triplet ranking loss in latent space.")
+    parser.add_argument("--geo-knn-k", type=int, default=16,
+                        help="kNN size for batch graph used by geodesic regularization.")
+    parser.add_argument("--geo-margin", type=float, default=0.2,
+                        help="Margin for geodesic triplet ranking loss.")
+    parser.add_argument("--geo-anchor-count", type=int, default=256,
+                        help="Max anchors per batch for geodesic regularization (caps O(N^2) cost).")
+    parser.add_argument("--geo-feature-topk", type=int, default=512,
+                        help="Top variable genes used to build batch graph space.")
+    parser.add_argument("--geo-use-mu", action="store_true", default=True,
+                        help="Use posterior mean mu for geodesic regularization (recommended).")
+    parser.add_argument("--geo-use-z", dest="geo_use_mu", action="store_false",
+                        help="Use sampled z for geodesic regularization.")
     parser.add_argument("--cov-use-mu", action="store_true", default=True,
                         help="Use posterior mean mu for covariance matching (recommended).")
     parser.add_argument("--cov-use-z", dest="cov_use_mu", action="store_false",
@@ -687,9 +707,18 @@ def main():
             cov_use_mu=args.cov_use_mu,
             lambda_resp_entropy=args.lambda_resp_entropy,
             lambda_resp_balance=args.lambda_resp_balance,
+            lambda_resp_confidence=args.lambda_resp_confidence,
             resp_temperature=args.resp_temperature,
+            resp_topk=args.resp_topk,
             prior_logvar_min=args.prior_logvar_min,
             prior_logvar_max=args.prior_logvar_max,
+            lambda_geo_local=args.lambda_geo_local,
+            lambda_geo_rank=args.lambda_geo_rank,
+            geo_knn_k=args.geo_knn_k,
+            geo_margin=args.geo_margin,
+            geo_anchor_count=args.geo_anchor_count,
+            geo_feature_topk=args.geo_feature_topk,
+            geo_use_mu=args.geo_use_mu,
         )
         train_msg = (
             f"[Epoch {epoch_id}] "
@@ -718,9 +747,18 @@ def main():
                 cov_use_mu=args.cov_use_mu,
                 lambda_resp_entropy=args.lambda_resp_entropy,
                 lambda_resp_balance=args.lambda_resp_balance,
+                lambda_resp_confidence=args.lambda_resp_confidence,
                 resp_temperature=args.resp_temperature,
+                resp_topk=args.resp_topk,
                 prior_logvar_min=args.prior_logvar_min,
                 prior_logvar_max=args.prior_logvar_max,
+                lambda_geo_local=args.lambda_geo_local,
+                lambda_geo_rank=args.lambda_geo_rank,
+                geo_knn_k=args.geo_knn_k,
+                geo_margin=args.geo_margin,
+                geo_anchor_count=args.geo_anchor_count,
+                geo_feature_topk=args.geo_feature_topk,
+                geo_use_mu=args.geo_use_mu,
             )
             val_msg = (
                 f"[Epoch {epoch_id}] Validation Loss: "

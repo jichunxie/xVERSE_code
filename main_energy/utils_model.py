@@ -167,10 +167,15 @@ class GaussianMixturePrior(nn.Module):
             out = -0.5 * (quad + log_det.unsqueeze(0) + log_norm)
         return out
 
-    def log_prob(self, z: torch.Tensor) -> torch.Tensor:
+    def log_prob(self, z: torch.Tensor, topk: int = 0) -> torch.Tensor:
         log_weights = F.log_softmax(self.pi_logits, dim=0).unsqueeze(0)  # (1, K)
         log_comp = self.component_log_prob(z)  # (B, K)
-        return torch.logsumexp(log_weights + log_comp, dim=1)
+        logits = log_weights + log_comp
+        k = int(topk)
+        if k > 0 and k < logits.size(1):
+            top_vals, _ = torch.topk(logits, k=k, dim=1, largest=True, sorted=False)
+            return torch.logsumexp(top_vals, dim=1)
+        return torch.logsumexp(logits, dim=1)
 
     def score(self, z: torch.Tensor) -> torch.Tensor:
         """
@@ -225,12 +230,19 @@ class GaussianMixturePrior(nn.Module):
         ).sum(dim=0)
         return second - mean.unsqueeze(1) * mean.unsqueeze(0)
 
-    def posterior_responsibilities(self, z: torch.Tensor, temperature: float = 1.0) -> torch.Tensor:
+    def posterior_responsibilities(self, z: torch.Tensor, temperature: float = 1.0, topk: int = 0) -> torch.Tensor:
         t = max(float(temperature), 1e-6)
         log_weights = F.log_softmax(self.pi_logits.float(), dim=0).unsqueeze(0)  # (1, K)
         log_comp = self.component_log_prob(z)  # (B, K)
         logits = (log_weights + log_comp) / t
-        return torch.softmax(logits, dim=1)
+        k = int(topk)
+        if k <= 0 or k >= logits.size(1):
+            return torch.softmax(logits, dim=1)
+        top_vals, top_idx = torch.topk(logits, k=k, dim=1, largest=True, sorted=False)
+        top_resp = torch.softmax(top_vals, dim=1)
+        resp = torch.zeros_like(logits)
+        resp.scatter_(1, top_idx, top_resp)
+        return resp
 
     def clamp_logvar_(self, min_val: float = -6.0, max_val: float = 4.0):
         with torch.no_grad():
@@ -327,9 +339,18 @@ class MaskFiLMGMMVAE(nn.Module):
         cov_use_mu: bool = True,
         lambda_resp_entropy: float = 0.0,
         lambda_resp_balance: float = 0.0,
+        lambda_resp_confidence: float = 0.0,
         resp_temperature: float = 1.0,
+        resp_topk: int = 0,
         prior_logvar_min: float = -6.0,
         prior_logvar_max: float = 4.0,
+        lambda_geo_local: float = 0.0,
+        lambda_geo_rank: float = 0.0,
+        geo_knn_k: int = 16,
+        geo_margin: float = 0.2,
+        geo_anchor_count: int = 256,
+        geo_feature_topk: int = 512,
+        geo_use_mu: bool = True,
     ) -> Dict[str, torch.Tensor]:
         if encoder_mask is None:
             encoder_mask = x_mask
@@ -356,7 +377,7 @@ class MaskFiLMGMMVAE(nn.Module):
         else:
             self.prior.clamp_logvar_(min_val=prior_logvar_min, max_val=prior_logvar_max)
             log_q = gaussian_log_prob_diag(z=z, mu=mu, logvar=logvar)
-            log_p = self.prior.log_prob(z)
+            log_p = self.prior.log_prob(z, topk=resp_topk)
             kl_loss = (log_q - log_p).mean()
         score_loss = torch.zeros((), device=z.device, dtype=z.dtype)
         score_norm_pred = torch.zeros((), device=z.device, dtype=z.dtype)
@@ -367,6 +388,9 @@ class MaskFiLMGMMVAE(nn.Module):
         resp_entropy = torch.zeros((), device=z.device, dtype=z.dtype)
         resp_top1 = torch.zeros((), device=z.device, dtype=z.dtype)
         resp_balance_loss = torch.zeros((), device=z.device, dtype=z.dtype)
+        resp_confidence_loss = torch.zeros((), device=z.device, dtype=z.dtype)
+        geo_local_loss = torch.zeros((), device=z.device, dtype=z.dtype)
+        geo_rank_loss = torch.zeros((), device=z.device, dtype=z.dtype)
 
         if lambda_score > 0:
             z_for_score = z.detach() if score_detach_z else z
@@ -397,12 +421,14 @@ class MaskFiLMGMMVAE(nn.Module):
             cov_offdiag_prior = prior_off.abs().mean().to(z.dtype)
 
         resp_entropy_loss = torch.zeros((), device=z.device, dtype=z.dtype)
-        if self.prior_type == "gmm" and (lambda_resp_entropy > 0 or lambda_resp_balance > 0):
-            resp = self.prior.posterior_responsibilities(z=z, temperature=resp_temperature)
+        if self.prior_type == "gmm" and (lambda_resp_entropy > 0 or lambda_resp_balance > 0 or lambda_resp_confidence > 0):
+            resp = self.prior.posterior_responsibilities(z=z, temperature=resp_temperature, topk=resp_topk)
             resp_entropy = (-(resp * torch.log(resp + 1e-12)).sum(dim=1)).mean().to(z.dtype)
             resp_top1 = resp.max(dim=1).values.mean().to(z.dtype)
             # maximize entropy => minimize negative entropy
             resp_entropy_loss = -resp_entropy
+            # minimize entropy => encourage each cell to use fewer components
+            resp_confidence_loss = resp_entropy
             if lambda_resp_balance > 0:
                 usage = resp.mean(dim=0)  # (K,)
                 target = torch.full_like(usage, 1.0 / float(usage.numel()))
@@ -412,6 +438,19 @@ class MaskFiLMGMMVAE(nn.Module):
                     reduction="sum",
                 ).to(z.dtype)
 
+        if lambda_geo_local > 0 or lambda_geo_rank > 0:
+            latent_for_geo = mu if geo_use_mu else z
+            geo_local_loss, geo_rank_loss = geodesic_batch_regularization(
+                x_count=x_count,
+                z_latent=latent_for_geo,
+                k=geo_knn_k,
+                margin=geo_margin,
+                anchor_count=geo_anchor_count,
+                feature_topk=geo_feature_topk,
+            )
+            geo_local_loss = geo_local_loss.to(z.dtype)
+            geo_rank_loss = geo_rank_loss.to(z.dtype)
+
         total_loss = (
             recon_loss
             + beta * kl_loss
@@ -419,6 +458,9 @@ class MaskFiLMGMMVAE(nn.Module):
             + lambda_cov * cov_loss
             + lambda_resp_entropy * resp_entropy_loss
             + lambda_resp_balance * resp_balance_loss
+            + lambda_resp_confidence * resp_confidence_loss
+            + lambda_geo_local * geo_local_loss
+            + lambda_geo_rank * geo_rank_loss
         )
 
         return {
@@ -432,6 +474,9 @@ class MaskFiLMGMMVAE(nn.Module):
             "resp_entropy": resp_entropy,
             "resp_top1": resp_top1,
             "resp_balance_loss": resp_balance_loss,
+            "resp_confidence_loss": resp_confidence_loss,
+            "geo_local_loss": geo_local_loss,
+            "geo_rank_loss": geo_rank_loss,
             "score_norm_pred": score_norm_pred,
             "score_norm_tgt": score_norm_tgt,
             "log_q_mean": log_q.mean(),
@@ -468,6 +513,82 @@ def batch_covariance(x: torch.Tensor) -> torch.Tensor:
 
 def offdiag_part(m: torch.Tensor) -> torch.Tensor:
     return m - torch.diag_embed(torch.diagonal(m, dim1=-2, dim2=-1))
+
+
+def geodesic_batch_regularization(
+    x_count: torch.Tensor,
+    z_latent: torch.Tensor,
+    k: int = 16,
+    margin: float = 0.2,
+    anchor_count: int = 256,
+    feature_topk: int = 512,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Geodesic-inspired regularization inside a batch:
+    1) build a kNN graph in a stable input space (library-normalized log-counts, top variable genes)
+    2) local smoothness on graph edges
+    3) triplet ranking: neighbor should stay closer than far node in latent
+    """
+    bsz = int(x_count.size(0))
+    if bsz < 4:
+        zero = torch.zeros((), device=z_latent.device, dtype=z_latent.dtype)
+        return zero, zero
+
+    # Subsample anchors to keep O(N^2) graph ops bounded.
+    n = min(max(4, int(anchor_count)), bsz)
+    if n < bsz:
+        sel = torch.randperm(bsz, device=x_count.device)[:n]
+        x_sub = x_count[sel]
+        z_sub = z_latent[sel]
+    else:
+        x_sub = x_count
+        z_sub = z_latent
+
+    # Stable graph space: CP10K + log1p + top variable genes.
+    x = x_sub.float()
+    lib = torch.clamp(x.sum(dim=1, keepdim=True), min=1.0)
+    x_log = torch.log1p(1e4 * x / lib)
+    g = min(max(16, int(feature_topk)), int(x_log.size(1)))
+    var = x_log.var(dim=0, unbiased=False)
+    top_idx = torch.topk(var, k=g, largest=True, sorted=False).indices
+    feat = x_log[:, top_idx]
+    feat = (feat - feat.mean(dim=0, keepdim=True)) / (feat.std(dim=0, keepdim=True) + 1e-4)
+
+    # Distances in graph space and latent space.
+    d_geo = torch.cdist(feat, feat, p=2)  # (n, n)
+    d_lat = torch.cdist(z_sub.float(), z_sub.float(), p=2)  # (n, n)
+    n = int(d_geo.size(0))
+
+    # Exclude self for neighbor selection.
+    eye = torch.eye(n, device=d_geo.device, dtype=torch.bool)
+    d_geo_excl = d_geo.masked_fill(eye, float("inf"))
+
+    k_eff = min(max(1, int(k)), n - 1)
+    knn_dist, knn_idx = torch.topk(d_geo_excl, k=k_eff, largest=False, dim=1)  # (n, k)
+
+    # Local edge smoothness in latent, weighted by graph-space proximity.
+    anchor_idx = torch.arange(n, device=d_geo.device).unsqueeze(1).expand(n, k_eff)
+    lat_edge = d_lat[anchor_idx, knn_idx]  # (n, k)
+    geo_scale = torch.clamp(knn_dist.mean().detach(), min=1e-4)
+    w = torch.exp(-knn_dist / geo_scale)
+    local_loss = (w * (lat_edge ** 2)).sum() / torch.clamp(w.sum(), min=1.0)
+
+    # Triplet ranking:
+    # positive from kNN; negative from far geodesic zone.
+    pos_pick = torch.randint(low=0, high=k_eff, size=(n,), device=d_geo.device)
+    pos_idx = knn_idx[torch.arange(n, device=d_geo.device), pos_pick]
+
+    d_geo_neg = d_geo.masked_fill(eye, float("-inf"))
+    far_k = min(max(1, k_eff), n - 1)
+    far_vals, far_idx = torch.topk(d_geo_neg, k=far_k, largest=True, dim=1)
+    neg_pick = torch.randint(low=0, high=far_k, size=(n,), device=d_geo.device)
+    neg_idx = far_idx[torch.arange(n, device=d_geo.device), neg_pick]
+
+    d_pos = torch.norm(z_sub - z_sub[pos_idx], dim=1, p=2)
+    d_neg = torch.norm(z_sub - z_sub[neg_idx], dim=1, p=2)
+    rank_loss = F.relu(d_pos - d_neg + float(margin)).mean()
+
+    return local_loss.to(z_latent.dtype), rank_loss.to(z_latent.dtype)
 
 
 def poisson_nll(x_count: torch.Tensor, rate: torch.Tensor) -> torch.Tensor:
@@ -665,9 +786,18 @@ def train_gmm_vae_one_epoch(
     cov_use_mu=True,
     lambda_resp_entropy=0.0,
     lambda_resp_balance=0.0,
+    lambda_resp_confidence=0.0,
     resp_temperature=1.0,
+    resp_topk=0,
     prior_logvar_min=-6.0,
     prior_logvar_max=4.0,
+    lambda_geo_local=0.0,
+    lambda_geo_rank=0.0,
+    geo_knn_k=16,
+    geo_margin=0.2,
+    geo_anchor_count=256,
+    geo_feature_topk=512,
+    geo_use_mu=True,
 ):
     model.train()
     loss_fn = model.module.loss if hasattr(model, "module") else model.loss
@@ -699,9 +829,18 @@ def train_gmm_vae_one_epoch(
                 cov_use_mu=cov_use_mu,
                 lambda_resp_entropy=lambda_resp_entropy,
                 lambda_resp_balance=lambda_resp_balance,
+                lambda_resp_confidence=lambda_resp_confidence,
                 resp_temperature=resp_temperature,
+                resp_topk=resp_topk,
                 prior_logvar_min=prior_logvar_min,
                 prior_logvar_max=prior_logvar_max,
+                lambda_geo_local=lambda_geo_local,
+                lambda_geo_rank=lambda_geo_rank,
+                geo_knn_k=geo_knn_k,
+                geo_margin=geo_margin,
+                geo_anchor_count=geo_anchor_count,
+                geo_feature_topk=geo_feature_topk,
+                geo_use_mu=geo_use_mu,
             )
             need_real_view = (lambda_contrast > 0) or (lambda_real_recon > 0)
             real_recon = torch.zeros((), device=x_count.device, dtype=out_fake["z"].dtype)
@@ -719,9 +858,18 @@ def train_gmm_vae_one_epoch(
                     cov_use_mu=cov_use_mu,
                     lambda_resp_entropy=0.0,
                     lambda_resp_balance=0.0,
+                    lambda_resp_confidence=0.0,
                     resp_temperature=resp_temperature,
+                    resp_topk=0,
                     prior_logvar_min=prior_logvar_min,
                     prior_logvar_max=prior_logvar_max,
+                    lambda_geo_local=0.0,
+                    lambda_geo_rank=0.0,
+                    geo_knn_k=geo_knn_k,
+                    geo_margin=geo_margin,
+                    geo_anchor_count=geo_anchor_count,
+                    geo_feature_topk=geo_feature_topk,
+                    geo_use_mu=geo_use_mu,
                 )
                 real_recon = out_real["recon_loss"]
             if lambda_contrast > 0:
@@ -756,7 +904,8 @@ def train_gmm_vae_one_epoch(
             msg = (
                 f"[Batch {batch_idx + 1}] "
                 f"Loss={loss.item():.4f}, Recon={recon.item():.4f}, KL={kl.item():.4f}, "
-                f"Score={score.item():.4f}, Cov={cov.item():.4f}"
+                f"Score={score.item():.4f}, Cov={cov.item():.4f}, "
+                f"GeoL={out_fake['geo_local_loss'].item():.4f}, GeoR={out_fake['geo_rank_loss'].item():.4f}"
             )
             if lambda_contrast > 0:
                 msg += f", Contrast={contrast.item():.4f}"
@@ -766,6 +915,7 @@ def train_gmm_vae_one_epoch(
                 f", ||s_pred||={out_fake['score_norm_pred'].item():.4f}, ||s_tgt||={out_fake['score_norm_tgt'].item():.4f}, "
                 f"||cov_post_off||={out_fake['cov_offdiag_post'].item():.6f}, ||cov_prior_off||={out_fake['cov_offdiag_prior'].item():.6f}, "
                 f"respH={out_fake['resp_entropy'].item():.4f}, respBal={out_fake['resp_balance_loss'].item():.4f}, "
+                f"respConf={out_fake['resp_confidence_loss'].item():.4f}, "
                 f"respTop1Batch={out_fake['resp_top1'].item():.4f}"
             )
             if getattr(model.module if hasattr(model, "module") else model, "prior_type", None) == "gmm":
@@ -813,9 +963,18 @@ def evaluate_gmm_vae_one_epoch(
     cov_use_mu=True,
     lambda_resp_entropy=0.0,
     lambda_resp_balance=0.0,
+    lambda_resp_confidence=0.0,
     resp_temperature=1.0,
+    resp_topk=0,
     prior_logvar_min=-6.0,
     prior_logvar_max=4.0,
+    lambda_geo_local=0.0,
+    lambda_geo_rank=0.0,
+    geo_knn_k=16,
+    geo_margin=0.2,
+    geo_anchor_count=256,
+    geo_feature_topk=512,
+    geo_use_mu=True,
 ):
     model.eval()
     loss_fn = model.module.loss if hasattr(model, "module") else model.loss
@@ -845,9 +1004,18 @@ def evaluate_gmm_vae_one_epoch(
                 cov_use_mu=cov_use_mu,
                 lambda_resp_entropy=lambda_resp_entropy,
                 lambda_resp_balance=lambda_resp_balance,
+                lambda_resp_confidence=lambda_resp_confidence,
                 resp_temperature=resp_temperature,
+                resp_topk=resp_topk,
                 prior_logvar_min=prior_logvar_min,
                 prior_logvar_max=prior_logvar_max,
+                lambda_geo_local=lambda_geo_local,
+                lambda_geo_rank=lambda_geo_rank,
+                geo_knn_k=geo_knn_k,
+                geo_margin=geo_margin,
+                geo_anchor_count=geo_anchor_count,
+                geo_feature_topk=geo_feature_topk,
+                geo_use_mu=geo_use_mu,
             )
             need_real_view = (lambda_contrast > 0) or (lambda_real_recon > 0)
             real_recon = torch.zeros((), device=x_count.device, dtype=out_fake["z"].dtype)
@@ -865,9 +1033,18 @@ def evaluate_gmm_vae_one_epoch(
                     cov_use_mu=cov_use_mu,
                     lambda_resp_entropy=0.0,
                     lambda_resp_balance=0.0,
+                    lambda_resp_confidence=0.0,
                     resp_temperature=resp_temperature,
+                    resp_topk=0,
                     prior_logvar_min=prior_logvar_min,
                     prior_logvar_max=prior_logvar_max,
+                    lambda_geo_local=0.0,
+                    lambda_geo_rank=0.0,
+                    geo_knn_k=geo_knn_k,
+                    geo_margin=geo_margin,
+                    geo_anchor_count=geo_anchor_count,
+                    geo_feature_topk=geo_feature_topk,
+                    geo_use_mu=geo_use_mu,
                 )
                 real_recon = out_real["recon_loss"]
             if lambda_contrast > 0:
@@ -892,7 +1069,9 @@ def evaluate_gmm_vae_one_epoch(
                     f"[Val Batch {batch_idx + 1}] "
                     f"Loss={loss.item():.4f}, Recon={out_fake['recon_loss'].item():.4f}, "
                     f"KL={out_fake['kl_loss'].item():.4f}, Score={out_fake['score_loss'].item():.4f}, "
-                    f"Cov={out_fake['cov_loss'].item():.4f}"
+                    f"Cov={out_fake['cov_loss'].item():.4f}, "
+                    f"GeoL={out_fake['geo_local_loss'].item():.4f}, GeoR={out_fake['geo_rank_loss'].item():.4f}, "
+                    f"respConf={out_fake['resp_confidence_loss'].item():.4f}"
                 )
                 if getattr(model.module if hasattr(model, "module") else model, "prior_type", None) == "gmm":
                     diag = gmm_collapse_diagnostics(prior=prior_ref, z=out_fake["z"])
