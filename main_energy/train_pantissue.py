@@ -127,8 +127,6 @@ def parse_args():
                         help="Weight of auxiliary score loss. Keep small when enabled.")
     parser.add_argument("--lambda-cov", type=float, default=0.0,
                         help="Weight of posterior-prior covariance matching loss (off-diagonal covariance).")
-    parser.add_argument("--lambda-resp-entropy", type=float, default=0.0,
-                        help="Weight for responsibility entropy maximization to prevent single-component collapse.")
     parser.add_argument("--lambda-resp-balance", type=float, default=0.0,
                         help="Weight for batch-average responsibility balancing toward uniform component usage.")
     parser.add_argument("--lambda-resp-confidence", type=float, default=0.0,
@@ -504,7 +502,6 @@ def main():
             lambda_real_recon=args.lambda_real_recon,
             lambda_cov=args.lambda_cov,
             cov_use_mu=args.cov_use_mu,
-            lambda_resp_entropy=args.lambda_resp_entropy,
             lambda_resp_balance=args.lambda_resp_balance,
             lambda_resp_confidence=args.lambda_resp_confidence,
             resp_temperature=args.resp_temperature,
@@ -537,7 +534,6 @@ def main():
                 lambda_real_recon=args.lambda_real_recon,
                 lambda_cov=args.lambda_cov,
                 cov_use_mu=args.cov_use_mu,
-                lambda_resp_entropy=args.lambda_resp_entropy,
                 lambda_resp_balance=args.lambda_resp_balance,
                 lambda_resp_confidence=args.lambda_resp_confidence,
                 resp_temperature=args.resp_temperature,

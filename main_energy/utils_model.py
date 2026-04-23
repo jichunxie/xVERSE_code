@@ -337,7 +337,6 @@ class MaskFiLMGMMVAE(nn.Module):
         score_detach_z: bool = True,
         lambda_cov: float = 0.0,
         cov_use_mu: bool = True,
-        lambda_resp_entropy: float = 0.0,
         lambda_resp_balance: float = 0.0,
         lambda_resp_confidence: float = 0.0,
         resp_temperature: float = 1.0,
@@ -411,13 +410,10 @@ class MaskFiLMGMMVAE(nn.Module):
             cov_offdiag_post = post_off.abs().mean().to(z.dtype)
             cov_offdiag_prior = prior_off.abs().mean().to(z.dtype)
 
-        resp_entropy_loss = torch.zeros((), device=z.device, dtype=z.dtype)
-        if self.prior_type == "gmm" and (lambda_resp_entropy > 0 or lambda_resp_balance > 0 or lambda_resp_confidence > 0):
+        if self.prior_type == "gmm" and (lambda_resp_balance > 0 or lambda_resp_confidence > 0):
             resp = self.prior.posterior_responsibilities(z=z, temperature=resp_temperature, topk=resp_topk)
             resp_entropy = (-(resp * torch.log(resp + 1e-12)).sum(dim=1)).mean().to(z.dtype)
             resp_top1 = resp.max(dim=1).values.mean().to(z.dtype)
-            # maximize entropy => minimize negative entropy
-            resp_entropy_loss = -resp_entropy
             # minimize entropy => encourage each cell to use fewer components
             resp_confidence_loss = resp_entropy
             if lambda_resp_balance > 0:
@@ -434,7 +430,6 @@ class MaskFiLMGMMVAE(nn.Module):
             + beta * kl_loss
             + lambda_score * score_loss
             + lambda_cov * cov_loss
-            + lambda_resp_entropy * resp_entropy_loss
             + lambda_resp_balance * resp_balance_loss
             + lambda_resp_confidence * resp_confidence_loss
         )
@@ -682,7 +677,6 @@ def train_gmm_vae_one_epoch(
     lambda_real_recon=0.0,
     lambda_cov=0.0,
     cov_use_mu=True,
-    lambda_resp_entropy=0.0,
     lambda_resp_balance=0.0,
     lambda_resp_confidence=0.0,
     resp_temperature=1.0,
@@ -717,7 +711,6 @@ def train_gmm_vae_one_epoch(
                 score_detach_z=score_detach_z,
                 lambda_cov=lambda_cov,
                 cov_use_mu=cov_use_mu,
-                lambda_resp_entropy=lambda_resp_entropy,
                 lambda_resp_balance=lambda_resp_balance,
                 lambda_resp_confidence=lambda_resp_confidence,
                 resp_temperature=resp_temperature,
@@ -739,7 +732,6 @@ def train_gmm_vae_one_epoch(
                     score_detach_z=score_detach_z,
                     lambda_cov=0.0,
                     cov_use_mu=cov_use_mu,
-                    lambda_resp_entropy=0.0,
                     lambda_resp_balance=0.0,
                     lambda_resp_confidence=0.0,
                     resp_temperature=resp_temperature,
@@ -847,7 +839,6 @@ def evaluate_gmm_vae_one_epoch(
     lambda_real_recon=0.0,
     lambda_cov=0.0,
     cov_use_mu=True,
-    lambda_resp_entropy=0.0,
     lambda_resp_balance=0.0,
     lambda_resp_confidence=0.0,
     resp_temperature=1.0,
@@ -881,7 +872,6 @@ def evaluate_gmm_vae_one_epoch(
                 score_detach_z=score_detach_z,
                 lambda_cov=lambda_cov,
                 cov_use_mu=cov_use_mu,
-                lambda_resp_entropy=lambda_resp_entropy,
                 lambda_resp_balance=lambda_resp_balance,
                 lambda_resp_confidence=lambda_resp_confidence,
                 resp_temperature=resp_temperature,
@@ -903,7 +893,6 @@ def evaluate_gmm_vae_one_epoch(
                     score_detach_z=score_detach_z,
                     lambda_cov=0.0,
                     cov_use_mu=cov_use_mu,
-                    lambda_resp_entropy=0.0,
                     lambda_resp_balance=0.0,
                     lambda_resp_confidence=0.0,
                     resp_temperature=resp_temperature,

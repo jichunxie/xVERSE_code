@@ -50,7 +50,7 @@ stdbuf -oL -eL torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" -m mai
     --prior-type gmm \
     --latent-dim 128 \
     --num-components 16 \
-    --prior-cov-rank 0 \
+    --prior-cov-rank 4 \
     --prior-logvar-min -2 \
     --prior-logvar-max 4 \
     --expr-hidden-dim 1536 \
@@ -65,10 +65,9 @@ stdbuf -oL -eL torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" -m mai
     --mask-aug-max-frac 0.5 \
     --lambda-score 0 \
     --lambda-cov 0 \
-    --lambda-resp-entropy 0.0 \
     --lambda-resp-balance 0.1 \
-    --lambda-resp-confidence 0.0 \
-    --resp-temperature 1.3 \
+    --lambda-resp-confidence 0.1 \
+    --resp-temperature 1 \
     --score-noise-std 0.1 \
     --lambda-contrast 0.0 \
     --lambda-real-recon 0.0 \
