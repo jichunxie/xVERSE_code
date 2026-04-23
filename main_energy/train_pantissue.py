@@ -465,17 +465,7 @@ def main():
     best_val_metric = float("inf")
 
     if os.path.exists(ckpt_path):
-        map_location = {"cuda:%d" % 0: "cuda:%d" % local_rank} if (ddp_enabled and torch.cuda.is_available()) else device
-        checkpoint = torch.load(ckpt_path, map_location=map_location)
-        model.load_state_dict(checkpoint["model_state_dict"])
-        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        start_round = checkpoint["epoch"] + 1
-        best_val_metric = checkpoint.get("best_val_metric", best_val_metric)
-
-        if "scheduler_state_dict" in checkpoint:
-            scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
-
-        log(f"[Resume] Loaded checkpoint from epoch {checkpoint['epoch']}, best_val_metric={best_val_metric:.4f}")
+        log(f"[Resume] Found {ckpt_path}, but auto-resume is disabled in current debug mode. Start from scratch.")
 
     epoch_id = start_round
 
