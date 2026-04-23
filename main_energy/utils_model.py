@@ -704,7 +704,6 @@ def train_gmm_vae_one_epoch(
         x_mask_encoder = x_mask_encoder.to(device, non_blocking=True)
 
         bsz = x_count.size(0)
-        n_cells += bsz
 
         with torch.amp.autocast(device_type='cuda', enabled=scaler.is_enabled()):
             out_fake = loss_fn(
@@ -763,6 +762,17 @@ def train_gmm_vae_one_epoch(
             kl = out_fake["kl_loss"]
             score = out_fake["score_loss"]
             cov = out_fake["cov_loss"]
+
+        if not torch.isfinite(loss):
+            if is_rank0:
+                print(
+                    f"[WARN] Non-finite train loss at batch {batch_idx + 1}, skip step. "
+                    f"Recon={recon.item():.4f}, KL={kl.item():.4f}, Score={score.item():.4f}, Cov={cov.item():.4f}"
+                )
+            optimizer.zero_grad(set_to_none=True)
+            continue
+
+        n_cells += bsz
 
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
