@@ -65,7 +65,7 @@ stdbuf -oL -eL torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" -m mai
     --mask-aug-min-frac 0.1 \
     --mask-aug-max-frac 0.5 \
     --lambda-score 0.01 \
-    --lambda-cov 0.001 \
+    --lambda-cov 0.01 \
     --lambda-resp-entropy 0.0 \
     --lambda-resp-balance 1.0 \
     --lambda-resp-confidence 0.05 \
