@@ -620,28 +620,36 @@ def gaussian_log_prob_lowrank(
     Returns:
       log_prob: (B, K)
     """
-    d_inv = torch.exp(-logvar)  # (B, K, D)
-    delta = z - mu  # (B, K, D)
-    delta_d = delta * d_inv  # (B, K, D)
-    quad = (delta * delta_d).sum(dim=-1)  # (B, K)
+    device_type = z.device.type
+    with torch.amp.autocast(device_type=device_type, enabled=False):
+        zf = z.float()
+        muf = mu.float()
+        logvarf = logvar.float()
+        factorf = factor.float()
 
-    # U^T D^{-1} U  -> (B, K, R, R)
-    dinv_u = d_inv.unsqueeze(-1) * factor
-    ut_dinv_u = torch.einsum("bkdr,bkds->bkrs", factor, dinv_u)
-    r = int(factor.size(-1))
-    eye = torch.eye(r, device=factor.device, dtype=factor.dtype).view(1, 1, r, r)
-    s = ut_dinv_u + eye + 1e-6 * eye
-    chol_s = torch.linalg.cholesky(s)
-    inv_s = torch.cholesky_inverse(chol_s)
-    logdet_extra = 2.0 * torch.log(torch.diagonal(chol_s, dim1=-2, dim2=-1)).sum(dim=-1)  # (B, K)
+        d_inv = torch.exp(-logvarf)  # (B, K, D)
+        delta = zf - muf  # (B, K, D)
+        delta_d = delta * d_inv  # (B, K, D)
+        quad = (delta * delta_d).sum(dim=-1)  # (B, K)
 
-    t = torch.einsum("bkd,bkdr->bkr", delta_d, factor)  # (B, K, R)
-    quad_corr = torch.einsum("bkr,bkrs,bks->bk", t, inv_s, t)
-    quad = quad - quad_corr
+        # U^T D^{-1} U  -> (B, K, R, R)
+        dinv_u = d_inv.unsqueeze(-1) * factorf
+        ut_dinv_u = torch.einsum("bkdr,bkds->bkrs", factorf, dinv_u)
+        r = int(factorf.size(-1))
+        eye = torch.eye(r, device=factorf.device, dtype=factorf.dtype).view(1, 1, r, r)
+        s = ut_dinv_u + eye + 1e-6 * eye
+        chol_s = torch.linalg.cholesky(s)
+        inv_s = torch.cholesky_inverse(chol_s)
+        logdet_extra = 2.0 * torch.log(torch.diagonal(chol_s, dim1=-2, dim2=-1)).sum(dim=-1)  # (B, K)
 
-    log_det = logvar.sum(dim=-1) + logdet_extra  # (B, K)
-    d = z.size(-1)
-    return -0.5 * (quad + log_det + d * math.log(2.0 * math.pi))
+        t = torch.einsum("bkd,bkdr->bkr", delta_d, factorf)  # (B, K, R)
+        quad_corr = torch.einsum("bkr,bkrs,bks->bk", t, inv_s, t)
+        quad = quad - quad_corr
+
+        log_det = logvarf.sum(dim=-1) + logdet_extra  # (B, K)
+        d = zf.size(-1)
+        out = -0.5 * (quad + log_det + d * math.log(2.0 * math.pi))
+    return out.to(z.dtype)
 
 
 def batch_covariance(x: torch.Tensor) -> torch.Tensor:
