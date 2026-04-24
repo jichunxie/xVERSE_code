@@ -38,7 +38,7 @@ stdbuf -oL -eL torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" -m mai
     --sampler-active-shards 16 \
     --result-dir "/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_all_tissue_h200" \
     --num-epochs 100 \
-    --val-every 10 \
+    --val-every 5 \
     --batch-size 1024 \
     --val-batch-size 1024 \
     --num-workers 8 \
@@ -60,6 +60,7 @@ stdbuf -oL -eL torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" -m mai
     --beta-kl 0.1 \
     --beta-kl-warmup-epochs 0 \
     --gmm-init-after-epochs 5 \
+    --gmm-stage2-epochs 5 \
     --gmm-post-init-kl-warmup-epochs 5 \
     --gmm-init-max-samples 200000 \
     --gmm-init-max-batches 300 \

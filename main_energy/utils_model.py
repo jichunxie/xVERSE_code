@@ -354,11 +354,18 @@ class MaskFiLMGMMVAE(nn.Module):
             dropout=dropout,
         )
 
-    def forward(self, x_count: torch.Tensor, x_mask: torch.Tensor, x_expr: torch.Tensor = None) -> Dict[str, torch.Tensor]:
+    def forward(
+        self,
+        x_count: torch.Tensor,
+        x_mask: torch.Tensor,
+        x_expr: torch.Tensor = None,
+        force_base_posterior: bool = False,
+    ) -> Dict[str, torch.Tensor]:
         if x_expr is None:
             x_expr = torch.log1p(x_count.float())
         mu_enc, logvar_enc, h = self.encoder(x_expr=x_expr, x_mask=x_mask.float(), return_hidden=True)
-        if self.prior_type == "gmm":
+        use_mixture_post = (self.prior_type == "gmm") and (not force_base_posterior)
+        if use_mixture_post:
             bsz = h.size(0)
             k = self.num_components
             d = self.latent_dim
@@ -411,7 +418,7 @@ class MaskFiLMGMMVAE(nn.Module):
             "gene_logits": gene_logits,
             "rate": rate,
         }
-        if self.prior_type == "gmm":
+        if use_mixture_post:
             out.update(
                 {
                     "q_c_logits": q_c_logits,
@@ -429,6 +436,7 @@ class MaskFiLMGMMVAE(nn.Module):
         x_count: torch.Tensor,
         x_mask: torch.Tensor,
         celltype_id: torch.Tensor = None,
+        force_base_posterior: bool = False,
         beta: float = 1.0,
         encoder_mask: torch.Tensor = None,
         recon_mask: torch.Tensor = None,
@@ -447,7 +455,7 @@ class MaskFiLMGMMVAE(nn.Module):
     ) -> Dict[str, torch.Tensor]:
         if encoder_mask is None:
             encoder_mask = x_mask
-        out = self.forward(x_count=x_count, x_mask=encoder_mask)
+        out = self.forward(x_count=x_count, x_mask=encoder_mask, force_base_posterior=force_base_posterior)
 
         mu = out["mu"]
         logvar = out["logvar"]
@@ -459,7 +467,7 @@ class MaskFiLMGMMVAE(nn.Module):
         else:
             recon_loss = poisson_nll_masked(x_count=x_count, rate=rate, mask=recon_mask)
 
-        if self.prior_type == "gaussian":
+        if self.prior_type == "gaussian" or (self.prior_type == "gmm" and force_base_posterior):
             # Closed-form KL(q(z|x)||N(0,I)) for diagonal Gaussian posterior.
             kl_per_cell = 0.5 * torch.sum(torch.exp(logvar) + mu.pow(2) - 1.0 - logvar, dim=-1)
             kl_loss = kl_per_cell.mean()
@@ -899,6 +907,7 @@ def train_gmm_vae_one_epoch(
     resp_topk=0,
     prior_logvar_min=-6.0,
     prior_logvar_max=4.0,
+    force_base_posterior=False,
 ):
     model.train()
     loss_fn = model.module.loss if hasattr(model, "module") else model.loss
@@ -921,6 +930,7 @@ def train_gmm_vae_one_epoch(
                 x_count=x_count,
                 x_mask=x_mask,
                 celltype_id=celltype_id,
+                force_base_posterior=force_base_posterior,
                 beta=beta_kl,
                 encoder_mask=x_mask_encoder,
                 recon_mask=x_mask if recon_observed_only else None,
@@ -944,6 +954,7 @@ def train_gmm_vae_one_epoch(
                     x_count=x_count,
                     x_mask=x_mask,
                     celltype_id=celltype_id,
+                    force_base_posterior=force_base_posterior,
                     beta=0.0,
                     encoder_mask=x_mask,
                     recon_mask=x_mask if recon_observed_only else None,
@@ -1067,6 +1078,7 @@ def evaluate_gmm_vae_one_epoch(
     resp_topk=0,
     prior_logvar_min=-6.0,
     prior_logvar_max=4.0,
+    force_base_posterior=False,
 ):
     model.eval()
     loss_fn = model.module.loss if hasattr(model, "module") else model.loss
@@ -1088,6 +1100,7 @@ def evaluate_gmm_vae_one_epoch(
                 x_count=x_count,
                 x_mask=x_mask,
                 celltype_id=celltype_id,
+                force_base_posterior=force_base_posterior,
                 beta=beta_kl,
                 encoder_mask=x_mask_encoder,
                 recon_mask=x_mask if recon_observed_only else None,
@@ -1111,6 +1124,7 @@ def evaluate_gmm_vae_one_epoch(
                     x_count=x_count,
                     x_mask=x_mask,
                     celltype_id=celltype_id,
+                    force_base_posterior=force_base_posterior,
                     beta=0.0,
                     encoder_mask=x_mask,
                     recon_mask=x_mask if recon_observed_only else None,
