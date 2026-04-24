@@ -69,7 +69,7 @@ stdbuf -oL -eL torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" -m mai
     --gmm-init-iters 30 \
     --recon-observed-only \
     --mask-aug-prob 1.0 \
-    --mask-aug-policy simple \
+    --mask-aug-policy xverse \
     --mask-aug-min-frac 0.05 \
     --mask-aug-max-frac 0.3 \
     --lambda-score 0 \
@@ -86,6 +86,6 @@ stdbuf -oL -eL torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" -m mai
     --resp-temperature-start 2.0 \
     --resp-temperature-warmup-epochs 10 \
     --score-noise-std 0.1 \
-    --lambda-contrast 0.05 \
+    --lambda-contrast 0.0 \
     --lambda-real-recon 0.0 \
     --contrast-temp 0.3
