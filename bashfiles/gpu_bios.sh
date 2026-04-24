@@ -36,7 +36,7 @@ stdbuf -oL -eL torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" -m mai
     --compiled-max-cached-shards 4092 \
     --sampler-shard-reorder-window 4096 \
     --sampler-active-shards 16 \
-    --result-dir "/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_all_tissue_2" \
+    --result-dir "/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_all_tissue" \
     --num-epochs 100 \
     --val-every 1 \
     --batch-size 1024 \
@@ -69,24 +69,24 @@ stdbuf -oL -eL torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" -m mai
     --gmm-init-iters 30 \
     --recon-observed-only \
     --mask-aug-prob 1.0 \
-    --mask-aug-policy xverse \
+    --mask-aug-policy simple \
     --mask-aug-min-frac 0.05 \
-    --mask-aug-max-frac 0.3 \
+    --mask-aug-max-frac 0.25 \
     --lambda-score 0 \
     --lambda-cov 0 \
-    --lambda-resp-balance 0.5 \
+    --lambda-resp-balance 0.1 \
     --lambda-resp-balance-warmup-epochs 0 \
-    --lambda-resp-confidence 0 \
+    --lambda-resp-confidence 0.05 \
     --lambda-resp-confidence-warmup-epochs 10 \
     --lambda-resp-anchor 0.0 \
     --lambda-prior-mu-l2 1e-4 \
     --lambda-prior-factor-l2 5e-4 \
-    --lambda-prior-pi-balance 0.5 \
-    --lambda-celltype-cls 1 \
+    --lambda-prior-pi-balance 0.1 \
+    --lambda-celltype-cls 0.1 \
     --resp-temperature 1 \
-    --resp-temperature-start 2.0 \
-    --resp-temperature-warmup-epochs 10 \
+    --resp-temperature-start 1 \
+    --resp-temperature-warmup-epochs 0 \
     --score-noise-std 0.1 \
-    --lambda-contrast 0.1 \
+    --lambda-contrast 0.5 \
     --lambda-real-recon 0.0 \
     --contrast-temp 0.3
