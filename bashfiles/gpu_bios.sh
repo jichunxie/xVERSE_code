@@ -26,7 +26,7 @@ PY
 echo ">>> Visible CUDA devices: ${NPROC_PER_NODE}"
 
 DATA_ROOT="/hpc/group/xielab/xj58/xVerseAtlas/npz_tissue_dataset_donor"
-COMPILED_ROOT="/hpc/group/xielab/xj58/xVerseAtlas/compiled_train_v1_all"
+COMPILED_ROOT="/hpc/group/xielab/xj58/xVerseAtlas/compiled_train_v1_all_cls"
 
 echo ">>> DATA_ROOT=${DATA_ROOT}"
 echo ">>> COMPILED_ROOT=${COMPILED_ROOT}"

@@ -670,9 +670,21 @@ def main():
         ckpt = torch.load(ckpt_path, map_location=map_location)
         load_ret = model.load_state_dict(ckpt["model_state_dict"], strict=False)
         if "optimizer_state_dict" in ckpt:
-            optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+            try:
+                optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+            except ValueError as e:
+                log(
+                    f"[Resume][WARN] Optimizer state is incompatible with current model/param groups ({e}). "
+                    "Skip optimizer resume and continue with freshly initialized optimizer."
+                )
         if "scheduler_state_dict" in ckpt:
-            scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+            try:
+                scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+            except ValueError as e:
+                log(
+                    f"[Resume][WARN] Scheduler state is incompatible ({e}). "
+                    "Skip scheduler resume and continue with freshly initialized scheduler."
+                )
         best_val_metric = float(ckpt.get("best_val_metric", best_val_metric))
         last_epoch = int(ckpt.get("epoch", 0))
         start_round = last_epoch + 1
