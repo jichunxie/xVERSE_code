@@ -310,6 +310,7 @@ class MaskFiLMGMMVAE(nn.Module):
         dropout: float = 0.1,
         prior_type: str = "gmm",
         prior_cov_rank: int = 8,
+        posterior_cov_rank: int = 0,
     ):
         super().__init__()
         if prior_type not in ("gmm", "gaussian"):
@@ -335,10 +336,15 @@ class MaskFiLMGMMVAE(nn.Module):
         )
         self.num_components = int(num_components)
         self.latent_dim = int(latent_dim)
+        self.posterior_cov_rank = max(0, int(posterior_cov_rank))
         if self.prior_type == "gmm":
             self.post_c_logits = nn.Linear(expr_hidden_dim, num_components)
             self.post_mu = nn.Linear(expr_hidden_dim, num_components * latent_dim)
             self.post_logvar = nn.Linear(expr_hidden_dim, num_components * latent_dim)
+            if self.posterior_cov_rank > 0:
+                self.post_factor = nn.Linear(expr_hidden_dim, num_components * latent_dim * self.posterior_cov_rank)
+            else:
+                self.post_factor = None
         # Library-size head from latent z.
         self.library_head = nn.Linear(latent_dim, 1)
         self.score_head = MLP(
@@ -361,8 +367,15 @@ class MaskFiLMGMMVAE(nn.Module):
             mu_comp = self.post_mu(h).view(bsz, k, d)
             logvar_comp = torch.clamp(self.post_logvar(h).view(bsz, k, d), min=-8.0, max=8.0)
             std_comp = torch.exp(0.5 * logvar_comp)
-            eps = torch.randn_like(std_comp)
-            z_comp = mu_comp + eps * std_comp  # (B, K, D)
+            eps_d = torch.randn_like(std_comp)
+            z_comp = mu_comp + eps_d * std_comp  # (B, K, D)
+            factor_comp = None
+            if self.posterior_cov_rank > 0 and self.post_factor is not None:
+                r = self.posterior_cov_rank
+                # Keep factor bounded for stability.
+                factor_comp = 0.1 * torch.tanh(self.post_factor(h).view(bsz, k, d, r))
+                eps_r = torch.randn((bsz, k, r), device=h.device, dtype=h.dtype)
+                z_comp = z_comp + torch.einsum("bkdr,bkr->bkd", factor_comp, eps_r)
             if self.training:
                 c_sel = F.gumbel_softmax(q_c_logits, tau=1.0, hard=False, dim=-1)  # (B, K)
             else:
@@ -384,6 +397,7 @@ class MaskFiLMGMMVAE(nn.Module):
             mu_comp = None
             logvar_comp = None
             z_comp = None
+            factor_comp = None
         gene_logits = self.decoder(z)
         library_size = F.softplus(self.library_head(z)) + 1e-8
         gene_probs = F.softmax(gene_logits, dim=-1)
@@ -404,6 +418,7 @@ class MaskFiLMGMMVAE(nn.Module):
                     "mu_comp": mu_comp,
                     "logvar_comp": logvar_comp,
                     "z_comp": z_comp,
+                    "factor_comp": factor_comp,
                 }
             )
         return out
@@ -456,12 +471,21 @@ class MaskFiLMGMMVAE(nn.Module):
             mu_comp = out["mu_comp"]  # (B, K, D)
             logvar_comp = out["logvar_comp"]  # (B, K, D)
             z_comp = out["z_comp"]  # (B, K, D)
+            factor_comp = out.get("factor_comp", None)
 
             log_q_c = F.log_softmax(q_c_logits, dim=-1)  # (B, K)
             log_p_c = F.log_softmax(self.prior.pi_logits, dim=0).unsqueeze(0)  # (1, K)
             kl_c = (q_c * (log_q_c - log_p_c)).sum(dim=1).mean()
 
-            log_q_z_given_c = gaussian_log_prob_diag(z=z_comp, mu=mu_comp, logvar=logvar_comp)  # (B, K)
+            if factor_comp is not None:
+                log_q_z_given_c = gaussian_log_prob_lowrank(
+                    z=z_comp,
+                    mu=mu_comp,
+                    logvar=logvar_comp,
+                    factor=factor_comp,
+                )  # (B, K)
+            else:
+                log_q_z_given_c = gaussian_log_prob_diag(z=z_comp, mu=mu_comp, logvar=logvar_comp)  # (B, K)
             log_p_z_given_c = self.prior.component_log_prob_aligned(z_comp)  # (B, K)
             kl_z = (q_c * (log_q_z_given_c - log_p_z_given_c)).sum(dim=1).mean()
 
@@ -579,6 +603,45 @@ def gaussian_log_prob_diag(z: torch.Tensor, mu: torch.Tensor, logvar: torch.Tens
     log_det = logvar.sum(dim=-1)
     d = z.size(-1)
     return -0.5 * (quad.sum(dim=-1) + log_det + d * math.log(2.0 * math.pi))
+
+
+def gaussian_log_prob_lowrank(
+    z: torch.Tensor,
+    mu: torch.Tensor,
+    logvar: torch.Tensor,
+    factor: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Log-prob for per-sample/per-component low-rank Gaussian:
+      Sigma = diag(exp(logvar)) + U U^T
+    Shapes:
+      z, mu, logvar: (B, K, D)
+      factor: (B, K, D, R)
+    Returns:
+      log_prob: (B, K)
+    """
+    d_inv = torch.exp(-logvar)  # (B, K, D)
+    delta = z - mu  # (B, K, D)
+    delta_d = delta * d_inv  # (B, K, D)
+    quad = (delta * delta_d).sum(dim=-1)  # (B, K)
+
+    # U^T D^{-1} U  -> (B, K, R, R)
+    dinv_u = d_inv.unsqueeze(-1) * factor
+    ut_dinv_u = torch.einsum("bkdr,bkds->bkrs", factor, dinv_u)
+    r = int(factor.size(-1))
+    eye = torch.eye(r, device=factor.device, dtype=factor.dtype).view(1, 1, r, r)
+    s = ut_dinv_u + eye + 1e-6 * eye
+    chol_s = torch.linalg.cholesky(s)
+    inv_s = torch.cholesky_inverse(chol_s)
+    logdet_extra = 2.0 * torch.log(torch.diagonal(chol_s, dim1=-2, dim2=-1)).sum(dim=-1)  # (B, K)
+
+    t = torch.einsum("bkd,bkdr->bkr", delta_d, factor)  # (B, K, R)
+    quad_corr = torch.einsum("bkr,bkrs,bks->bk", t, inv_s, t)
+    quad = quad - quad_corr
+
+    log_det = logvar.sum(dim=-1) + logdet_extra  # (B, K)
+    d = z.size(-1)
+    return -0.5 * (quad + log_det + d * math.log(2.0 * math.pi))
 
 
 def batch_covariance(x: torch.Tensor) -> torch.Tensor:

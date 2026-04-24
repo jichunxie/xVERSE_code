@@ -52,6 +52,7 @@ stdbuf -oL -eL torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" -m mai
     --latent-dim 128 \
     --num-components 16 \
     --prior-cov-rank 2 \
+    --posterior-cov-rank 2 \
     --prior-logvar-min -3 \
     --prior-logvar-max 4 \
     --expr-hidden-dim 1536 \

@@ -109,6 +109,8 @@ def parse_args():
     parser.add_argument("--num-components", type=int, default=16, help="GMM component count K.")
     parser.add_argument("--prior-cov-rank", type=int, default=8,
                         help="Low-rank size R for each GMM component covariance: diag + U U^T.")
+    parser.add_argument("--posterior-cov-rank", type=int, default=0,
+                        help="Low-rank size R for posterior q(z|x,c) covariance: diag + U U^T. 0 keeps diagonal posterior.")
     parser.add_argument("--expr-hidden-dim", type=int, default=1024, help="Expression encoder hidden dim.")
     parser.add_argument("--mask-hidden-dim", type=int, default=512, help="Mask encoder hidden dim.")
     parser.add_argument("--dec-hidden-dim", type=int, default=1024, help="Decoder hidden dim.")
@@ -127,6 +129,8 @@ def parse_args():
                         help="Weight of auxiliary score loss. Keep small when enabled.")
     parser.add_argument("--lambda-cov", type=float, default=0.0,
                         help="Weight of posterior-prior covariance matching loss (off-diagonal covariance).")
+    parser.add_argument("--lambda-cov-warmup-epochs", type=int, default=0,
+                        help="Linear warmup epochs for lambda-cov from 0 to target. <=0 disables warmup.")
     parser.add_argument("--lambda-resp-balance", type=float, default=0.0,
                         help="Weight for batch-average responsibility balancing toward uniform component usage.")
     parser.add_argument("--lambda-resp-balance-warmup-epochs", type=int, default=0,
@@ -441,6 +445,7 @@ def main():
         latent_dim=args.latent_dim,
         num_components=args.num_components,
         prior_cov_rank=args.prior_cov_rank,
+        posterior_cov_rank=args.posterior_cov_rank,
         expr_hidden_dim=args.expr_hidden_dim,
         mask_hidden_dim=args.mask_hidden_dim,
         dec_hidden_dim=args.dec_hidden_dim,
@@ -490,6 +495,8 @@ def main():
             beta_t = args.beta_kl_start + (beta_end - args.beta_kl_start) * alpha
         else:
             beta_t = beta_end
+        cov_scale = _linear_warmup_scale(epoch_id, int(args.lambda_cov_warmup_epochs))
+        lambda_cov_t = float(args.lambda_cov) * cov_scale
         bal_scale = _linear_warmup_scale(epoch_id, int(args.lambda_resp_balance_warmup_epochs))
         conf_scale = _linear_warmup_scale(epoch_id, int(args.lambda_resp_confidence_warmup_epochs))
         lambda_resp_balance_t = float(args.lambda_resp_balance) * bal_scale
@@ -502,6 +509,7 @@ def main():
 
         log(
             f"[Epoch {epoch_id}] beta_kl={beta_t:.6f}, "
+            f"lambda_cov={lambda_cov_t:.6f}, "
             f"lambda_resp_balance={lambda_resp_balance_t:.6f}, "
             f"lambda_resp_confidence={lambda_resp_confidence_t:.6f}, "
             f"resp_temperature={resp_temperature_t:.6f}"
@@ -529,7 +537,7 @@ def main():
             lambda_contrast=args.lambda_contrast,
             contrast_temp=args.contrast_temp,
             lambda_real_recon=args.lambda_real_recon,
-            lambda_cov=args.lambda_cov,
+            lambda_cov=lambda_cov_t,
             cov_use_mu=args.cov_use_mu,
             lambda_resp_balance=lambda_resp_balance_t,
             lambda_resp_confidence=lambda_resp_confidence_t,
@@ -561,7 +569,7 @@ def main():
                 lambda_contrast=args.lambda_contrast,
                 contrast_temp=args.contrast_temp,
                 lambda_real_recon=args.lambda_real_recon,
-                lambda_cov=args.lambda_cov,
+                lambda_cov=lambda_cov_t,
                 cov_use_mu=args.cov_use_mu,
                 lambda_resp_balance=lambda_resp_balance_t,
                 lambda_resp_confidence=lambda_resp_confidence_t,
