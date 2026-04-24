@@ -159,6 +159,10 @@ def parse_args():
                         help="L2 regularization weight for GMM prior low-rank factors prior_factor.")
     parser.add_argument("--lambda-prior-pi-balance", type=float, default=0.0,
                         help="Regularization weight for prior mixture weights toward uniform (KL(pi || uniform)).")
+    parser.add_argument("--num-cell-types", type=int, default=0,
+                        help="Number of supervised cell types for auxiliary classification head. <=0 means auto infer from dataset.")
+    parser.add_argument("--lambda-celltype-cls", type=float, default=0.0,
+                        help="Weight for auxiliary celltype cross-entropy loss (ignore label -1).")
     parser.add_argument("--resp-temperature", type=float, default=1.0,
                         help="Temperature for posterior responsibilities used by entropy regularization (>1 softens).")
     parser.add_argument("--resp-temperature-start", type=float, default=None,
@@ -485,6 +489,7 @@ def main():
             num_genes=args.total_gene,
             apply_mask_aug=False,
         )
+        inferred_num_cell_types = max(ds.infer_num_celltypes(), val_ds.infer_num_celltypes())
     else:
         gene_ids_path = args.gene_ids_path or os.path.join(args.data_root, "ensg_keys_high_quality.txt")
         summary_csv_path = args.summary_csv or os.path.join(args.data_root, "pantissue_full_updated.csv")
@@ -539,6 +544,13 @@ def main():
             num_genes=args.total_gene,
             apply_mask_aug=False,
         )
+        inferred_num_cell_types = max(ds.infer_num_celltypes(), val_ds.infer_num_celltypes())
+
+    if int(args.num_cell_types) > 0:
+        num_cell_types = int(args.num_cell_types)
+    else:
+        num_cell_types = int(inferred_num_cell_types)
+    log(f"[CellType] num_cell_types={num_cell_types}, lambda_celltype_cls={args.lambda_celltype_cls}")
 
     loader_kwargs = dict(num_workers=args.num_workers, pin_memory=True)
     if args.num_workers > 0:
@@ -621,6 +633,7 @@ def main():
         dec_hidden_dim=args.dec_hidden_dim,
         dropout=args.dropout,
         prior_type=args.prior_type,
+        num_cell_types=num_cell_types,
     ).to(device)
 
     total_params, trainable_params = count_parameters(model)
@@ -655,7 +668,7 @@ def main():
     if os.path.exists(ckpt_path):
         map_location = device
         ckpt = torch.load(ckpt_path, map_location=map_location)
-        model.load_state_dict(ckpt["model_state_dict"])
+        load_ret = model.load_state_dict(ckpt["model_state_dict"], strict=False)
         if "optimizer_state_dict" in ckpt:
             optimizer.load_state_dict(ckpt["optimizer_state_dict"])
         if "scheduler_state_dict" in ckpt:
@@ -668,6 +681,10 @@ def main():
             f"[Resume] Loaded {ckpt_path} (epoch={last_epoch}, best_val_metric={best_val_metric:.6f}). "
             f"Continue from epoch {start_round}."
         )
+        if getattr(load_ret, "missing_keys", None):
+            log(f"[Resume] Missing keys (expected with new heads): {load_ret.missing_keys}")
+        if getattr(load_ret, "unexpected_keys", None):
+            log(f"[Resume] Unexpected keys: {load_ret.unexpected_keys}")
 
     epoch_id = start_round
 
@@ -806,7 +823,7 @@ def main():
                     )
                 )
 
-        loss_full, loss_recon, loss_kl, loss_score, loss_contrast, loss_cov, loss_prior_pi_balance = train_gmm_vae_one_epoch(
+        loss_full, loss_recon, loss_kl, loss_score, loss_contrast, loss_cov, loss_prior_pi_balance, loss_celltype_cls = train_gmm_vae_one_epoch(
             model=model,
             optimizer=optimizer,
             scaler=scaler,
@@ -836,12 +853,13 @@ def main():
             lambda_prior_mu_l2=args.lambda_prior_mu_l2,
             lambda_prior_factor_l2=args.lambda_prior_factor_l2,
             lambda_prior_pi_balance=args.lambda_prior_pi_balance,
+            lambda_celltype_cls=args.lambda_celltype_cls,
             force_base_posterior=phase1_force_base_posterior,
         )
         train_msg = (
             f"[Epoch {epoch_id}] "
             f"Loss={loss_full:.4f}, Recon={loss_recon:.4f}, KL={loss_kl:.4f}, "
-            f"Score={loss_score:.4f}, Cov={loss_cov:.4f}, priorPiBal={loss_prior_pi_balance:.4f}"
+            f"Score={loss_score:.4f}, priorPiBal={loss_prior_pi_balance:.4f}, cls={loss_celltype_cls:.4f}"
         )
         if args.lambda_contrast > 0:
             train_msg += f", Contrast={loss_contrast:.4f}"
@@ -849,7 +867,7 @@ def main():
 
         do_val = (int(args.val_every) <= 1) or (epoch_id % int(args.val_every) == 0) or (epoch_id == args.num_epochs)
         if do_val:
-            val_loss_full, val_loss_recon, val_loss_kl, val_loss_score, val_loss_contrast, val_loss_cov, val_loss_prior_pi_balance = evaluate_gmm_vae_one_epoch(
+            val_loss_full, val_loss_recon, val_loss_kl, val_loss_score, val_loss_contrast, val_loss_cov, val_loss_prior_pi_balance, val_loss_celltype_cls = evaluate_gmm_vae_one_epoch(
                 model=model,
                 val_loader=val_loader,
                 device=device,
@@ -873,12 +891,13 @@ def main():
                 lambda_prior_mu_l2=args.lambda_prior_mu_l2,
                 lambda_prior_factor_l2=args.lambda_prior_factor_l2,
                 lambda_prior_pi_balance=args.lambda_prior_pi_balance,
+                lambda_celltype_cls=args.lambda_celltype_cls,
                 force_base_posterior=phase1_force_base_posterior,
             )
             val_msg = (
                 f"[Epoch {epoch_id}] Validation Loss: "
                 f"Loss={val_loss_full:.4f}, Recon={val_loss_recon:.4f}, KL={val_loss_kl:.4f}, "
-                f"Score={val_loss_score:.4f}, Cov={val_loss_cov:.4f}, priorPiBal={val_loss_prior_pi_balance:.4f}"
+                f"Score={val_loss_score:.4f}, priorPiBal={val_loss_prior_pi_balance:.4f}, cls={val_loss_celltype_cls:.4f}"
             )
             if args.lambda_contrast > 0:
                 val_msg += f", Contrast={val_loss_contrast:.4f}"

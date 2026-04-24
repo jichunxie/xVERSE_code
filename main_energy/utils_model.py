@@ -311,6 +311,7 @@ class MaskFiLMGMMVAE(nn.Module):
         prior_type: str = "gmm",
         prior_cov_rank: int = 8,
         posterior_cov_rank: int = 0,
+        num_cell_types: int = 0,
     ):
         super().__init__()
         if prior_type not in ("gmm", "gaussian"):
@@ -353,6 +354,11 @@ class MaskFiLMGMMVAE(nn.Module):
             output_dim=latent_dim,
             dropout=dropout,
         )
+        self.num_cell_types = max(0, int(num_cell_types))
+        if self.num_cell_types > 0:
+            self.celltype_head = nn.Linear(latent_dim, self.num_cell_types)
+        else:
+            self.celltype_head = None
 
     def forward(
         self,
@@ -418,6 +424,8 @@ class MaskFiLMGMMVAE(nn.Module):
             "gene_logits": gene_logits,
             "rate": rate,
         }
+        if self.celltype_head is not None:
+            out["celltype_logits"] = self.celltype_head(z)
         if use_mixture_post:
             out.update(
                 {
@@ -455,6 +463,7 @@ class MaskFiLMGMMVAE(nn.Module):
         lambda_prior_mu_l2: float = 0.0,
         lambda_prior_factor_l2: float = 0.0,
         lambda_prior_pi_balance: float = 0.0,
+        lambda_celltype_cls: float = 0.0,
     ) -> Dict[str, torch.Tensor]:
         if encoder_mask is None:
             encoder_mask = x_mask
@@ -520,6 +529,7 @@ class MaskFiLMGMMVAE(nn.Module):
         prior_mu_l2_loss = torch.zeros((), device=z.device, dtype=z.dtype)
         prior_factor_l2_loss = torch.zeros((), device=z.device, dtype=z.dtype)
         prior_pi_balance_loss = torch.zeros((), device=z.device, dtype=z.dtype)
+        celltype_cls_loss = torch.zeros((), device=z.device, dtype=z.dtype)
 
         if lambda_score > 0:
             z_for_score = z.detach() if score_detach_z else z
@@ -534,20 +544,7 @@ class MaskFiLMGMMVAE(nn.Module):
             score_norm_pred = score_pred.norm(dim=-1).mean()
             score_norm_tgt = score_tgt.norm(dim=-1).mean()
 
-        if lambda_cov > 0:
-            cov_src = mu if cov_use_mu else z
-            post_cov = batch_covariance(cov_src.float())
-            if self.prior_type == "gmm":
-                prior_cov = self.prior.global_covariance().float()
-            else:
-                d = int(cov_src.size(-1))
-                prior_cov = torch.eye(d, device=cov_src.device, dtype=torch.float32)
-
-            post_off = offdiag_part(post_cov)
-            prior_off = offdiag_part(prior_cov)
-            cov_loss = F.mse_loss(post_off, prior_off)
-            cov_offdiag_post = post_off.abs().mean().to(z.dtype)
-            cov_offdiag_prior = prior_off.abs().mean().to(z.dtype)
+        # Covariance matching loss is disabled for current training setup.
 
         if self.prior_type == "gmm" and (lambda_resp_balance > 0 or lambda_resp_confidence > 0):
             if "q_c" in out:
@@ -577,33 +574,7 @@ class MaskFiLMGMMVAE(nn.Module):
                     reduction="sum",
                 ).to(z.dtype)
 
-        if self.prior_type == "gmm" and lambda_resp_anchor > 0 and celltype_id is not None:
-            if "q_c" in out:
-                resp_anchor = out["q_c"]
-            else:
-                resp_anchor = self.prior.posterior_responsibilities(z=z, temperature=resp_temperature, topk=resp_topk)
-            ct = celltype_id.view(-1).to(resp_anchor.device).long()
-            valid = ct >= 0
-            if valid.any():
-                resp_v = resp_anchor[valid]
-                ct_v = ct[valid]
-                uniq = torch.unique(ct_v)
-                total = torch.zeros((), device=z.device, dtype=z.dtype)
-                groups = 0
-                for t in uniq.tolist():
-                    idx = (ct_v == int(t)).nonzero(as_tuple=False).flatten()
-                    if idx.numel() <= 1:
-                        continue
-                    r_t = resp_v[idx]  # (n_t, K)
-                    proto = r_t.mean(dim=0, keepdim=True).detach()  # (1, K)
-                    total = total + F.kl_div(
-                        torch.log(torch.clamp(r_t, min=1e-12)),
-                        proto.expand_as(r_t),
-                        reduction="batchmean",
-                    ).to(z.dtype)
-                    groups += 1
-                if groups > 0:
-                    resp_anchor_loss = total / float(groups)
+        # Anchor loss is disabled for current training setup.
 
         if self.prior_type == "gmm" and (lambda_prior_mu_l2 > 0 or lambda_prior_factor_l2 > 0):
             if lambda_prior_mu_l2 > 0:
@@ -618,6 +589,13 @@ class MaskFiLMGMMVAE(nn.Module):
                 target,
                 reduction="sum",
             ).to(z.dtype)
+        if lambda_celltype_cls > 0 and celltype_id is not None and self.celltype_head is not None:
+            ct = celltype_id.view(-1).to(z.device).long()
+            valid = ct >= 0
+            if valid.any():
+                logits = out["celltype_logits"][valid]
+                tgt = ct[valid]
+                celltype_cls_loss = F.cross_entropy(logits, tgt).to(z.dtype)
 
         # Build total loss with explicit gating to avoid 0 * inf -> nan when a term is disabled.
         total_loss = recon_loss
@@ -625,20 +603,20 @@ class MaskFiLMGMMVAE(nn.Module):
             total_loss = total_loss + float(beta) * kl_loss
         if float(lambda_score) != 0.0:
             total_loss = total_loss + float(lambda_score) * score_loss
-        if float(lambda_cov) != 0.0:
-            total_loss = total_loss + float(lambda_cov) * cov_loss
+        # lambda_cov is intentionally ignored.
         if float(lambda_resp_balance) != 0.0:
             total_loss = total_loss + float(lambda_resp_balance) * resp_balance_loss
         if float(lambda_resp_confidence) != 0.0:
             total_loss = total_loss + float(lambda_resp_confidence) * resp_confidence_loss
-        if float(lambda_resp_anchor) != 0.0:
-            total_loss = total_loss + float(lambda_resp_anchor) * resp_anchor_loss
+        # lambda_resp_anchor is intentionally ignored.
         if float(lambda_prior_mu_l2) != 0.0:
             total_loss = total_loss + float(lambda_prior_mu_l2) * prior_mu_l2_loss
         if float(lambda_prior_factor_l2) != 0.0:
             total_loss = total_loss + float(lambda_prior_factor_l2) * prior_factor_l2_loss
         if float(lambda_prior_pi_balance) != 0.0:
             total_loss = total_loss + float(lambda_prior_pi_balance) * prior_pi_balance_loss
+        if float(lambda_celltype_cls) != 0.0:
+            total_loss = total_loss + float(lambda_celltype_cls) * celltype_cls_loss
 
         return {
             "loss": total_loss,
@@ -656,6 +634,7 @@ class MaskFiLMGMMVAE(nn.Module):
             "prior_mu_l2_loss": prior_mu_l2_loss,
             "prior_factor_l2_loss": prior_factor_l2_loss,
             "prior_pi_balance_loss": prior_pi_balance_loss,
+            "celltype_cls_loss": celltype_cls_loss,
             "score_norm_pred": score_norm_pred,
             "score_norm_tgt": score_norm_tgt,
             "log_q_mean": log_q.mean(),
@@ -944,12 +923,13 @@ def train_gmm_vae_one_epoch(
     lambda_prior_mu_l2=0.0,
     lambda_prior_factor_l2=0.0,
     lambda_prior_pi_balance=0.0,
+    lambda_celltype_cls=0.0,
     force_base_posterior=False,
 ):
     model.train()
     loss_fn = model.module.loss if hasattr(model, "module") else model.loss
     prior_ref = model.module.prior if hasattr(model, "module") else model.prior
-    total_loss = total_recon = total_kl = total_score = total_contrast = total_cov = total_prior_pi_balance = 0.0
+    total_loss = total_recon = total_kl = total_score = total_contrast = total_cov = total_prior_pi_balance = total_celltype_cls = 0.0
     n_cells = 0
     is_rank0 = (not dist.is_available()) or (not dist.is_initialized()) or (dist.get_rank() == 0)
 
@@ -986,6 +966,7 @@ def train_gmm_vae_one_epoch(
                 lambda_prior_mu_l2=lambda_prior_mu_l2,
                 lambda_prior_factor_l2=lambda_prior_factor_l2,
                 lambda_prior_pi_balance=lambda_prior_pi_balance,
+                lambda_celltype_cls=lambda_celltype_cls,
             )
             need_real_view = (lambda_contrast > 0) or (lambda_real_recon > 0)
             real_recon = torch.zeros((), device=x_count.device, dtype=out_fake["z"].dtype)
@@ -1013,6 +994,7 @@ def train_gmm_vae_one_epoch(
                     lambda_prior_mu_l2=0.0,
                     lambda_prior_factor_l2=0.0,
                     lambda_prior_pi_balance=0.0,
+                    lambda_celltype_cls=0.0,
                 )
                 real_recon = out_real["recon_loss"]
             if lambda_contrast > 0:
@@ -1034,6 +1016,7 @@ def train_gmm_vae_one_epoch(
             score = out_fake["score_loss"]
             cov = out_fake["cov_loss"]
             prior_pi_balance = out_fake.get("prior_pi_balance_loss", torch.zeros_like(cov))
+            celltype_cls = out_fake.get("celltype_cls_loss", torch.zeros_like(cov))
 
         if not torch.isfinite(loss):
             if is_rank0:
@@ -1059,12 +1042,13 @@ def train_gmm_vae_one_epoch(
         total_contrast += contrast.item() * bsz
         total_cov += cov.item() * bsz
         total_prior_pi_balance += prior_pi_balance.item() * bsz
+        total_celltype_cls += celltype_cls.item() * bsz
 
         if (batch_idx + 1) % 100 == 0 and is_rank0:
             msg = (
                 f"[Batch {batch_idx + 1}] "
                 f"Loss={loss.item():.4f}, Recon={recon.item():.4f}, KL={kl.item():.4f}, "
-                f"Score={score.item():.4f}, Cov={cov.item():.4f}, priorPiBal={prior_pi_balance.item():.4f}"
+                f"Score={score.item():.4f}, priorPiBal={prior_pi_balance.item():.4f}, cls={celltype_cls.item():.4f}"
             )
             if lambda_contrast > 0:
                 msg += f", Contrast={contrast.item():.4f}"
@@ -1072,9 +1056,8 @@ def train_gmm_vae_one_epoch(
                 msg += f", RealRecon={real_recon.item():.4f}"
             msg += (
                 f", ||s_pred||={out_fake['score_norm_pred'].item():.4f}, ||s_tgt||={out_fake['score_norm_tgt'].item():.4f}, "
-                f"||cov_post_off||={out_fake['cov_offdiag_post'].item():.6f}, ||cov_prior_off||={out_fake['cov_offdiag_prior'].item():.6f}, "
                 f"respH={out_fake['resp_entropy'].item():.4f}, respBal={out_fake['resp_balance_loss'].item():.4f}, "
-                f"respConf={out_fake['resp_confidence_loss'].item():.4f}, respAnchor={out_fake['resp_anchor_loss'].item():.4f}, "
+                f"respConf={out_fake['resp_confidence_loss'].item():.4f}, "
                 f"respTop1Batch={out_fake['resp_top1'].item():.4f}"
             )
             if getattr(model.module if hasattr(model, "module") else model, "prior_type", None) == "gmm":
@@ -1088,12 +1071,12 @@ def train_gmm_vae_one_epoch(
 
     if dist.is_available() and dist.is_initialized():
         stats = torch.tensor(
-            [total_loss, total_recon, total_kl, total_score, total_contrast, total_cov, total_prior_pi_balance, float(n_cells)],
+            [total_loss, total_recon, total_kl, total_score, total_contrast, total_cov, total_prior_pi_balance, total_celltype_cls, float(n_cells)],
             device=device,
             dtype=torch.float64,
         )
         dist.all_reduce(stats, op=dist.ReduceOp.SUM)
-        total_loss, total_recon, total_kl, total_score, total_contrast, total_cov, total_prior_pi_balance, n_cells = stats.tolist()
+        total_loss, total_recon, total_kl, total_score, total_contrast, total_cov, total_prior_pi_balance, total_celltype_cls, n_cells = stats.tolist()
         n_cells = max(float(n_cells), 1.0)
 
     return (
@@ -1104,6 +1087,7 @@ def train_gmm_vae_one_epoch(
         total_contrast / n_cells,
         total_cov / n_cells,
         total_prior_pi_balance / n_cells,
+        total_celltype_cls / n_cells,
     )
 
 
@@ -1131,12 +1115,13 @@ def evaluate_gmm_vae_one_epoch(
     lambda_prior_mu_l2=0.0,
     lambda_prior_factor_l2=0.0,
     lambda_prior_pi_balance=0.0,
+    lambda_celltype_cls=0.0,
     force_base_posterior=False,
 ):
     model.eval()
     loss_fn = model.module.loss if hasattr(model, "module") else model.loss
     prior_ref = model.module.prior if hasattr(model, "module") else model.prior
-    total_loss = total_recon = total_kl = total_score = total_contrast = total_cov = total_prior_pi_balance = 0.0
+    total_loss = total_recon = total_kl = total_score = total_contrast = total_cov = total_prior_pi_balance = total_celltype_cls = 0.0
     n_cells = 0
     is_rank0 = (not dist.is_available()) or (not dist.is_initialized()) or (dist.get_rank() == 0)
 
@@ -1172,6 +1157,7 @@ def evaluate_gmm_vae_one_epoch(
                 lambda_prior_mu_l2=lambda_prior_mu_l2,
                 lambda_prior_factor_l2=lambda_prior_factor_l2,
                 lambda_prior_pi_balance=lambda_prior_pi_balance,
+                lambda_celltype_cls=lambda_celltype_cls,
             )
             need_real_view = (lambda_contrast > 0) or (lambda_real_recon > 0)
             real_recon = torch.zeros((), device=x_count.device, dtype=out_fake["z"].dtype)
@@ -1199,6 +1185,7 @@ def evaluate_gmm_vae_one_epoch(
                     lambda_prior_mu_l2=0.0,
                     lambda_prior_factor_l2=0.0,
                     lambda_prior_pi_balance=0.0,
+                    lambda_celltype_cls=0.0,
                 )
                 real_recon = out_real["recon_loss"]
             if lambda_contrast > 0:
@@ -1222,15 +1209,16 @@ def evaluate_gmm_vae_one_epoch(
             total_contrast += contrast.item() * bsz
             total_cov += out_fake["cov_loss"].item() * bsz
             total_prior_pi_balance += out_fake.get("prior_pi_balance_loss", torch.zeros_like(out_fake["cov_loss"])).item() * bsz
+            total_celltype_cls += out_fake.get("celltype_cls_loss", torch.zeros_like(out_fake["cov_loss"])).item() * bsz
 
             if (batch_idx + 1) % 100 == 0 and is_rank0:
                 msg = (
                     f"[Val Batch {batch_idx + 1}] "
                     f"Loss={loss.item():.4f}, Recon={out_fake['recon_loss'].item():.4f}, "
                     f"KL={out_fake['kl_loss'].item():.4f}, Score={out_fake['score_loss'].item():.4f}, "
-                    f"Cov={out_fake['cov_loss'].item():.4f}, priorPiBal={out_fake.get('prior_pi_balance_loss', torch.zeros_like(out_fake['cov_loss'])).item():.4f}, "
-                    f"respConf={out_fake['resp_confidence_loss'].item():.4f}, "
-                    f"respAnchor={out_fake['resp_anchor_loss'].item():.4f}"
+                    f"priorPiBal={out_fake.get('prior_pi_balance_loss', torch.zeros_like(out_fake['cov_loss'])).item():.4f}, "
+                    f"cls={out_fake.get('celltype_cls_loss', torch.zeros_like(out_fake['cov_loss'])).item():.4f}, "
+                    f"respConf={out_fake['resp_confidence_loss'].item():.4f}"
                 )
                 if getattr(model.module if hasattr(model, "module") else model, "prior_type", None) == "gmm":
                     diag = gmm_collapse_diagnostics(prior=prior_ref, z=out_fake["z"])
@@ -1243,12 +1231,12 @@ def evaluate_gmm_vae_one_epoch(
 
     if dist.is_available() and dist.is_initialized():
         stats = torch.tensor(
-            [total_loss, total_recon, total_kl, total_score, total_contrast, total_cov, total_prior_pi_balance, float(n_cells)],
+            [total_loss, total_recon, total_kl, total_score, total_contrast, total_cov, total_prior_pi_balance, total_celltype_cls, float(n_cells)],
             device=device,
             dtype=torch.float64,
         )
         dist.all_reduce(stats, op=dist.ReduceOp.SUM)
-        total_loss, total_recon, total_kl, total_score, total_contrast, total_cov, total_prior_pi_balance, n_cells = stats.tolist()
+        total_loss, total_recon, total_kl, total_score, total_contrast, total_cov, total_prior_pi_balance, total_celltype_cls, n_cells = stats.tolist()
         n_cells = max(float(n_cells), 1.0)
 
     return (
@@ -1259,6 +1247,7 @@ def evaluate_gmm_vae_one_epoch(
         total_contrast / n_cells,
         total_cov / n_cells,
         total_prior_pi_balance / n_cells,
+        total_celltype_cls / n_cells,
     )
 
 
@@ -1442,6 +1431,12 @@ class FastXVerseBatchDataset(Dataset):
 
     def __len__(self):
         return len(self.index_map)
+
+    def infer_num_celltypes(self) -> int:
+        vals = [int(v) for v in self.cell_type_to_index.values() if int(v) >= 0]
+        if not vals:
+            return 0
+        return int(max(vals)) + 1
 
     def __getitem__(self, idx):
         if self.use_cache and idx in self.cache:
@@ -1737,6 +1732,18 @@ class CompiledShardDataset(Dataset):
             nz_gene_global_idx,
             nz_value,
         )
+
+    def infer_num_celltypes(self) -> int:
+        max_id = -1
+        for shard_idx in range(len(self.shards)):
+            arrays = self._get_shard_arrays(shard_idx)
+            arr = np.asarray(arrays["celltype_id"])
+            if arr.size <= 0:
+                continue
+            cur = int(arr.max())
+            if cur > max_id:
+                max_id = cur
+        return int(max_id + 1) if max_id >= 0 else 0
 
 
 class CompiledSparseBatchCollator:
