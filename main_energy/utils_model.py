@@ -452,6 +452,8 @@ class MaskFiLMGMMVAE(nn.Module):
         resp_topk: int = 0,
         prior_logvar_min: float = -6.0,
         prior_logvar_max: float = 4.0,
+        lambda_prior_mu_l2: float = 0.0,
+        lambda_prior_factor_l2: float = 0.0,
     ) -> Dict[str, torch.Tensor]:
         if encoder_mask is None:
             encoder_mask = x_mask
@@ -514,6 +516,8 @@ class MaskFiLMGMMVAE(nn.Module):
         resp_balance_loss = torch.zeros((), device=z.device, dtype=z.dtype)
         resp_confidence_loss = torch.zeros((), device=z.device, dtype=z.dtype)
         resp_anchor_loss = torch.zeros((), device=z.device, dtype=z.dtype)
+        prior_mu_l2_loss = torch.zeros((), device=z.device, dtype=z.dtype)
+        prior_factor_l2_loss = torch.zeros((), device=z.device, dtype=z.dtype)
 
         if lambda_score > 0:
             z_for_score = z.detach() if score_detach_z else z
@@ -599,6 +603,12 @@ class MaskFiLMGMMVAE(nn.Module):
                 if groups > 0:
                     resp_anchor_loss = total / float(groups)
 
+        if self.prior_type == "gmm" and (lambda_prior_mu_l2 > 0 or lambda_prior_factor_l2 > 0):
+            if lambda_prior_mu_l2 > 0:
+                prior_mu_l2_loss = self.prior.prior_mu.float().pow(2).mean().to(z.dtype)
+            if lambda_prior_factor_l2 > 0 and getattr(self.prior, "prior_factor", None) is not None:
+                prior_factor_l2_loss = self.prior.prior_factor.float().pow(2).mean().to(z.dtype)
+
         # Build total loss with explicit gating to avoid 0 * inf -> nan when a term is disabled.
         total_loss = recon_loss
         if float(beta) != 0.0:
@@ -613,6 +623,10 @@ class MaskFiLMGMMVAE(nn.Module):
             total_loss = total_loss + float(lambda_resp_confidence) * resp_confidence_loss
         if float(lambda_resp_anchor) != 0.0:
             total_loss = total_loss + float(lambda_resp_anchor) * resp_anchor_loss
+        if float(lambda_prior_mu_l2) != 0.0:
+            total_loss = total_loss + float(lambda_prior_mu_l2) * prior_mu_l2_loss
+        if float(lambda_prior_factor_l2) != 0.0:
+            total_loss = total_loss + float(lambda_prior_factor_l2) * prior_factor_l2_loss
 
         return {
             "loss": total_loss,
@@ -627,6 +641,8 @@ class MaskFiLMGMMVAE(nn.Module):
             "resp_balance_loss": resp_balance_loss,
             "resp_confidence_loss": resp_confidence_loss,
             "resp_anchor_loss": resp_anchor_loss,
+            "prior_mu_l2_loss": prior_mu_l2_loss,
+            "prior_factor_l2_loss": prior_factor_l2_loss,
             "score_norm_pred": score_norm_pred,
             "score_norm_tgt": score_norm_tgt,
             "log_q_mean": log_q.mean(),
@@ -912,6 +928,8 @@ def train_gmm_vae_one_epoch(
     resp_topk=0,
     prior_logvar_min=-6.0,
     prior_logvar_max=4.0,
+    lambda_prior_mu_l2=0.0,
+    lambda_prior_factor_l2=0.0,
     force_base_posterior=False,
 ):
     model.train()
@@ -951,6 +969,8 @@ def train_gmm_vae_one_epoch(
                 resp_topk=resp_topk,
                 prior_logvar_min=prior_logvar_min,
                 prior_logvar_max=prior_logvar_max,
+                lambda_prior_mu_l2=lambda_prior_mu_l2,
+                lambda_prior_factor_l2=lambda_prior_factor_l2,
             )
             need_real_view = (lambda_contrast > 0) or (lambda_real_recon > 0)
             real_recon = torch.zeros((), device=x_count.device, dtype=out_fake["z"].dtype)
@@ -975,6 +995,8 @@ def train_gmm_vae_one_epoch(
                     resp_topk=0,
                     prior_logvar_min=prior_logvar_min,
                     prior_logvar_max=prior_logvar_max,
+                    lambda_prior_mu_l2=0.0,
+                    lambda_prior_factor_l2=0.0,
                 )
                 real_recon = out_real["recon_loss"]
             if lambda_contrast > 0:
@@ -1087,6 +1109,8 @@ def evaluate_gmm_vae_one_epoch(
     resp_topk=0,
     prior_logvar_min=-6.0,
     prior_logvar_max=4.0,
+    lambda_prior_mu_l2=0.0,
+    lambda_prior_factor_l2=0.0,
     force_base_posterior=False,
 ):
     model.eval()
@@ -1125,6 +1149,8 @@ def evaluate_gmm_vae_one_epoch(
                 resp_topk=resp_topk,
                 prior_logvar_min=prior_logvar_min,
                 prior_logvar_max=prior_logvar_max,
+                lambda_prior_mu_l2=lambda_prior_mu_l2,
+                lambda_prior_factor_l2=lambda_prior_factor_l2,
             )
             need_real_view = (lambda_contrast > 0) or (lambda_real_recon > 0)
             real_recon = torch.zeros((), device=x_count.device, dtype=out_fake["z"].dtype)
@@ -1149,6 +1175,8 @@ def evaluate_gmm_vae_one_epoch(
                     resp_topk=0,
                     prior_logvar_min=prior_logvar_min,
                     prior_logvar_max=prior_logvar_max,
+                    lambda_prior_mu_l2=0.0,
+                    lambda_prior_factor_l2=0.0,
                 )
                 real_recon = out_real["recon_loss"]
             if lambda_contrast > 0:
@@ -1159,7 +1187,11 @@ def evaluate_gmm_vae_one_epoch(
                 )
             else:
                 contrast = torch.zeros((), device=x_count.device, dtype=out_fake["z"].dtype)
-            loss = out_fake["loss"] + lambda_contrast * contrast + lambda_real_recon * real_recon
+            loss = out_fake["loss"]
+            if float(lambda_contrast) != 0.0:
+                loss = loss + float(lambda_contrast) * contrast
+            if float(lambda_real_recon) != 0.0:
+                loss = loss + float(lambda_real_recon) * real_recon
 
             total_loss += loss.item() * bsz
             total_recon += out_fake["recon_loss"].item() * bsz

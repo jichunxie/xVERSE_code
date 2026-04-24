@@ -153,6 +153,10 @@ def parse_args():
                         help="Linear warmup epochs for lambda-resp-confidence from 0 to target. <=0 disables warmup.")
     parser.add_argument("--lambda-resp-anchor", type=float, default=0.0,
                         help="Soft anchoring weight: encourage similar q(c|x) within the same known celltype. celltype=-1 is ignored.")
+    parser.add_argument("--lambda-prior-mu-l2", type=float, default=0.0,
+                        help="L2 regularization weight for GMM prior means prior_mu.")
+    parser.add_argument("--lambda-prior-factor-l2", type=float, default=0.0,
+                        help="L2 regularization weight for GMM prior low-rank factors prior_factor.")
     parser.add_argument("--resp-temperature", type=float, default=1.0,
                         help="Temperature for posterior responsibilities used by entropy regularization (>1 softens).")
     parser.add_argument("--resp-temperature-start", type=float, default=None,
@@ -813,6 +817,8 @@ def main():
             resp_topk=args.resp_topk,
             prior_logvar_min=args.prior_logvar_min,
             prior_logvar_max=args.prior_logvar_max,
+            lambda_prior_mu_l2=args.lambda_prior_mu_l2,
+            lambda_prior_factor_l2=args.lambda_prior_factor_l2,
             force_base_posterior=phase1_force_base_posterior,
         )
         train_msg = (
@@ -847,6 +853,8 @@ def main():
                 resp_topk=args.resp_topk,
                 prior_logvar_min=args.prior_logvar_min,
                 prior_logvar_max=args.prior_logvar_max,
+                lambda_prior_mu_l2=args.lambda_prior_mu_l2,
+                lambda_prior_factor_l2=args.lambda_prior_factor_l2,
                 force_base_posterior=phase1_force_base_posterior,
             )
             val_msg = (
