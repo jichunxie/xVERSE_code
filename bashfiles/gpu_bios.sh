@@ -26,7 +26,7 @@ PY
 echo ">>> Visible CUDA devices: ${NPROC_PER_NODE}"
 
 DATA_ROOT="/hpc/group/xielab/xj58/xVerseAtlas/npz_tissue_dataset_donor"
-COMPILED_ROOT="/hpc/group/xielab/xj58/xVerseAtlas/compiled_train_v1_all_cls"
+COMPILED_ROOT="/hpc/group/xielab/xj58/xVerseAtlas/compiled_train_v1_all"
 
 echo ">>> DATA_ROOT=${DATA_ROOT}"
 echo ">>> COMPILED_ROOT=${COMPILED_ROOT}"
@@ -36,7 +36,7 @@ stdbuf -oL -eL torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" -m mai
     --compiled-max-cached-shards 4092 \
     --sampler-shard-reorder-window 4096 \
     --sampler-active-shards 16 \
-    --result-dir "/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_all_tissue_h200" \
+    --result-dir "/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_all_tissue_h200_cls" \
     --num-epochs 100 \
     --val-every 10 \
     --batch-size 1024 \
