@@ -38,7 +38,7 @@ stdbuf -oL -eL torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" -m mai
     --sampler-active-shards 16 \
     --result-dir "/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_all_tissue_2" \
     --num-epochs 100 \
-    --val-every 10 \
+    --val-every 1 \
     --batch-size 1024 \
     --val-batch-size 1024 \
     --num-workers 8 \
