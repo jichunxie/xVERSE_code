@@ -139,6 +139,8 @@ def parse_args():
                         help="Weight for per-cell responsibility entropy minimization (encourages sparse/peaky assignments).")
     parser.add_argument("--lambda-resp-confidence-warmup-epochs", type=int, default=0,
                         help="Linear warmup epochs for lambda-resp-confidence from 0 to target. <=0 disables warmup.")
+    parser.add_argument("--lambda-resp-anchor", type=float, default=0.0,
+                        help="Soft anchoring weight: encourage similar q(c|x) within the same known celltype. celltype=-1 is ignored.")
     parser.add_argument("--resp-temperature", type=float, default=1.0,
                         help="Temperature for posterior responsibilities used by entropy regularization (>1 softens).")
     parser.add_argument("--resp-temperature-start", type=float, default=None,
@@ -541,6 +543,7 @@ def main():
             cov_use_mu=args.cov_use_mu,
             lambda_resp_balance=lambda_resp_balance_t,
             lambda_resp_confidence=lambda_resp_confidence_t,
+            lambda_resp_anchor=args.lambda_resp_anchor,
             resp_temperature=resp_temperature_t,
             resp_topk=args.resp_topk,
             prior_logvar_min=args.prior_logvar_min,
@@ -573,6 +576,7 @@ def main():
                 cov_use_mu=args.cov_use_mu,
                 lambda_resp_balance=lambda_resp_balance_t,
                 lambda_resp_confidence=lambda_resp_confidence_t,
+                lambda_resp_anchor=args.lambda_resp_anchor,
                 resp_temperature=resp_temperature_t,
                 resp_topk=args.resp_topk,
                 prior_logvar_min=args.prior_logvar_min,

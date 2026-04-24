@@ -71,6 +71,7 @@ stdbuf -oL -eL torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" -m mai
     --lambda-resp-balance-warmup-epochs 5 \
     --lambda-resp-confidence 0.005 \
     --lambda-resp-confidence-warmup-epochs 10 \
+    --lambda-resp-anchor 0.01 \
     --resp-temperature 1.0 \
     --resp-temperature-start 1.3 \
     --resp-temperature-warmup-epochs 10 \

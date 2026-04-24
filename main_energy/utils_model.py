@@ -427,6 +427,7 @@ class MaskFiLMGMMVAE(nn.Module):
         self,
         x_count: torch.Tensor,
         x_mask: torch.Tensor,
+        celltype_id: torch.Tensor = None,
         beta: float = 1.0,
         encoder_mask: torch.Tensor = None,
         recon_mask: torch.Tensor = None,
@@ -437,6 +438,7 @@ class MaskFiLMGMMVAE(nn.Module):
         cov_use_mu: bool = True,
         lambda_resp_balance: float = 0.0,
         lambda_resp_confidence: float = 0.0,
+        lambda_resp_anchor: float = 0.0,
         resp_temperature: float = 1.0,
         resp_topk: int = 0,
         prior_logvar_min: float = -6.0,
@@ -502,6 +504,7 @@ class MaskFiLMGMMVAE(nn.Module):
         resp_top1 = torch.zeros((), device=z.device, dtype=z.dtype)
         resp_balance_loss = torch.zeros((), device=z.device, dtype=z.dtype)
         resp_confidence_loss = torch.zeros((), device=z.device, dtype=z.dtype)
+        resp_anchor_loss = torch.zeros((), device=z.device, dtype=z.dtype)
 
         if lambda_score > 0:
             z_for_score = z.detach() if score_detach_z else z
@@ -559,6 +562,34 @@ class MaskFiLMGMMVAE(nn.Module):
                     reduction="sum",
                 ).to(z.dtype)
 
+        if self.prior_type == "gmm" and lambda_resp_anchor > 0 and celltype_id is not None:
+            if "q_c" in out:
+                resp_anchor = out["q_c"]
+            else:
+                resp_anchor = self.prior.posterior_responsibilities(z=z, temperature=resp_temperature, topk=resp_topk)
+            ct = celltype_id.view(-1).to(resp_anchor.device).long()
+            valid = ct >= 0
+            if valid.any():
+                resp_v = resp_anchor[valid]
+                ct_v = ct[valid]
+                uniq = torch.unique(ct_v)
+                total = torch.zeros((), device=z.device, dtype=z.dtype)
+                groups = 0
+                for t in uniq.tolist():
+                    idx = (ct_v == int(t)).nonzero(as_tuple=False).flatten()
+                    if idx.numel() <= 1:
+                        continue
+                    r_t = resp_v[idx]  # (n_t, K)
+                    proto = r_t.mean(dim=0, keepdim=True).detach()  # (1, K)
+                    total = total + F.kl_div(
+                        torch.log(torch.clamp(r_t, min=1e-12)),
+                        proto.expand_as(r_t),
+                        reduction="batchmean",
+                    ).to(z.dtype)
+                    groups += 1
+                if groups > 0:
+                    resp_anchor_loss = total / float(groups)
+
         total_loss = (
             recon_loss
             + beta * kl_loss
@@ -566,6 +597,7 @@ class MaskFiLMGMMVAE(nn.Module):
             + lambda_cov * cov_loss
             + lambda_resp_balance * resp_balance_loss
             + lambda_resp_confidence * resp_confidence_loss
+            + lambda_resp_anchor * resp_anchor_loss
         )
 
         return {
@@ -580,6 +612,7 @@ class MaskFiLMGMMVAE(nn.Module):
             "resp_top1": resp_top1,
             "resp_balance_loss": resp_balance_loss,
             "resp_confidence_loss": resp_confidence_loss,
+            "resp_anchor_loss": resp_anchor_loss,
             "score_norm_pred": score_norm_pred,
             "score_norm_tgt": score_norm_tgt,
             "log_q_mean": log_q.mean(),
@@ -860,6 +893,7 @@ def train_gmm_vae_one_epoch(
     cov_use_mu=True,
     lambda_resp_balance=0.0,
     lambda_resp_confidence=0.0,
+    lambda_resp_anchor=0.0,
     resp_temperature=1.0,
     resp_topk=0,
     prior_logvar_min=-6.0,
@@ -872,8 +906,9 @@ def train_gmm_vae_one_epoch(
     n_cells = 0
     is_rank0 = (not dist.is_available()) or (not dist.is_initialized()) or (dist.get_rank() == 0)
 
-    for batch_idx, (_, _, _, x_count, x_mask, x_mask_encoder) in enumerate(train_loader):
+    for batch_idx, (_, _, celltype_id, x_count, x_mask, x_mask_encoder) in enumerate(train_loader):
         optimizer.zero_grad(set_to_none=True)
+        celltype_id = celltype_id.to(device, non_blocking=True)
         x_count = x_count.to(device, non_blocking=True)
         x_mask = x_mask.to(device, non_blocking=True)
         x_mask_encoder = x_mask_encoder.to(device, non_blocking=True)
@@ -884,6 +919,7 @@ def train_gmm_vae_one_epoch(
             out_fake = loss_fn(
                 x_count=x_count,
                 x_mask=x_mask,
+                celltype_id=celltype_id,
                 beta=beta_kl,
                 encoder_mask=x_mask_encoder,
                 recon_mask=x_mask if recon_observed_only else None,
@@ -894,6 +930,7 @@ def train_gmm_vae_one_epoch(
                 cov_use_mu=cov_use_mu,
                 lambda_resp_balance=lambda_resp_balance,
                 lambda_resp_confidence=lambda_resp_confidence,
+                lambda_resp_anchor=lambda_resp_anchor,
                 resp_temperature=resp_temperature,
                 resp_topk=resp_topk,
                 prior_logvar_min=prior_logvar_min,
@@ -905,6 +942,7 @@ def train_gmm_vae_one_epoch(
                 out_real = loss_fn(
                     x_count=x_count,
                     x_mask=x_mask,
+                    celltype_id=celltype_id,
                     beta=0.0,
                     encoder_mask=x_mask,
                     recon_mask=x_mask if recon_observed_only else None,
@@ -915,6 +953,7 @@ def train_gmm_vae_one_epoch(
                     cov_use_mu=cov_use_mu,
                     lambda_resp_balance=0.0,
                     lambda_resp_confidence=0.0,
+                    lambda_resp_anchor=0.0,
                     resp_temperature=resp_temperature,
                     resp_topk=0,
                     prior_logvar_min=prior_logvar_min,
@@ -974,7 +1013,7 @@ def train_gmm_vae_one_epoch(
                 f", ||s_pred||={out_fake['score_norm_pred'].item():.4f}, ||s_tgt||={out_fake['score_norm_tgt'].item():.4f}, "
                 f"||cov_post_off||={out_fake['cov_offdiag_post'].item():.6f}, ||cov_prior_off||={out_fake['cov_offdiag_prior'].item():.6f}, "
                 f"respH={out_fake['resp_entropy'].item():.4f}, respBal={out_fake['resp_balance_loss'].item():.4f}, "
-                f"respConf={out_fake['resp_confidence_loss'].item():.4f}, "
+                f"respConf={out_fake['resp_confidence_loss'].item():.4f}, respAnchor={out_fake['resp_anchor_loss'].item():.4f}, "
                 f"respTop1Batch={out_fake['resp_top1'].item():.4f}"
             )
             if getattr(model.module if hasattr(model, "module") else model, "prior_type", None) == "gmm":
@@ -1022,6 +1061,7 @@ def evaluate_gmm_vae_one_epoch(
     cov_use_mu=True,
     lambda_resp_balance=0.0,
     lambda_resp_confidence=0.0,
+    lambda_resp_anchor=0.0,
     resp_temperature=1.0,
     resp_topk=0,
     prior_logvar_min=-6.0,
@@ -1035,7 +1075,8 @@ def evaluate_gmm_vae_one_epoch(
     is_rank0 = (not dist.is_available()) or (not dist.is_initialized()) or (dist.get_rank() == 0)
 
     with torch.no_grad():
-        for batch_idx, (_, _, _, x_count, x_mask, x_mask_encoder) in enumerate(val_loader):
+        for batch_idx, (_, _, celltype_id, x_count, x_mask, x_mask_encoder) in enumerate(val_loader):
+            celltype_id = celltype_id.to(device, non_blocking=True)
             x_count = x_count.to(device, non_blocking=True)
             x_mask = x_mask.to(device, non_blocking=True)
             x_mask_encoder = x_mask_encoder.to(device, non_blocking=True)
@@ -1045,6 +1086,7 @@ def evaluate_gmm_vae_one_epoch(
             out_fake = loss_fn(
                 x_count=x_count,
                 x_mask=x_mask,
+                celltype_id=celltype_id,
                 beta=beta_kl,
                 encoder_mask=x_mask_encoder,
                 recon_mask=x_mask if recon_observed_only else None,
@@ -1055,6 +1097,7 @@ def evaluate_gmm_vae_one_epoch(
                 cov_use_mu=cov_use_mu,
                 lambda_resp_balance=lambda_resp_balance,
                 lambda_resp_confidence=lambda_resp_confidence,
+                lambda_resp_anchor=lambda_resp_anchor,
                 resp_temperature=resp_temperature,
                 resp_topk=resp_topk,
                 prior_logvar_min=prior_logvar_min,
@@ -1066,6 +1109,7 @@ def evaluate_gmm_vae_one_epoch(
                 out_real = loss_fn(
                     x_count=x_count,
                     x_mask=x_mask,
+                    celltype_id=celltype_id,
                     beta=0.0,
                     encoder_mask=x_mask,
                     recon_mask=x_mask if recon_observed_only else None,
@@ -1076,6 +1120,7 @@ def evaluate_gmm_vae_one_epoch(
                     cov_use_mu=cov_use_mu,
                     lambda_resp_balance=0.0,
                     lambda_resp_confidence=0.0,
+                    lambda_resp_anchor=0.0,
                     resp_temperature=resp_temperature,
                     resp_topk=0,
                     prior_logvar_min=prior_logvar_min,
@@ -1105,7 +1150,8 @@ def evaluate_gmm_vae_one_epoch(
                     f"Loss={loss.item():.4f}, Recon={out_fake['recon_loss'].item():.4f}, "
                     f"KL={out_fake['kl_loss'].item():.4f}, Score={out_fake['score_loss'].item():.4f}, "
                     f"Cov={out_fake['cov_loss'].item():.4f}, "
-                    f"respConf={out_fake['resp_confidence_loss'].item():.4f}"
+                    f"respConf={out_fake['resp_confidence_loss'].item():.4f}, "
+                    f"respAnchor={out_fake['resp_anchor_loss'].item():.4f}"
                 )
                 if getattr(model.module if hasattr(model, "module") else model, "prior_type", None) == "gmm":
                     diag = gmm_collapse_diagnostics(prior=prior_ref, z=out_fake["z"])
