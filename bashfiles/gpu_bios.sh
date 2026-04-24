@@ -87,6 +87,6 @@ stdbuf -oL -eL torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" -m mai
     --resp-temperature-start 2.0 \
     --resp-temperature-warmup-epochs 10 \
     --score-noise-std 0.1 \
-    --lambda-contrast 0.0 \
+    --lambda-contrast 0.1 \
     --lambda-real-recon 0.0 \
     --contrast-temp 0.3

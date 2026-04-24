@@ -892,7 +892,13 @@ def main():
             train_msg += f", Contrast={loss_contrast:.4f}"
         log(train_msg)
 
-        do_val = (int(args.val_every) <= 1) or (epoch_id % int(args.val_every) == 0) or (epoch_id == args.num_epochs)
+        do_val_stage1_end = bool(phase1_epochs > 0 and epoch_id == phase1_epochs)
+        do_val = (
+            (int(args.val_every) <= 1)
+            or (epoch_id % int(args.val_every) == 0)
+            or (epoch_id == args.num_epochs)
+            or do_val_stage1_end
+        )
         if do_val:
             val_loss_full, val_loss_recon, val_loss_kl, val_loss_score, val_loss_contrast, val_loss_cov, val_loss_prior_pi_balance, val_loss_celltype_cls = evaluate_gmm_vae_one_epoch(
                 model=model,
