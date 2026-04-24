@@ -113,6 +113,8 @@ def parse_args():
                         help="Low-rank size R for posterior q(z|x,c) covariance: diag + U U^T. 0 keeps diagonal posterior.")
     parser.add_argument("--gmm-init-after-epochs", type=int, default=0,
                         help="Run one-shot GMM initialization after this many completed epochs. 0 disables.")
+    parser.add_argument("--gmm-post-init-kl-warmup-epochs", type=int, default=5,
+                        help="After one-shot GMM init, linearly warm up KL from 0 to target over this many epochs. <=0 disables.")
     parser.add_argument("--gmm-init-max-samples", type=int, default=200000,
                         help="Max samples used for one-shot GMM initialization.")
     parser.add_argument("--gmm-init-max-batches", type=int, default=300,
@@ -616,6 +618,21 @@ def main():
         conf_scale = _linear_warmup_scale(epoch_id, int(args.lambda_resp_confidence_warmup_epochs))
         lambda_resp_balance_t = float(args.lambda_resp_balance) * bal_scale
         lambda_resp_confidence_t = float(args.lambda_resp_confidence) * conf_scale
+        lambda_resp_anchor_t = float(args.lambda_resp_anchor)
+
+        # Phase-1 (before one-shot GMM init): keep AE/GMM backbone training,
+        # but disable responsibility-shaping terms to avoid early collapse
+        # from random component assignments.
+        if int(args.gmm_init_after_epochs) > 0 and epoch_id <= int(args.gmm_init_after_epochs):
+            beta_t = 0.0
+            lambda_resp_balance_t = 0.0
+            lambda_resp_confidence_t = 0.0
+            lambda_resp_anchor_t = 0.0
+        elif int(args.gmm_init_after_epochs) > 0 and int(args.gmm_post_init_kl_warmup_epochs) > 0:
+            # Phase-2 (right after one-shot GMM init): ramp KL back to target smoothly.
+            # epoch_id == gmm_init_after_epochs + 1 corresponds to warmup progress 1 / warmup_epochs.
+            prog = (epoch_id - int(args.gmm_init_after_epochs)) / float(int(args.gmm_post_init_kl_warmup_epochs))
+            beta_t = beta_end * min(1.0, max(0.0, prog))
 
         resp_temp_start = float(args.resp_temperature) if args.resp_temperature_start is None else float(args.resp_temperature_start)
         resp_temp_end = float(args.resp_temperature)
@@ -627,6 +644,7 @@ def main():
             f"lambda_cov={lambda_cov_t:.6f}, "
             f"lambda_resp_balance={lambda_resp_balance_t:.6f}, "
             f"lambda_resp_confidence={lambda_resp_confidence_t:.6f}, "
+            f"lambda_resp_anchor={lambda_resp_anchor_t:.6f}, "
             f"resp_temperature={resp_temperature_t:.6f}"
         )
 
@@ -713,7 +731,7 @@ def main():
             cov_use_mu=args.cov_use_mu,
             lambda_resp_balance=lambda_resp_balance_t,
             lambda_resp_confidence=lambda_resp_confidence_t,
-            lambda_resp_anchor=args.lambda_resp_anchor,
+            lambda_resp_anchor=lambda_resp_anchor_t,
             resp_temperature=resp_temperature_t,
             resp_topk=args.resp_topk,
             prior_logvar_min=args.prior_logvar_min,
@@ -746,7 +764,7 @@ def main():
                 cov_use_mu=args.cov_use_mu,
                 lambda_resp_balance=lambda_resp_balance_t,
                 lambda_resp_confidence=lambda_resp_confidence_t,
-                lambda_resp_anchor=args.lambda_resp_anchor,
+                lambda_resp_anchor=lambda_resp_anchor_t,
                 resp_temperature=resp_temperature_t,
                 resp_topk=args.resp_topk,
                 prior_logvar_min=args.prior_logvar_min,
