@@ -653,7 +653,21 @@ def main():
     gmm_init_done = False
 
     if os.path.exists(ckpt_path):
-        log(f"[Resume] Found {ckpt_path}, but auto-resume is disabled in current debug mode. Start from scratch.")
+        map_location = device
+        ckpt = torch.load(ckpt_path, map_location=map_location)
+        model.load_state_dict(ckpt["model_state_dict"])
+        if "optimizer_state_dict" in ckpt:
+            optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        if "scheduler_state_dict" in ckpt:
+            scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+        best_val_metric = float(ckpt.get("best_val_metric", best_val_metric))
+        last_epoch = int(ckpt.get("epoch", 0))
+        start_round = last_epoch + 1
+        gmm_init_done = bool(args.prior_type == "gmm" and int(args.gmm_init_after_epochs) > 0 and last_epoch >= int(args.gmm_init_after_epochs) + 1)
+        log(
+            f"[Resume] Loaded {ckpt_path} (epoch={last_epoch}, best_val_metric={best_val_metric:.6f}). "
+            f"Continue from epoch {start_round}."
+        )
 
     epoch_id = start_round
 
@@ -792,7 +806,7 @@ def main():
                     )
                 )
 
-        loss_full, loss_recon, loss_kl, loss_score, loss_contrast, loss_cov = train_gmm_vae_one_epoch(
+        loss_full, loss_recon, loss_kl, loss_score, loss_contrast, loss_cov, loss_prior_pi_balance = train_gmm_vae_one_epoch(
             model=model,
             optimizer=optimizer,
             scaler=scaler,
@@ -827,7 +841,7 @@ def main():
         train_msg = (
             f"[Epoch {epoch_id}] "
             f"Loss={loss_full:.4f}, Recon={loss_recon:.4f}, KL={loss_kl:.4f}, "
-            f"Score={loss_score:.4f}, Cov={loss_cov:.4f}"
+            f"Score={loss_score:.4f}, Cov={loss_cov:.4f}, priorPiBal={loss_prior_pi_balance:.4f}"
         )
         if args.lambda_contrast > 0:
             train_msg += f", Contrast={loss_contrast:.4f}"
@@ -835,7 +849,7 @@ def main():
 
         do_val = (int(args.val_every) <= 1) or (epoch_id % int(args.val_every) == 0) or (epoch_id == args.num_epochs)
         if do_val:
-            val_loss_full, val_loss_recon, val_loss_kl, val_loss_score, val_loss_contrast, val_loss_cov = evaluate_gmm_vae_one_epoch(
+            val_loss_full, val_loss_recon, val_loss_kl, val_loss_score, val_loss_contrast, val_loss_cov, val_loss_prior_pi_balance = evaluate_gmm_vae_one_epoch(
                 model=model,
                 val_loader=val_loader,
                 device=device,
@@ -864,7 +878,7 @@ def main():
             val_msg = (
                 f"[Epoch {epoch_id}] Validation Loss: "
                 f"Loss={val_loss_full:.4f}, Recon={val_loss_recon:.4f}, KL={val_loss_kl:.4f}, "
-                f"Score={val_loss_score:.4f}, Cov={val_loss_cov:.4f}"
+                f"Score={val_loss_score:.4f}, Cov={val_loss_cov:.4f}, priorPiBal={val_loss_prior_pi_balance:.4f}"
             )
             if args.lambda_contrast > 0:
                 val_msg += f", Contrast={val_loss_contrast:.4f}"

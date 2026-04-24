@@ -949,7 +949,7 @@ def train_gmm_vae_one_epoch(
     model.train()
     loss_fn = model.module.loss if hasattr(model, "module") else model.loss
     prior_ref = model.module.prior if hasattr(model, "module") else model.prior
-    total_loss = total_recon = total_kl = total_score = total_contrast = total_cov = 0.0
+    total_loss = total_recon = total_kl = total_score = total_contrast = total_cov = total_prior_pi_balance = 0.0
     n_cells = 0
     is_rank0 = (not dist.is_available()) or (not dist.is_initialized()) or (dist.get_rank() == 0)
 
@@ -1033,6 +1033,7 @@ def train_gmm_vae_one_epoch(
             kl = out_fake["kl_loss"]
             score = out_fake["score_loss"]
             cov = out_fake["cov_loss"]
+            prior_pi_balance = out_fake.get("prior_pi_balance_loss", torch.zeros_like(cov))
 
         if not torch.isfinite(loss):
             if is_rank0:
@@ -1057,12 +1058,13 @@ def train_gmm_vae_one_epoch(
         total_score += score.item() * bsz
         total_contrast += contrast.item() * bsz
         total_cov += cov.item() * bsz
+        total_prior_pi_balance += prior_pi_balance.item() * bsz
 
         if (batch_idx + 1) % 100 == 0 and is_rank0:
             msg = (
                 f"[Batch {batch_idx + 1}] "
                 f"Loss={loss.item():.4f}, Recon={recon.item():.4f}, KL={kl.item():.4f}, "
-                f"Score={score.item():.4f}, Cov={cov.item():.4f}"
+                f"Score={score.item():.4f}, Cov={cov.item():.4f}, priorPiBal={prior_pi_balance.item():.4f}"
             )
             if lambda_contrast > 0:
                 msg += f", Contrast={contrast.item():.4f}"
@@ -1086,12 +1088,12 @@ def train_gmm_vae_one_epoch(
 
     if dist.is_available() and dist.is_initialized():
         stats = torch.tensor(
-            [total_loss, total_recon, total_kl, total_score, total_contrast, total_cov, float(n_cells)],
+            [total_loss, total_recon, total_kl, total_score, total_contrast, total_cov, total_prior_pi_balance, float(n_cells)],
             device=device,
             dtype=torch.float64,
         )
         dist.all_reduce(stats, op=dist.ReduceOp.SUM)
-        total_loss, total_recon, total_kl, total_score, total_contrast, total_cov, n_cells = stats.tolist()
+        total_loss, total_recon, total_kl, total_score, total_contrast, total_cov, total_prior_pi_balance, n_cells = stats.tolist()
         n_cells = max(float(n_cells), 1.0)
 
     return (
@@ -1101,6 +1103,7 @@ def train_gmm_vae_one_epoch(
         total_score / n_cells,
         total_contrast / n_cells,
         total_cov / n_cells,
+        total_prior_pi_balance / n_cells,
     )
 
 
@@ -1133,7 +1136,7 @@ def evaluate_gmm_vae_one_epoch(
     model.eval()
     loss_fn = model.module.loss if hasattr(model, "module") else model.loss
     prior_ref = model.module.prior if hasattr(model, "module") else model.prior
-    total_loss = total_recon = total_kl = total_score = total_contrast = total_cov = 0.0
+    total_loss = total_recon = total_kl = total_score = total_contrast = total_cov = total_prior_pi_balance = 0.0
     n_cells = 0
     is_rank0 = (not dist.is_available()) or (not dist.is_initialized()) or (dist.get_rank() == 0)
 
@@ -1218,13 +1221,14 @@ def evaluate_gmm_vae_one_epoch(
             total_score += out_fake["score_loss"].item() * bsz
             total_contrast += contrast.item() * bsz
             total_cov += out_fake["cov_loss"].item() * bsz
+            total_prior_pi_balance += out_fake.get("prior_pi_balance_loss", torch.zeros_like(out_fake["cov_loss"])).item() * bsz
 
             if (batch_idx + 1) % 100 == 0 and is_rank0:
                 msg = (
                     f"[Val Batch {batch_idx + 1}] "
                     f"Loss={loss.item():.4f}, Recon={out_fake['recon_loss'].item():.4f}, "
                     f"KL={out_fake['kl_loss'].item():.4f}, Score={out_fake['score_loss'].item():.4f}, "
-                    f"Cov={out_fake['cov_loss'].item():.4f}, "
+                    f"Cov={out_fake['cov_loss'].item():.4f}, priorPiBal={out_fake.get('prior_pi_balance_loss', torch.zeros_like(out_fake['cov_loss'])).item():.4f}, "
                     f"respConf={out_fake['resp_confidence_loss'].item():.4f}, "
                     f"respAnchor={out_fake['resp_anchor_loss'].item():.4f}"
                 )
@@ -1239,12 +1243,12 @@ def evaluate_gmm_vae_one_epoch(
 
     if dist.is_available() and dist.is_initialized():
         stats = torch.tensor(
-            [total_loss, total_recon, total_kl, total_score, total_contrast, total_cov, float(n_cells)],
+            [total_loss, total_recon, total_kl, total_score, total_contrast, total_cov, total_prior_pi_balance, float(n_cells)],
             device=device,
             dtype=torch.float64,
         )
         dist.all_reduce(stats, op=dist.ReduceOp.SUM)
-        total_loss, total_recon, total_kl, total_score, total_contrast, total_cov, n_cells = stats.tolist()
+        total_loss, total_recon, total_kl, total_score, total_contrast, total_cov, total_prior_pi_balance, n_cells = stats.tolist()
         n_cells = max(float(n_cells), 1.0)
 
     return (
@@ -1254,6 +1258,7 @@ def evaluate_gmm_vae_one_epoch(
         total_score / n_cells,
         total_contrast / n_cells,
         total_cov / n_cells,
+        total_prior_pi_balance / n_cells,
     )
 
 
