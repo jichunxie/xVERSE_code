@@ -82,7 +82,7 @@ stdbuf -oL -eL torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" -m mai
     --lambda-prior-mu-l2 1e-4 \
     --lambda-prior-factor-l2 5e-4 \
     --lambda-prior-pi-balance 0.1 \
-    --lambda-celltype-cls 0.05 \
+    --lambda-celltype-cls 1 \
     --resp-temperature 1.5 \
     --resp-temperature-start 2.0 \
     --resp-temperature-warmup-epochs 10 \
