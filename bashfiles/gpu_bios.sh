@@ -58,6 +58,8 @@ stdbuf -oL -eL torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" -m mai
     --mask-hidden-dim 512 \
     --dec-hidden-dim 1536 \
     --beta-kl 0.1 \
+    --beta-kl-start 0.1 \
+    --beta-kl-end 0.1 \
     --beta-kl-warmup-epochs 0 \
     --gmm-init-after-epochs 5 \
     --gmm-stage2-epochs 5 \

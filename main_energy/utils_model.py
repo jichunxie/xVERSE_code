@@ -599,15 +599,20 @@ class MaskFiLMGMMVAE(nn.Module):
                 if groups > 0:
                     resp_anchor_loss = total / float(groups)
 
-        total_loss = (
-            recon_loss
-            + beta * kl_loss
-            + lambda_score * score_loss
-            + lambda_cov * cov_loss
-            + lambda_resp_balance * resp_balance_loss
-            + lambda_resp_confidence * resp_confidence_loss
-            + lambda_resp_anchor * resp_anchor_loss
-        )
+        # Build total loss with explicit gating to avoid 0 * inf -> nan when a term is disabled.
+        total_loss = recon_loss
+        if float(beta) != 0.0:
+            total_loss = total_loss + float(beta) * kl_loss
+        if float(lambda_score) != 0.0:
+            total_loss = total_loss + float(lambda_score) * score_loss
+        if float(lambda_cov) != 0.0:
+            total_loss = total_loss + float(lambda_cov) * cov_loss
+        if float(lambda_resp_balance) != 0.0:
+            total_loss = total_loss + float(lambda_resp_balance) * resp_balance_loss
+        if float(lambda_resp_confidence) != 0.0:
+            total_loss = total_loss + float(lambda_resp_confidence) * resp_confidence_loss
+        if float(lambda_resp_anchor) != 0.0:
+            total_loss = total_loss + float(lambda_resp_anchor) * resp_anchor_loss
 
         return {
             "loss": total_loss,
@@ -981,7 +986,11 @@ def train_gmm_vae_one_epoch(
             else:
                 contrast = torch.zeros((), device=x_count.device, dtype=out_fake["z"].dtype)
 
-            loss = out_fake["loss"] + lambda_contrast * contrast + lambda_real_recon * real_recon
+            loss = out_fake["loss"]
+            if float(lambda_contrast) != 0.0:
+                loss = loss + float(lambda_contrast) * contrast
+            if float(lambda_real_recon) != 0.0:
+                loss = loss + float(lambda_real_recon) * real_recon
             recon = out_fake["recon_loss"]
             kl = out_fake["kl_loss"]
             score = out_fake["score_loss"]
