@@ -111,6 +111,14 @@ def parse_args():
                         help="Low-rank size R for each GMM component covariance: diag + U U^T.")
     parser.add_argument("--posterior-cov-rank", type=int, default=0,
                         help="Low-rank size R for posterior q(z|x,c) covariance: diag + U U^T. 0 keeps diagonal posterior.")
+    parser.add_argument("--gmm-init-after-epochs", type=int, default=0,
+                        help="Run one-shot GMM initialization after this many completed epochs. 0 disables.")
+    parser.add_argument("--gmm-init-max-samples", type=int, default=200000,
+                        help="Max samples used for one-shot GMM initialization.")
+    parser.add_argument("--gmm-init-max-batches", type=int, default=300,
+                        help="Max train batches scanned for one-shot GMM initialization.")
+    parser.add_argument("--gmm-init-iters", type=int, default=30,
+                        help="KMeans iterations for one-shot GMM initialization.")
     parser.add_argument("--expr-hidden-dim", type=int, default=1024, help="Expression encoder hidden dim.")
     parser.add_argument("--mask-hidden-dim", type=int, default=512, help="Mask encoder hidden dim.")
     parser.add_argument("--dec-hidden-dim", type=int, default=1024, help="Decoder hidden dim.")
@@ -225,6 +233,110 @@ def setup_distributed(args):
 
 def is_main_process(rank: int) -> bool:
     return rank == 0
+
+
+def _unwrap_model(model):
+    return model.module if hasattr(model, "module") else model
+
+
+def _kmeans_torch(x: torch.Tensor, k: int, iters: int, seed: int):
+    n = x.size(0)
+    if n < k:
+        raise ValueError(f"Not enough points for KMeans: n={n}, k={k}")
+    g = torch.Generator(device=x.device)
+    g.manual_seed(int(seed))
+    centers = x[torch.randperm(n, generator=g, device=x.device)[:k]].clone()
+    assign = torch.zeros((n,), dtype=torch.long, device=x.device)
+    for _ in range(max(1, int(iters))):
+        dist2 = torch.cdist(x, centers, p=2) ** 2
+        assign = torch.argmin(dist2, dim=1)
+        new_centers = torch.zeros_like(centers)
+        counts = torch.bincount(assign, minlength=k).to(x.dtype).unsqueeze(1)
+        new_centers.index_add_(0, assign, x)
+        non_empty = counts.squeeze(1) > 0
+        new_centers[non_empty] = new_centers[non_empty] / counts[non_empty]
+        if (~non_empty).any():
+            refill = x[torch.randperm(n, generator=g, device=x.device)[: int((~non_empty).sum().item())]]
+            new_centers[~non_empty] = refill
+        centers = new_centers
+    return centers, assign
+
+
+def init_gmm_from_encoder_latent(
+    model,
+    train_loader,
+    train_sampler,
+    device,
+    num_components: int,
+    max_samples: int,
+    max_batches: int,
+    iters: int,
+    seed: int,
+    prior_logvar_min: float,
+    prior_logvar_max: float,
+    log_fn=print,
+):
+    base = _unwrap_model(model)
+    if getattr(base, "prior_type", None) != "gmm":
+        return False
+    if hasattr(train_sampler, "set_epoch"):
+        train_sampler.set_epoch(0)
+
+    base.eval()
+    latents = []
+    seen = 0
+    with torch.no_grad():
+        for bidx, (_, _, _, x_count, x_mask, _) in enumerate(train_loader):
+            if bidx >= int(max_batches) or seen >= int(max_samples):
+                break
+            x_count = x_count.to(device, non_blocking=True)
+            x_mask = x_mask.to(device, non_blocking=True)
+            out = base.forward(x_count=x_count, x_mask=x_mask)
+            mu_base = out.get("mu_base", out["mu"]).detach().float()
+            if seen + mu_base.size(0) > int(max_samples):
+                mu_base = mu_base[: int(max_samples) - seen]
+            latents.append(mu_base)
+            seen += mu_base.size(0)
+
+    if seen < int(num_components):
+        log_fn(f"[GMMInit][WARN] samples={seen} < K={num_components}, skip.")
+        base.train()
+        return False
+
+    x = torch.cat(latents, dim=0)
+    centers, assign = _kmeans_torch(x=x, k=int(num_components), iters=int(iters), seed=int(seed))
+    counts = torch.bincount(assign, minlength=int(num_components)).float()
+    pi = (counts + 1.0) / (counts.sum() + float(num_components))
+    pi_logits = torch.log(pi)
+
+    d = x.size(1)
+    var = torch.zeros((int(num_components), d), device=x.device, dtype=x.dtype)
+    for k in range(int(num_components)):
+        idx = (assign == k).nonzero(as_tuple=False).flatten()
+        if idx.numel() <= 1:
+            var[k] = torch.ones((d,), device=x.device, dtype=x.dtype)
+        else:
+            var[k] = torch.clamp(torch.var(x[idx], dim=0, unbiased=False), min=1e-4)
+    logvar = torch.log(var).clamp(min=float(prior_logvar_min), max=float(prior_logvar_max))
+
+    base.prior.pi_logits.data.copy_(pi_logits.to(base.prior.pi_logits.dtype))
+    base.prior.prior_mu.data.copy_(centers.to(base.prior.prior_mu.dtype))
+    base.prior.prior_logvar.data.copy_(logvar.to(base.prior.prior_logvar.dtype))
+    if getattr(base.prior, "prior_factor", None) is not None:
+        base.prior.prior_factor.data.zero_()
+
+    # Initialize q(c|x) head bias from component prior weights.
+    if hasattr(base, "post_c_logits") and isinstance(base.post_c_logits, torch.nn.Linear):
+        with torch.no_grad():
+            base.post_c_logits.weight.zero_()
+            base.post_c_logits.bias.copy_(pi_logits.to(base.post_c_logits.bias.dtype))
+
+    log_fn(
+        f"[GMMInit] done: samples={seen}, K={num_components}, "
+        f"pi_min={pi.min().item():.4f}, pi_max={pi.max().item():.4f}"
+    )
+    base.train()
+    return True
 
 
 def _linear_warmup_scale(epoch_id: int, warmup_epochs: int) -> float:
@@ -482,6 +594,7 @@ def main():
 
     start_round = 1
     best_val_metric = float("inf")
+    gmm_init_done = False
 
     if os.path.exists(ckpt_path):
         log(f"[Resume] Found {ckpt_path}, but auto-resume is disabled in current debug mode. Start from scratch.")
@@ -520,6 +633,63 @@ def main():
         train_sampler.set_epoch(epoch_id)
         if val_sampler is not None:
             val_sampler.set_epoch(epoch_id)
+        if (
+            args.prior_type == "gmm"
+            and int(args.gmm_init_after_epochs) > 0
+            and (not gmm_init_done)
+            and epoch_id == int(args.gmm_init_after_epochs) + 1
+        ):
+            tag = f"epoch-{epoch_id}-start"
+            inited = False
+            if ddp_enabled:
+                if is_main_process(rank):
+                    log(f"[GMMInit] Triggered at {tag}")
+                    inited = init_gmm_from_encoder_latent(
+                        model=model,
+                        train_loader=train_loader,
+                        train_sampler=train_sampler,
+                        device=device,
+                        num_components=args.num_components,
+                        max_samples=args.gmm_init_max_samples,
+                        max_batches=args.gmm_init_max_batches,
+                        iters=args.gmm_init_iters,
+                        seed=args.seed,
+                        prior_logvar_min=args.prior_logvar_min,
+                        prior_logvar_max=args.prior_logvar_max,
+                        log_fn=log,
+                    )
+                flag = torch.tensor([1 if inited else 0], device=device, dtype=torch.int64)
+                dist.broadcast(flag, src=0)
+                base = _unwrap_model(model)
+                dist.broadcast(base.prior.pi_logits.data, src=0)
+                dist.broadcast(base.prior.prior_mu.data, src=0)
+                dist.broadcast(base.prior.prior_logvar.data, src=0)
+                if getattr(base.prior, "prior_factor", None) is not None:
+                    dist.broadcast(base.prior.prior_factor.data, src=0)
+                if hasattr(base, "post_c_logits") and isinstance(base.post_c_logits, torch.nn.Linear):
+                    dist.broadcast(base.post_c_logits.weight.data, src=0)
+                    dist.broadcast(base.post_c_logits.bias.data, src=0)
+                gmm_init_done = bool(flag.item())
+                if is_main_process(rank):
+                    log(f"[GMMInit] broadcast done, enabled={gmm_init_done}")
+            else:
+                log(f"[GMMInit] Triggered at {tag}")
+                gmm_init_done = bool(
+                    init_gmm_from_encoder_latent(
+                        model=model,
+                        train_loader=train_loader,
+                        train_sampler=train_sampler,
+                        device=device,
+                        num_components=args.num_components,
+                        max_samples=args.gmm_init_max_samples,
+                        max_batches=args.gmm_init_max_batches,
+                        iters=args.gmm_init_iters,
+                        seed=args.seed,
+                        prior_logvar_min=args.prior_logvar_min,
+                        prior_logvar_max=args.prior_logvar_max,
+                        log_fn=log,
+                    )
+                )
 
         loss_full, loss_recon, loss_kl, loss_score, loss_contrast, loss_cov = train_gmm_vae_one_epoch(
             model=model,

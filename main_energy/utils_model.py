@@ -404,6 +404,7 @@ class MaskFiLMGMMVAE(nn.Module):
         rate = gene_probs * library_size
         out = {
             "mu": mu,
+            "mu_base": mu_enc,
             "logvar": logvar,
             "z": z,
             "library_size": library_size,

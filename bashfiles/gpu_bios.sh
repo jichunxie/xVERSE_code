@@ -45,7 +45,7 @@ stdbuf -oL -eL torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" -m mai
     --val-num-workers 5 \
     --prefetch-factor 8 \
     --samples-per-id 500 \
-    --lr 1e-4 \
+    --lr 5e-4 \
     --weight-decay 1e-5 \
     --prior-type gmm \
     --latent-dim 128 \
@@ -59,6 +59,10 @@ stdbuf -oL -eL torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" -m mai
     --dec-hidden-dim 1536 \
     --beta-kl 0.1 \
     --beta-kl-warmup-epochs 0 \
+    --gmm-init-after-epochs 5 \
+    --gmm-init-max-samples 200000 \
+    --gmm-init-max-batches 300 \
+    --gmm-init-iters 30 \
     --recon-observed-only \
     --mask-aug-prob 1.0 \
     --mask-aug-policy xverse \

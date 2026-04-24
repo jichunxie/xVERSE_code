@@ -60,6 +60,10 @@ stdbuf -oL -eL torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" -m mai
     --dec-hidden-dim 1536 \
     --beta-kl 0.1 \
     --beta-kl-warmup-epochs 0 \
+    --gmm-init-after-epochs 5 \
+    --gmm-init-max-samples 200000 \
+    --gmm-init-max-batches 300 \
+    --gmm-init-iters 30 \
     --recon-observed-only \
     --mask-aug-prob 1.0 \
     --mask-aug-policy xverse \
