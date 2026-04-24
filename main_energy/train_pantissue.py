@@ -260,6 +260,18 @@ def _set_requires_grad(module, enabled: bool):
         p.requires_grad = bool(enabled)
 
 
+def _get_last_linear(module):
+    if module is None:
+        return None
+    if isinstance(module, torch.nn.Linear):
+        return module
+    last = None
+    for m in module.modules():
+        if isinstance(m, torch.nn.Linear):
+            last = m
+    return last
+
+
 def _apply_training_stage(base_model, stage: str):
     """
     stage:
@@ -385,11 +397,14 @@ def init_gmm_from_encoder_latent(
     if getattr(base.prior, "prior_factor", None) is not None:
         base.prior.prior_factor.data.zero_()
 
-    # Initialize q(c|x) head bias from component prior weights.
-    if hasattr(base, "post_c_logits") and isinstance(base.post_c_logits, torch.nn.Linear):
-        with torch.no_grad():
-            base.post_c_logits.weight.zero_()
-            base.post_c_logits.bias.copy_(pi_logits.to(base.post_c_logits.bias.dtype))
+    # Initialize q(c|x) head from prior weights.
+    if hasattr(base, "post_c_logits") and base.post_c_logits is not None:
+        last_linear = _get_last_linear(base.post_c_logits)
+        if last_linear is not None:
+            with torch.no_grad():
+                for p in base.post_c_logits.parameters():
+                    p.zero_()
+                last_linear.bias.copy_(pi_logits.to(last_linear.bias.dtype))
 
     log_fn(
         f"[GMMInit] done: samples={seen}, K={num_components}, "
@@ -810,9 +825,9 @@ def main():
                 dist.broadcast(base.prior.prior_logvar.data, src=0)
                 if getattr(base.prior, "prior_factor", None) is not None:
                     dist.broadcast(base.prior.prior_factor.data, src=0)
-                if hasattr(base, "post_c_logits") and isinstance(base.post_c_logits, torch.nn.Linear):
-                    dist.broadcast(base.post_c_logits.weight.data, src=0)
-                    dist.broadcast(base.post_c_logits.bias.data, src=0)
+                if hasattr(base, "post_c_logits") and base.post_c_logits is not None:
+                    for p in base.post_c_logits.parameters():
+                        dist.broadcast(p.data, src=0)
                 gmm_init_done = bool(flag.item())
                 if is_main_process(rank):
                     log(f"[GMMInit] broadcast done, enabled={gmm_init_done}")

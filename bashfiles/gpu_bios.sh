@@ -36,7 +36,7 @@ stdbuf -oL -eL torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" -m mai
     --compiled-max-cached-shards 4092 \
     --sampler-shard-reorder-window 4096 \
     --sampler-active-shards 16 \
-    --result-dir "/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_all_tissue_h200_cls" \
+    --result-dir "/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_all_tissue_h200_simple" \
     --num-epochs 100 \
     --val-every 10 \
     --batch-size 1024 \
@@ -54,9 +54,9 @@ stdbuf -oL -eL torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" -m mai
     --posterior-cov-rank 4 \
     --prior-logvar-min -4 \
     --prior-logvar-max 2 \
-    --expr-hidden-dim 1536 \
+    --expr-hidden-dim 512 \
     --mask-hidden-dim 512 \
-    --dec-hidden-dim 1536 \
+    --dec-hidden-dim 512 \
     --beta-kl 0.1 \
     --beta-kl-start 0.1 \
     --beta-kl-end 0.1 \
@@ -83,7 +83,7 @@ stdbuf -oL -eL torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" -m mai
     --lambda-prior-factor-l2 5e-4 \
     --lambda-prior-pi-balance 0.5 \
     --lambda-celltype-cls 1 \
-    --resp-temperature 1.5 \
+    --resp-temperature 1 \
     --resp-temperature-start 2.0 \
     --resp-temperature-warmup-epochs 10 \
     --score-noise-std 0.1 \

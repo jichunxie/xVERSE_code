@@ -339,15 +339,43 @@ class MaskFiLMGMMVAE(nn.Module):
         self.latent_dim = int(latent_dim)
         self.posterior_cov_rank = max(0, int(posterior_cov_rank))
         if self.prior_type == "gmm":
-            self.post_c_logits = nn.Linear(expr_hidden_dim, num_components)
-            self.post_mu = nn.Linear(expr_hidden_dim, num_components * latent_dim)
-            self.post_logvar = nn.Linear(expr_hidden_dim, num_components * latent_dim)
+            post_hidden = max(64, int(expr_hidden_dim) // 2)
+            self.post_c_logits = MLP(
+                input_dim=expr_hidden_dim,
+                hidden_dims=[post_hidden],
+                output_dim=num_components,
+                dropout=dropout,
+            )
+            self.post_mu = MLP(
+                input_dim=expr_hidden_dim,
+                hidden_dims=[post_hidden],
+                output_dim=num_components * latent_dim,
+                dropout=dropout,
+            )
+            self.post_logvar = MLP(
+                input_dim=expr_hidden_dim,
+                hidden_dims=[post_hidden],
+                output_dim=num_components * latent_dim,
+                dropout=dropout,
+            )
             if self.posterior_cov_rank > 0:
-                self.post_factor = nn.Linear(expr_hidden_dim, num_components * latent_dim * self.posterior_cov_rank)
+                self.post_factor = MLP(
+                    input_dim=expr_hidden_dim,
+                    hidden_dims=[post_hidden],
+                    output_dim=num_components * latent_dim * self.posterior_cov_rank,
+                    dropout=dropout,
+                )
             else:
                 self.post_factor = None
         # Library-size head from latent z.
-        self.library_head = nn.Linear(latent_dim, 1)
+        lib_hidden = max(32, int(latent_dim) // 2)
+        self.library_head = nn.Sequential(
+            nn.LayerNorm(latent_dim),
+            nn.Linear(latent_dim, lib_hidden),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(lib_hidden, 1),
+        )
         self.score_head = MLP(
             input_dim=latent_dim,
             hidden_dims=[dec_hidden_dim, dec_hidden_dim],
@@ -356,7 +384,13 @@ class MaskFiLMGMMVAE(nn.Module):
         )
         self.num_cell_types = max(0, int(num_cell_types))
         if self.num_cell_types > 0:
-            self.celltype_head = nn.Linear(latent_dim, self.num_cell_types)
+            self.celltype_head = nn.Sequential(
+                nn.LayerNorm(latent_dim),
+                nn.Linear(latent_dim, 64),
+                nn.GELU(),
+                nn.Dropout(0.2),
+                nn.Linear(64, self.num_cell_types),
+            )
         else:
             self.celltype_head = None
 
