@@ -157,6 +157,8 @@ def parse_args():
                         help="L2 regularization weight for GMM prior means prior_mu.")
     parser.add_argument("--lambda-prior-factor-l2", type=float, default=0.0,
                         help="L2 regularization weight for GMM prior low-rank factors prior_factor.")
+    parser.add_argument("--lambda-prior-pi-balance", type=float, default=0.0,
+                        help="Regularization weight for prior mixture weights toward uniform (KL(pi || uniform)).")
     parser.add_argument("--resp-temperature", type=float, default=1.0,
                         help="Temperature for posterior responsibilities used by entropy regularization (>1 softens).")
     parser.add_argument("--resp-temperature-start", type=float, default=None,
@@ -819,6 +821,7 @@ def main():
             prior_logvar_max=args.prior_logvar_max,
             lambda_prior_mu_l2=args.lambda_prior_mu_l2,
             lambda_prior_factor_l2=args.lambda_prior_factor_l2,
+            lambda_prior_pi_balance=args.lambda_prior_pi_balance,
             force_base_posterior=phase1_force_base_posterior,
         )
         train_msg = (
@@ -855,6 +858,7 @@ def main():
                 prior_logvar_max=args.prior_logvar_max,
                 lambda_prior_mu_l2=args.lambda_prior_mu_l2,
                 lambda_prior_factor_l2=args.lambda_prior_factor_l2,
+                lambda_prior_pi_balance=args.lambda_prior_pi_balance,
                 force_base_posterior=phase1_force_base_posterior,
             )
             val_msg = (

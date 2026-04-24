@@ -45,7 +45,7 @@ stdbuf -oL -eL torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" -m mai
     --val-num-workers 5 \
     --prefetch-factor 8 \
     --samples-per-id 500 \
-    --lr 1e-4 \
+    --lr 5e-4 \
     --weight-decay 1e-5 \
     --prior-type gmm \
     --latent-dim 128 \
@@ -61,8 +61,8 @@ stdbuf -oL -eL torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" -m mai
     --beta-kl-start 0.1 \
     --beta-kl-end 0.1 \
     --beta-kl-warmup-epochs 0 \
-    --gmm-init-after-epochs 10 \
-    --gmm-stage2-epochs 5 \
+    --gmm-init-after-epochs 5 \
+    --gmm-stage2-epochs 0 \
     --gmm-post-init-kl-warmup-epochs 0 \
     --gmm-init-max-samples 200000 \
     --gmm-init-max-batches 300 \
@@ -81,6 +81,7 @@ stdbuf -oL -eL torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" -m mai
     --lambda-resp-anchor 0.0 \
     --lambda-prior-mu-l2 1e-4 \
     --lambda-prior-factor-l2 5e-4 \
+    --lambda-prior-pi-balance 0.1 \
     --resp-temperature 1.5 \
     --resp-temperature-start 2.0 \
     --resp-temperature-warmup-epochs 10 \
