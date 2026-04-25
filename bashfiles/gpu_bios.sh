@@ -42,7 +42,7 @@ stdbuf -oL -eL torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" -m mai
     --compiled-dataset-root "${COMPILED_ROOT}" \
     --compiled-max-cached-shards 4092 \
     --sampler-shard-reorder-window 4096 \
-    --sampler-active-shards 32 \
+    --sampler-active-shards 16 \
     --result-dir "${RESULT_DIR}" \
     --num-epochs 100 \
     --val-every 5 \
@@ -56,7 +56,7 @@ stdbuf -oL -eL torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" -m mai
     --weight-decay 1e-5 \
     --prior-type gmm \
     --latent-dim 128 \
-    --num-components 16 \
+    --num-components 32 \
     --prior-cov-rank 4 \
     --posterior-cov-rank 4 \
     --prior-logvar-min -2 \
@@ -64,11 +64,11 @@ stdbuf -oL -eL torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" -m mai
     --expr-hidden-dim 512 \
     --mask-hidden-dim 512 \
     --dec-hidden-dim 512 \
-    --beta-kl 0.1 \
+    --beta-kl 0.01 \
     --beta-kl-start 0.1 \
     --beta-kl-end 0.1 \
     --beta-kl-warmup-epochs 0 \
-    --gmm-init-after-epochs 0 \
+    --gmm-init-after-epochs 1 \
     --gmm-stage2-epochs 0 \
     --gmm-post-init-kl-warmup-epochs 0 \
     --gmm-init-max-samples 200000 \
