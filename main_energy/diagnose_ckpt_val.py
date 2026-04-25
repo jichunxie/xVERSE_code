@@ -32,6 +32,28 @@ def _get(a, k, d):
     return getattr(a, k, d)
 
 
+def _normalize_state_keys_for_model(state_dict, model_state_keys):
+    """Try to align checkpoint keys with current model keys by toggling 'module.' prefix."""
+    model_has_module = any(k.startswith("module.") for k in model_state_keys)
+    ckpt_has_module = any(k.startswith("module.") for k in state_dict.keys())
+
+    if model_has_module == ckpt_has_module:
+        return state_dict, "none"
+
+    if ckpt_has_module and not model_has_module:
+        remap = {}
+        for k, v in state_dict.items():
+            if k.startswith("module."):
+                remap[k[len("module."):]] = v
+            else:
+                remap[k] = v
+        return remap, "strip_module"
+
+    # not ckpt_has_module and model_has_module
+    remap = {f"module.{k}": v for k, v in state_dict.items()}
+    return remap, "add_module"
+
+
 def _stage_and_weights(a, epoch_id: int):
     beta_end = _get(a, "beta_kl", 1.0) if _get(a, "beta_kl_end", None) is None else _get(a, "beta_kl_end", 1.0)
     beta_t = beta_end
@@ -201,8 +223,17 @@ def main():
         prior_type=str(_get(saved, "prior_type", "gmm")),
         num_cell_types=num_cell_types,
     ).to(device)
-    ret = model.load_state_dict(ckpt["model_state_dict"], strict=False)
-    print(f"[Load] ckpt={args.ckpt}, epoch={ckpt_epoch}, missing={len(ret.missing_keys)}, unexpected={len(ret.unexpected_keys)}")
+    state = ckpt["model_state_dict"]
+    normalized_state, strategy = _normalize_state_keys_for_model(state, model.state_dict().keys())
+    ret = model.load_state_dict(normalized_state, strict=False)
+    print(
+        f"[Load] ckpt={args.ckpt}, epoch={ckpt_epoch}, key_strategy={strategy}, "
+        f"missing={len(ret.missing_keys)}, unexpected={len(ret.unexpected_keys)}"
+    )
+    if ret.missing_keys:
+        print(f"[Load][Missing] sample={ret.missing_keys[:8]}")
+    if ret.unexpected_keys:
+        print(f"[Load][Unexpected] sample={ret.unexpected_keys[:8]}")
 
     sched = _stage_and_weights(saved, ckpt_epoch)
     print(
