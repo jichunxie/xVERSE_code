@@ -42,7 +42,7 @@ stdbuf -oL -eL torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" -m mai
     --compiled-dataset-root "${COMPILED_ROOT}" \
     --compiled-max-cached-shards 4092 \
     --sampler-shard-reorder-window 4096 \
-    --sampler-active-shards 16 \
+    --sampler-active-shards 32 \
     --result-dir "${RESULT_DIR}" \
     --num-epochs 100 \
     --val-every 5 \
@@ -59,8 +59,8 @@ stdbuf -oL -eL torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" -m mai
     --num-components 16 \
     --prior-cov-rank 4 \
     --posterior-cov-rank 4 \
-    --prior-logvar-min -10 \
-    --prior-logvar-max 10 \
+    --prior-logvar-min -2 \
+    --prior-logvar-max 2 \
     --expr-hidden-dim 512 \
     --mask-hidden-dim 512 \
     --dec-hidden-dim 512 \
