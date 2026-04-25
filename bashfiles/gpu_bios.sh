@@ -65,8 +65,8 @@ stdbuf -oL -eL torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" -m mai
     --mask-hidden-dim 512 \
     --dec-hidden-dim 512 \
     --beta-kl 0.01 \
-    --beta-kl-start 0.1 \
-    --beta-kl-end 0.1 \
+    --beta-kl-start 0.01 \
+    --beta-kl-end 0.01 \
     --beta-kl-warmup-epochs 0 \
     --gmm-init-after-epochs 1 \
     --gmm-stage2-epochs 0 \
@@ -81,7 +81,7 @@ stdbuf -oL -eL torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" -m mai
     --mask-aug-max-frac 0.25 \
     --lambda-score 0 \
     --lambda-cov 0 \
-    --lambda-resp-balance 0 \
+    --lambda-resp-balance 1 \
     --lambda-resp-balance-warmup-epochs 0 \
     --lambda-resp-confidence 0 \
     --lambda-resp-confidence-warmup-epochs 0 \
