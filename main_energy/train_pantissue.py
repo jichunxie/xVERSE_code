@@ -925,6 +925,10 @@ def main():
                 lambda_prior_factor_l2=args.lambda_prior_factor_l2,
                 lambda_prior_pi_balance=args.lambda_prior_pi_balance,
                 lambda_celltype_cls=args.lambda_celltype_cls,
+                mask_aug_prob=args.mask_aug_prob,
+                mask_aug_policy=args.mask_aug_policy,
+                mask_aug_min_frac=args.mask_aug_min_frac,
+                mask_aug_max_frac=args.mask_aug_max_frac,
                 force_base_posterior=phase1_force_base_posterior,
             )
             val_msg = (

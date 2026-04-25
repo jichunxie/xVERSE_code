@@ -1150,6 +1150,10 @@ def evaluate_gmm_vae_one_epoch(
     lambda_prior_factor_l2=0.0,
     lambda_prior_pi_balance=0.0,
     lambda_celltype_cls=0.0,
+    mask_aug_prob=1.0,
+    mask_aug_policy="xverse",
+    mask_aug_min_frac=0.1,
+    mask_aug_max_frac=0.5,
     force_base_posterior=False,
 ):
     model.eval()
@@ -1169,12 +1173,24 @@ def evaluate_gmm_vae_one_epoch(
             n_cells += bsz
 
             out_fake = loss_fn(
+                # In validation, when contrastive term is enabled, build a fake-mask view
+                # on the fly while keeping reconstruction evaluated on the real observed mask.
                 x_count=x_count,
                 x_mask=x_mask,
                 celltype_id=celltype_id,
                 force_base_posterior=force_base_posterior,
                 beta=beta_kl,
-                encoder_mask=x_mask_encoder,
+                encoder_mask=(
+                    _random_hide_observed(
+                        x_mask=x_mask,
+                        apply_prob=mask_aug_prob,
+                        policy=mask_aug_policy,
+                        min_frac=mask_aug_min_frac,
+                        max_frac=mask_aug_max_frac,
+                    )
+                    if ((lambda_contrast > 0) or (lambda_real_recon > 0))
+                    else x_mask_encoder
+                ),
                 recon_mask=x_mask if recon_observed_only else None,
                 lambda_score=lambda_score,
                 score_noise_std=score_noise_std,
