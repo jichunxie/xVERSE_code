@@ -1,10 +1,18 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import sys
 from types import SimpleNamespace
+from pathlib import Path
 
 import torch
 from torch.utils.data import DataLoader
+
+# Make "main_energy" importable when running this file directly by path.
+THIS_FILE = Path(__file__).resolve()
+REPO_ROOT = THIS_FILE.parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from main_energy.train_pantissue import _linear_warmup_scale
 from main_energy.utils_model import (
