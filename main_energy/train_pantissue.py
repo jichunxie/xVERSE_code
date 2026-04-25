@@ -159,6 +159,10 @@ def parse_args():
                         help="L2 regularization weight for GMM prior low-rank factors prior_factor.")
     parser.add_argument("--lambda-prior-pi-balance", type=float, default=0.0,
                         help="Regularization weight for prior mixture weights toward uniform (KL(pi || uniform)).")
+    parser.add_argument("--lambda-prior-logvar-l2", type=float, default=0.0,
+                        help="L2 regularization weight for prior_logvar toward --prior-logvar-target.")
+    parser.add_argument("--prior-logvar-target", type=float, default=-2.0,
+                        help="Target value used by prior_logvar L2 regularization.")
     parser.add_argument("--num-cell-types", type=int, default=0,
                         help="Number of supervised cell types for auxiliary classification head. <=0 means auto infer from dataset.")
     parser.add_argument("--lambda-celltype-cls", type=float, default=0.0,
@@ -881,6 +885,8 @@ def main():
             lambda_prior_factor_l2=args.lambda_prior_factor_l2,
             lambda_prior_pi_balance=args.lambda_prior_pi_balance,
             lambda_celltype_cls=args.lambda_celltype_cls,
+            lambda_prior_logvar_l2=args.lambda_prior_logvar_l2,
+            prior_logvar_target=args.prior_logvar_target,
             force_base_posterior=phase1_force_base_posterior,
         )
         train_msg = (
@@ -925,6 +931,8 @@ def main():
                 lambda_prior_factor_l2=args.lambda_prior_factor_l2,
                 lambda_prior_pi_balance=args.lambda_prior_pi_balance,
                 lambda_celltype_cls=args.lambda_celltype_cls,
+                lambda_prior_logvar_l2=args.lambda_prior_logvar_l2,
+                prior_logvar_target=args.prior_logvar_target,
                 mask_aug_prob=args.mask_aug_prob,
                 mask_aug_policy=args.mask_aug_policy,
                 mask_aug_min_frac=args.mask_aug_min_frac,

@@ -100,8 +100,8 @@ class GaussianMixturePrior(nn.Module):
         self.D = latent_dim
         self.R = max(0, int(cov_rank))
         self.pi_logits = nn.Parameter(torch.zeros(num_components))
-        self.prior_mu = nn.Parameter(torch.randn(num_components, latent_dim) * 0.01)
-        self.prior_logvar = nn.Parameter(torch.zeros(num_components, latent_dim))
+        self.prior_mu = nn.Parameter(torch.randn(num_components, latent_dim))
+        self.prior_logvar = nn.Parameter(torch.full((num_components, latent_dim), -2.0))
         if self.R > 0:
             self.prior_factor = nn.Parameter(torch.randn(num_components, latent_dim, self.R) * 0.01)
         else:
@@ -498,6 +498,8 @@ class MaskFiLMGMMVAE(nn.Module):
         lambda_prior_factor_l2: float = 0.0,
         lambda_prior_pi_balance: float = 0.0,
         lambda_celltype_cls: float = 0.0,
+        lambda_prior_logvar_l2: float = 0.0,
+        prior_logvar_target: float = -2.0,
     ) -> Dict[str, torch.Tensor]:
         if encoder_mask is None:
             encoder_mask = x_mask
@@ -564,6 +566,7 @@ class MaskFiLMGMMVAE(nn.Module):
         prior_factor_l2_loss = torch.zeros((), device=z.device, dtype=z.dtype)
         prior_pi_balance_loss = torch.zeros((), device=z.device, dtype=z.dtype)
         celltype_cls_loss = torch.zeros((), device=z.device, dtype=z.dtype)
+        prior_logvar_l2_loss = torch.zeros((), device=z.device, dtype=z.dtype)
 
         if lambda_score > 0:
             z_for_score = z.detach() if score_detach_z else z
@@ -623,6 +626,9 @@ class MaskFiLMGMMVAE(nn.Module):
                 target,
                 reduction="sum",
             ).to(z.dtype)
+        if self.prior_type == "gmm" and lambda_prior_logvar_l2 > 0:
+            tgt = torch.full_like(self.prior.prior_logvar, float(prior_logvar_target)).float()
+            prior_logvar_l2_loss = F.mse_loss(self.prior.prior_logvar.float(), tgt).to(z.dtype)
         if lambda_celltype_cls > 0 and celltype_id is not None and self.celltype_head is not None:
             ct = celltype_id.view(-1).to(z.device).long()
             valid = ct >= 0
@@ -651,6 +657,8 @@ class MaskFiLMGMMVAE(nn.Module):
             total_loss = total_loss + float(lambda_prior_pi_balance) * prior_pi_balance_loss
         if float(lambda_celltype_cls) != 0.0:
             total_loss = total_loss + float(lambda_celltype_cls) * celltype_cls_loss
+        if float(lambda_prior_logvar_l2) != 0.0:
+            total_loss = total_loss + float(lambda_prior_logvar_l2) * prior_logvar_l2_loss
 
         return {
             "loss": total_loss,
@@ -669,6 +677,7 @@ class MaskFiLMGMMVAE(nn.Module):
             "prior_factor_l2_loss": prior_factor_l2_loss,
             "prior_pi_balance_loss": prior_pi_balance_loss,
             "celltype_cls_loss": celltype_cls_loss,
+            "prior_logvar_l2_loss": prior_logvar_l2_loss,
             "score_norm_pred": score_norm_pred,
             "score_norm_tgt": score_norm_tgt,
             "log_q_mean": log_q.mean(),
@@ -958,6 +967,8 @@ def train_gmm_vae_one_epoch(
     lambda_prior_factor_l2=0.0,
     lambda_prior_pi_balance=0.0,
     lambda_celltype_cls=0.0,
+    lambda_prior_logvar_l2=0.0,
+    prior_logvar_target=-2.0,
     force_base_posterior=False,
 ):
     model.train()
@@ -1001,6 +1012,8 @@ def train_gmm_vae_one_epoch(
                 lambda_prior_factor_l2=lambda_prior_factor_l2,
                 lambda_prior_pi_balance=lambda_prior_pi_balance,
                 lambda_celltype_cls=lambda_celltype_cls,
+                lambda_prior_logvar_l2=lambda_prior_logvar_l2,
+                prior_logvar_target=prior_logvar_target,
             )
             need_real_view = (lambda_contrast > 0) or (lambda_real_recon > 0)
             real_recon = torch.zeros((), device=x_count.device, dtype=out_fake["z"].dtype)
@@ -1029,6 +1042,8 @@ def train_gmm_vae_one_epoch(
                     lambda_prior_factor_l2=0.0,
                     lambda_prior_pi_balance=0.0,
                     lambda_celltype_cls=0.0,
+                    lambda_prior_logvar_l2=0.0,
+                    prior_logvar_target=prior_logvar_target,
                 )
                 real_recon = out_real["recon_loss"]
             if lambda_contrast > 0:
@@ -1150,6 +1165,8 @@ def evaluate_gmm_vae_one_epoch(
     lambda_prior_factor_l2=0.0,
     lambda_prior_pi_balance=0.0,
     lambda_celltype_cls=0.0,
+    lambda_prior_logvar_l2=0.0,
+    prior_logvar_target=-2.0,
     mask_aug_prob=1.0,
     mask_aug_policy="xverse",
     mask_aug_min_frac=0.1,
@@ -1208,6 +1225,8 @@ def evaluate_gmm_vae_one_epoch(
                 lambda_prior_factor_l2=lambda_prior_factor_l2,
                 lambda_prior_pi_balance=lambda_prior_pi_balance,
                 lambda_celltype_cls=lambda_celltype_cls,
+                lambda_prior_logvar_l2=lambda_prior_logvar_l2,
+                prior_logvar_target=prior_logvar_target,
             )
             need_real_view = (lambda_contrast > 0) or (lambda_real_recon > 0)
             real_recon = torch.zeros((), device=x_count.device, dtype=out_fake["z"].dtype)
@@ -1236,6 +1255,8 @@ def evaluate_gmm_vae_one_epoch(
                     lambda_prior_factor_l2=0.0,
                     lambda_prior_pi_balance=0.0,
                     lambda_celltype_cls=0.0,
+                    lambda_prior_logvar_l2=0.0,
+                    prior_logvar_target=prior_logvar_target,
                 )
                 real_recon = out_real["recon_loss"]
             if lambda_contrast > 0:
