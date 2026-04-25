@@ -76,7 +76,7 @@ stdbuf -oL -eL torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" -m mai
     --gmm-init-iters 30 \
     --recon-observed-only \
     --mask-aug-prob 1.0 \
-    --mask-aug-policy xverse \
+    --mask-aug-policy simple \
     --mask-aug-min-frac 0.05 \
     --mask-aug-max-frac 0.25 \
     --lambda-score 0 \
