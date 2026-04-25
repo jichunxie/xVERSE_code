@@ -81,14 +81,14 @@ stdbuf -oL -eL torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" -m mai
     --mask-aug-max-frac 0.25 \
     --lambda-score 0 \
     --lambda-cov 0 \
-    --lambda-resp-balance 1 \
+    --lambda-resp-balance 0 \
     --lambda-resp-balance-warmup-epochs 0 \
     --lambda-resp-confidence 0 \
     --lambda-resp-confidence-warmup-epochs 0 \
     --lambda-resp-anchor 0.0 \
     --lambda-prior-mu-l2 0 \
     --lambda-prior-factor-l2 0 \
-    --lambda-prior-pi-balance 0.1 \
+    --lambda-prior-pi-balance 0 \
     --lambda-prior-logvar-l2 0 \
     --prior-logvar-target -2 \
     --lambda-celltype-cls 1 \
