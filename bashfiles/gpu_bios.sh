@@ -68,7 +68,7 @@ stdbuf -oL -eL torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" -m mai
     --beta-kl-start 0.1 \
     --beta-kl-end 0.1 \
     --beta-kl-warmup-epochs 0 \
-    --gmm-init-after-epochs 0 \
+    --gmm-init-after-epochs 1 \
     --gmm-stage2-epochs 0 \
     --gmm-post-init-kl-warmup-epochs 0 \
     --gmm-init-max-samples 200000 \
