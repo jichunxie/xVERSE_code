@@ -101,7 +101,7 @@ class GaussianMixturePrior(nn.Module):
         self.R = max(0, int(cov_rank))
         self.pi_logits = nn.Parameter(torch.zeros(num_components))
         self.prior_mu = nn.Parameter(torch.randn(num_components, latent_dim))
-        self.prior_logvar = nn.Parameter(torch.full((num_components, latent_dim), -2.0))
+        self.prior_logvar = nn.Parameter(torch.zeros(num_components, latent_dim))
         if self.R > 0:
             self.prior_factor = nn.Parameter(torch.randn(num_components, latent_dim, self.R) * 0.01)
         else:
