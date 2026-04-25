@@ -40,7 +40,7 @@ echo ">>> RESULT_DIR=${RESULT_DIR}"
 
 stdbuf -oL -eL torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" -m main_energy.train_pantissue \
     --compiled-dataset-root "${COMPILED_ROOT}" \
-    --compiled-max-cached-shards 256 \
+    --compiled-max-cached-shards 4092 \
     --sampler-shard-reorder-window 4096 \
     --sampler-active-shards 16 \
     --result-dir "${RESULT_DIR}" \
@@ -50,9 +50,9 @@ stdbuf -oL -eL torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" -m mai
     --val-batch-size 1024 \
     --num-workers 8 \
     --val-num-workers 5 \
-    --prefetch-factor 4 \
+    --prefetch-factor 8 \
     --samples-per-id 500 \
-    --lr 1e-4 \
+    --lr 5e-4 \
     --weight-decay 1e-5 \
     --prior-type gmm \
     --latent-dim 128 \
@@ -68,7 +68,7 @@ stdbuf -oL -eL torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" -m mai
     --beta-kl-start 0.1 \
     --beta-kl-end 0.1 \
     --beta-kl-warmup-epochs 0 \
-    --gmm-init-after-epochs 10 \
+    --gmm-init-after-epochs 0 \
     --gmm-stage2-epochs 0 \
     --gmm-post-init-kl-warmup-epochs 0 \
     --gmm-init-max-samples 200000 \
@@ -81,20 +81,20 @@ stdbuf -oL -eL torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" -m mai
     --mask-aug-max-frac 0.25 \
     --lambda-score 0 \
     --lambda-cov 0 \
-    --lambda-resp-balance 0.1 \
+    --lambda-resp-balance 0 \
     --lambda-resp-balance-warmup-epochs 0 \
     --lambda-resp-confidence 0 \
     --lambda-resp-confidence-warmup-epochs 0 \
     --lambda-resp-anchor 0.0 \
     --lambda-prior-mu-l2 0 \
     --lambda-prior-factor-l2 0 \
-    --lambda-prior-pi-balance 0.1 \
-    --lambda-celltype-cls 0.1 \
+    --lambda-prior-pi-balance 0 \
+    --lambda-celltype-cls 1 \
     --resp-temperature 1 \
     --resp-temperature-start 1 \
     --resp-temperature-warmup-epochs 0 \
     --score-noise-std 0.1 \
-    --lambda-contrast 0.02 \
+    --lambda-contrast 1 \
     --lambda-real-recon 0.0 \
     --contrast-temp 0.1
 
