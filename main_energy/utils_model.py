@@ -629,7 +629,7 @@ class MaskFiLMGMMVAE(nn.Module):
             if valid.any():
                 logits = out["celltype_logits"][valid]
                 tgt = ct[valid]
-                celltype_cls_loss = F.cross_entropy(logits, tgt).to(z.dtype)
+                celltype_cls_loss = F.cross_entropy(logits, tgt, label_smoothing=0.05).to(z.dtype)
 
         # Build total loss with explicit gating to avoid 0 * inf -> nan when a term is disabled.
         total_loss = recon_loss
