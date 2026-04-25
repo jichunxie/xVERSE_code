@@ -796,14 +796,12 @@ def main():
         train_sampler.set_epoch(epoch_id)
         if val_sampler is not None:
             val_sampler.set_epoch(epoch_id)
-        gmm_init_triggered_this_epoch = False
         if (
             args.prior_type == "gmm"
             and int(args.gmm_init_after_epochs) > 0
             and (not gmm_init_done)
             and epoch_id == int(args.gmm_init_after_epochs) + 1
         ):
-            gmm_init_triggered_this_epoch = True
             tag = f"epoch-{epoch_id}-start"
             inited = False
             if ddp_enabled:
@@ -900,14 +898,10 @@ def main():
             train_msg += f", Contrast={loss_contrast:.4f}"
         log(train_msg)
 
-        do_val_stage1_end = bool(phase1_epochs > 0 and epoch_id == phase1_epochs)
-        do_val_after_gmm_init = bool(gmm_init_triggered_this_epoch)
         do_val = (
             (int(args.val_every) <= 1)
             or (epoch_id % int(args.val_every) == 0)
             or (epoch_id == args.num_epochs)
-            or do_val_stage1_end
-            or do_val_after_gmm_init
         )
         if do_val:
             val_loss_full, val_loss_recon, val_loss_kl, val_loss_score, val_loss_contrast, val_loss_cov, val_loss_prior_pi_balance, val_loss_celltype_cls = evaluate_gmm_vae_one_epoch(
