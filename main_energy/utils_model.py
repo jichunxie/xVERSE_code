@@ -107,11 +107,15 @@ class GaussianMixturePrior(nn.Module):
         else:
             self.register_parameter("prior_factor", None)
 
-    def _cache_matrices(self):
+    def _cache_matrices(self, logvar_min: float = None, logvar_max: float = None):
         device_type = self.prior_mu.device.type
         with torch.amp.autocast(device_type=device_type, enabled=False):
             # (K, D)
             logvar = self.prior_logvar.float()
+            if logvar_min is not None or logvar_max is not None:
+                min_v = float("-inf") if logvar_min is None else float(logvar_min)
+                max_v = float("inf") if logvar_max is None else float(logvar_max)
+                logvar = torch.clamp(logvar, min=min_v, max=max_v)
             d_inv = torch.exp(-logvar)
             logdet_base = logvar.sum(dim=-1)  # (K,)
 
@@ -142,14 +146,14 @@ class GaussianMixturePrior(nn.Module):
                 "logdet_extra": logdet_extra,
             }
 
-    def component_log_prob(self, z: torch.Tensor) -> torch.Tensor:
+    def component_log_prob(self, z: torch.Tensor, logvar_min: float = None, logvar_max: float = None) -> torch.Tensor:
         device_type = z.device.type
         with torch.amp.autocast(device_type=device_type, enabled=False):
             z_exp = z.float().unsqueeze(1)  # (B, 1, D)
             mu = self.prior_mu.float().unsqueeze(0)  # (1, K, D)
             delta = z_exp - mu  # (B, K, D)
 
-            cache = self._cache_matrices()
+            cache = self._cache_matrices(logvar_min=logvar_min, logvar_max=logvar_max)
             d_inv = cache["d_inv"].unsqueeze(0)  # (1, K, D)
             delta_d = delta * d_inv  # (B, K, D)
             quad = (delta * delta_d).sum(dim=-1)  # (B, K)
@@ -167,7 +171,7 @@ class GaussianMixturePrior(nn.Module):
             out = -0.5 * (quad + log_det.unsqueeze(0) + log_norm)
         return out
 
-    def component_log_prob_aligned(self, z_comp: torch.Tensor) -> torch.Tensor:
+    def component_log_prob_aligned(self, z_comp: torch.Tensor, logvar_min: float = None, logvar_max: float = None) -> torch.Tensor:
         """
         Aligned component log-probability for z sampled per component.
         Input:
@@ -185,7 +189,7 @@ class GaussianMixturePrior(nn.Module):
             mu = self.prior_mu.float().unsqueeze(0)  # (1, K, D)
             delta = zc - mu  # (B, K, D)
 
-            cache = self._cache_matrices()
+            cache = self._cache_matrices(logvar_min=logvar_min, logvar_max=logvar_max)
             d_inv = cache["d_inv"].unsqueeze(0)  # (1, K, D)
             delta_d = delta * d_inv  # (B, K, D)
             quad = (delta * delta_d).sum(dim=-1)  # (B, K)
@@ -202,9 +206,9 @@ class GaussianMixturePrior(nn.Module):
             out = -0.5 * (quad + log_det.unsqueeze(0) + log_norm)
         return out
 
-    def log_prob(self, z: torch.Tensor, topk: int = 0) -> torch.Tensor:
+    def log_prob(self, z: torch.Tensor, topk: int = 0, logvar_min: float = None, logvar_max: float = None) -> torch.Tensor:
         log_weights = F.log_softmax(self.pi_logits, dim=0).unsqueeze(0)  # (1, K)
-        log_comp = self.component_log_prob(z)  # (B, K)
+        log_comp = self.component_log_prob(z, logvar_min=logvar_min, logvar_max=logvar_max)  # (B, K)
         logits = log_weights + log_comp
         k = int(topk)
         if k > 0 and k < logits.size(1):
@@ -212,7 +216,7 @@ class GaussianMixturePrior(nn.Module):
             return torch.logsumexp(top_vals, dim=1)
         return torch.logsumexp(logits, dim=1)
 
-    def score(self, z: torch.Tensor) -> torch.Tensor:
+    def score(self, z: torch.Tensor, logvar_min: float = None, logvar_max: float = None) -> torch.Tensor:
         """
         Analytic score of GMM prior: grad_z log p(z), shape (B, D).
         """
@@ -221,12 +225,12 @@ class GaussianMixturePrior(nn.Module):
             z_exp = z.float().unsqueeze(1)  # (B, 1, D)
             mu = self.prior_mu.float().unsqueeze(0)  # (1, K, D)
             delta = z_exp - mu  # (B, K, D)
-            cache = self._cache_matrices()
+            cache = self._cache_matrices(logvar_min=logvar_min, logvar_max=logvar_max)
             d_inv = cache["d_inv"].unsqueeze(0)  # (1, K, D)
             delta_d = delta * d_inv  # (B, K, D)
 
             log_weights = F.log_softmax(self.pi_logits.float(), dim=0).unsqueeze(0)  # (1, K)
-            log_comp = self.component_log_prob(z)  # (B, K)
+            log_comp = self.component_log_prob(z, logvar_min=logvar_min, logvar_max=logvar_max)  # (B, K)
             log_post = log_weights + log_comp
             resp = torch.softmax(log_post, dim=1).unsqueeze(-1)  # (B, K, 1)
 
@@ -265,10 +269,17 @@ class GaussianMixturePrior(nn.Module):
         ).sum(dim=0)
         return second - mean.unsqueeze(1) * mean.unsqueeze(0)
 
-    def posterior_responsibilities(self, z: torch.Tensor, temperature: float = 1.0, topk: int = 0) -> torch.Tensor:
+    def posterior_responsibilities(
+        self,
+        z: torch.Tensor,
+        temperature: float = 1.0,
+        topk: int = 0,
+        logvar_min: float = None,
+        logvar_max: float = None,
+    ) -> torch.Tensor:
         t = max(float(temperature), 1e-6)
         log_weights = F.log_softmax(self.pi_logits.float(), dim=0).unsqueeze(0)  # (1, K)
-        log_comp = self.component_log_prob(z)  # (B, K)
+        log_comp = self.component_log_prob(z, logvar_min=logvar_min, logvar_max=logvar_max)  # (B, K)
         logits = (log_weights + log_comp) / t
         k = int(topk)
         if k <= 0 or k >= logits.size(1):
@@ -524,7 +535,6 @@ class MaskFiLMGMMVAE(nn.Module):
             zero_logvar = torch.zeros_like(z)
             log_p = gaussian_log_prob_diag(z=z, mu=zero_mu, logvar=zero_logvar)
         else:
-            self.prior.clamp_logvar_(min_val=prior_logvar_min, max_val=prior_logvar_max)
             q_c_logits = out["q_c_logits"]  # (B, K)
             q_c = out["q_c"]  # (B, K)
             mu_comp = out["mu_comp"]  # (B, K, D)
@@ -545,7 +555,11 @@ class MaskFiLMGMMVAE(nn.Module):
                 )  # (B, K)
             else:
                 log_q_z_given_c = gaussian_log_prob_diag(z=z_comp, mu=mu_comp, logvar=logvar_comp)  # (B, K)
-            log_p_z_given_c = self.prior.component_log_prob_aligned(z_comp)  # (B, K)
+            log_p_z_given_c = self.prior.component_log_prob_aligned(
+                z_comp,
+                logvar_min=prior_logvar_min,
+                logvar_max=prior_logvar_max,
+            )  # (B, K)
             kl_z = (q_c * (log_q_z_given_c - log_p_z_given_c)).sum(dim=1).mean()
 
             kl_loss = kl_c + kl_z
@@ -573,7 +587,11 @@ class MaskFiLMGMMVAE(nn.Module):
             z_noisy = z_for_score + score_noise_std * torch.randn_like(z_for_score)
             score_pred = self.score_head(z_noisy)
             if self.prior_type == "gmm":
-                score_tgt = self.prior.score(z_noisy).detach()
+                score_tgt = self.prior.score(
+                    z_noisy,
+                    logvar_min=prior_logvar_min,
+                    logvar_max=prior_logvar_max,
+                ).detach()
             else:
                 # score of standard Gaussian N(0, I): grad_z log p(z) = -z
                 score_tgt = (-z_noisy).detach()
