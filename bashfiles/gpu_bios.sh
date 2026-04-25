@@ -17,17 +17,8 @@ conda activate SpaRest
 
 cd /hpc/group/xielab/xj58/xVERSE_code
 
-import torch
-print(max(1, torch.cuda.device_count()))
-PY
-)
-echo ">>> Visible CUDA devices: ${NPROC_PER_NODE}"
-
 DATA_ROOT="/hpc/group/xielab/xj58/xVerseAtlas/npz_tissue_dataset_donor"
 COMPILED_ROOT="/hpc/group/xielab/xj58/xVerseAtlas/compiled_train_v1_all"
-
-echo ">>> DATA_ROOT=${DATA_ROOT}"
-echo ">>> COMPILED_ROOT=${COMPILED_ROOT}"
 
 stdbuf -oL -eL torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" -m main_energy.train_pantissue \
     --compiled-dataset-root "${COMPILED_ROOT}" \
