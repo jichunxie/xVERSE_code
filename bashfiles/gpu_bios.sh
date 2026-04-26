@@ -2,8 +2,8 @@
 #SBATCH -p biostat-gpu                     
 #SBATCH -A biostat                           
 #SBATCH --gres=gpu:1                        
-#SBATCH -c 20                                
-#SBATCH --mem=200G                        
+#SBATCH -c 10                                
+#SBATCH --mem=100G                        
 #SBATCH -t 20:00:00                            
 #SBATCH -J bios
 #SBATCH --output=/hpc/group/xielab/xj58/sbatch_output/%x_output_%j.txt  
