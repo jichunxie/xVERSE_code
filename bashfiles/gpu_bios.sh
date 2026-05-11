@@ -58,8 +58,8 @@ stdbuf -oL -eL torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" -m mai
   --num-tissues 0 \
   --latent-dim 128 \
   --num-components 32 \
-  --prior-cov-rank 4 \
-  --posterior-cov-rank 4 \
+  --prior-cov-rank 8 \
+  --posterior-cov-rank 8 \
   --prior-logvar-max 2 \
   --expr-hidden-dim 512 \
   --mask-hidden-dim 512 \
