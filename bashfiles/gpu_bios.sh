@@ -19,7 +19,7 @@ export PYTHONUNBUFFERED=1
 
 COMPILED_ROOT="/hpc/group/xielab/xj58/xVerseAtlas/compiled_train_v1_all"
 CELLTYPE_CSV="/hpc/group/xielab/xj58/sparest_code/standard_type/cellxgene_cell_type_mapped.csv"
-RESULT_DIR="/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_all_tissue0511_poisson"
+RESULT_DIR="/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_all_tissue0511_nb"
 
 NPROC_PER_NODE=$(python - <<'PY'
 import torch
@@ -50,23 +50,22 @@ fi
 
 stdbuf -oL -eL "${RUN_CMD[@]}" \
   --compiled-dataset-root "${COMPILED_ROOT}" \
-  --compiled-max-cached-shards 16 \
-  --sampler-shard-reorder-window 8192 \
+  --compiled-max-cached-shards 4092 \
+  --sampler-shard-reorder-window 4096 \
   --cell-type-csv "${CELLTYPE_CSV}" \
   --result-dir "${RESULT_DIR}" \
   --num-epochs 100 \
   --val-every 5 \
   --batch-size 1024 \
   --val-batch-size 1024 \
-  --num-workers 4 \
-  --val-num-workers 2 \
-  --prefetch-factor 2 \
-  --no-persistent-workers \
+  --num-workers 8 \
+  --val-num-workers 5 \
+  --prefetch-factor 8 \
   --samples-per-id 500 \
   --lr 5e-4 \
   --weight-decay 1e-5 \
   --prior-type gmm \
-  --recon-loss poisson \
+  --recon-loss nb \
   --latent-dim 128 \
   --num-components 32 \
   --prior-cov-rank 8 \
