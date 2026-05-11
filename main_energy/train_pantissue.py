@@ -198,6 +198,21 @@ def _unwrap_model(model):
     return model.module if hasattr(model, "module") else model
 
 
+def _filter_state_dict_by_shape(model, state_dict):
+    model_state = model.state_dict()
+    kept = {}
+    skipped = []
+    for k, v in state_dict.items():
+        if k not in model_state:
+            skipped.append((k, "missing_in_model"))
+            continue
+        if model_state[k].shape != v.shape:
+            skipped.append((k, f"shape_mismatch ckpt={tuple(v.shape)} model={tuple(model_state[k].shape)}"))
+            continue
+        kept[k] = v
+    return kept, skipped
+
+
 def _set_requires_grad(module, enabled: bool):
     if module is None:
         return
@@ -553,7 +568,15 @@ def main():
     if os.path.exists(ckpt_path):
         map_location = device
         ckpt = torch.load(ckpt_path, map_location=map_location)
-        load_ret = model.load_state_dict(ckpt["model_state_dict"], strict=False)
+        ckpt_state = ckpt["model_state_dict"]
+        filtered_state, skipped = _filter_state_dict_by_shape(model, ckpt_state)
+        load_ret = model.load_state_dict(filtered_state, strict=False)
+        if skipped:
+            log(f"[Resume] Skipped {len(skipped)} incompatible/missing keys from checkpoint.")
+            for name, reason in skipped[:20]:
+                log(f"[Resume][Skip] {name}: {reason}")
+            if len(skipped) > 20:
+                log(f"[Resume] ... and {len(skipped) - 20} more skipped keys.")
         if "optimizer_state_dict" in ckpt:
             try:
                 optimizer.load_state_dict(ckpt["optimizer_state_dict"])
