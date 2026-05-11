@@ -50,17 +50,17 @@ fi
 
 stdbuf -oL -eL "${RUN_CMD[@]}" \
   --compiled-dataset-root "${COMPILED_ROOT}" \
-  --compiled-max-cached-shards 32 \
-  --sampler-shard-reorder-window 16384 \
+  --compiled-max-cached-shards 16 \
+  --sampler-shard-reorder-window 8192 \
   --cell-type-csv "${CELLTYPE_CSV}" \
   --result-dir "${RESULT_DIR}" \
   --num-epochs 100 \
   --val-every 5 \
   --batch-size 1024 \
   --val-batch-size 1024 \
-  --num-workers 8 \
-  --val-num-workers 5 \
-  --prefetch-factor 8 \
+  --num-workers 4 \
+  --val-num-workers 2 \
+  --prefetch-factor 2 \
   --no-persistent-workers \
   --samples-per-id 500 \
   --lr 5e-4 \

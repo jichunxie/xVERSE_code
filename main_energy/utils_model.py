@@ -1101,7 +1101,7 @@ def train_gmm_vae_one_epoch(
             if is_rank0:
                 print(
                     f"[WARN] Non-finite train loss at batch {batch_idx + 1}, skip step. "
-                    f"Recon={recon.item():.4f}, KL={kl.item():.4f}, Score={score.item():.4f}, Cov={cov.item():.4f}"
+                    f"Recon={recon.item():.4f}, KL={kl.item():.4f}, Cov={cov.item():.4f}"
                 )
             optimizer.zero_grad(set_to_none=True)
             continue
@@ -1126,18 +1126,14 @@ def train_gmm_vae_one_epoch(
         if (batch_idx + 1) % 100 == 0 and is_rank0:
             msg = (
                 f"[Batch {batch_idx + 1}] "
-                f"Loss={loss.item():.4f}, Recon={recon.item():.4f}, KL={kl.item():.4f}, "
-                f"Score={score.item():.4f}, priorPiBal={prior_pi_balance.item():.4f}, cls={celltype_cls.item():.4f}"
+                f"Loss={loss.item():.4f}, Recon={recon.item():.4f}, KL={kl.item():.4f}, cls={celltype_cls.item():.4f}"
             )
             if lambda_contrast > 0:
                 msg += f", Contrast={contrast.item():.4f}"
             if lambda_real_recon > 0:
                 msg += f", RealRecon={real_recon.item():.4f}"
             msg += (
-                f", ||s_pred||={out_fake['score_norm_pred'].item():.4f}, ||s_tgt||={out_fake['score_norm_tgt'].item():.4f}, "
-                f"respH={out_fake['resp_entropy'].item():.4f}, respBal={out_fake['resp_balance_loss'].item():.4f}, "
-                f"respConf={out_fake['resp_confidence_loss'].item():.4f}, "
-                f"respTop1Batch={out_fake['resp_top1'].item():.4f}"
+                f", respH={out_fake['resp_entropy'].item():.4f}"
             )
             if getattr(model.module if hasattr(model, "module") else model, "prior_type", None) == "gmm":
                 diag = gmm_collapse_diagnostics(prior=prior_ref, z=out_fake["z"], tissue_id=tissue_id)
@@ -1319,10 +1315,8 @@ def evaluate_gmm_vae_one_epoch(
                 msg = (
                     f"[Val Batch {batch_idx + 1}] "
                     f"Loss={loss.item():.4f}, Recon={out_fake['recon_loss'].item():.4f}, "
-                    f"KL={out_fake['kl_loss'].item():.4f}, Score={out_fake['score_loss'].item():.4f}, "
-                    f"priorPiBal={out_fake.get('prior_pi_balance_loss', torch.zeros_like(out_fake['cov_loss'])).item():.4f}, "
-                    f"cls={out_fake.get('celltype_cls_loss', torch.zeros_like(out_fake['cov_loss'])).item():.4f}, "
-                    f"respConf={out_fake['resp_confidence_loss'].item():.4f}"
+                    f"KL={out_fake['kl_loss'].item():.4f}, "
+                    f"cls={out_fake.get('celltype_cls_loss', torch.zeros_like(out_fake['cov_loss'])).item():.4f}"
                 )
                 if getattr(model.module if hasattr(model, "module") else model, "prior_type", None) == "gmm":
                     diag = gmm_collapse_diagnostics(prior=prior_ref, z=out_fake["z"], tissue_id=tissue_id)
