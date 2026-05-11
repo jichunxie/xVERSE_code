@@ -101,12 +101,12 @@ def eval_one_embedding(adata, embed_key: str, celltype_col: str, batch_col: str,
 
     metrics["ASW_label"], errors["ASW_label"] = run_one_metric(
         "ASW_label",
-        lambda: scib.metrics.silhouette(work, group_key=celltype_col, embed=embed_key),
+        lambda: scib.metrics.silhouette(work, label_key=celltype_col, embed=embed_key),
     )
 
     metrics["ASW_batch"], errors["ASW_batch"] = run_one_metric(
         "ASW_batch",
-        lambda: scib.metrics.silhouette_batch(work, batch_key=batch_col, group_key=celltype_col, embed=embed_key),
+        lambda: scib.metrics.silhouette_batch(work, batch_key=batch_col, label_key=celltype_col, embed=embed_key),
     )
 
     metrics["isolated_ASW"], errors["isolated_ASW"] = run_one_metric(
@@ -223,4 +223,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

@@ -10,6 +10,7 @@ This mirrors the original fig2 xVerse embedding extraction flow but uses:
 
 import argparse
 import os
+import sys
 import time
 from pathlib import Path
 
@@ -19,6 +20,11 @@ import scanpy as sc
 import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
+
+# Ensure repo root is importable when running as a script path.
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from main.utils_ft import XVerseFineTuneDataset
 from main.utils_model import load_gene_ids
