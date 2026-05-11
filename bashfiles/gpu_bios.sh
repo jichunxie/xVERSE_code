@@ -66,8 +66,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --lr 5e-4 \
   --weight-decay 1e-5 \
   --prior-type gmm \
-  --conditional-prior-on-tissue \
-  --num-tissues 0 \
+  --recon-loss nb \
   --latent-dim 128 \
   --num-components 32 \
   --prior-cov-rank 8 \

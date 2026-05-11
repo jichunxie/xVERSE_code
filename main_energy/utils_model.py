@@ -349,6 +349,7 @@ class MaskFiLMGMMVAE(nn.Module):
         num_cell_types: int = 0,
         conditional_prior_on_tissue: bool = False,
         num_tissues: int = 0,
+        recon_loss_type: str = "poisson",
     ):
         super().__init__()
         if prior_type not in ("gmm", "gaussian"):
@@ -374,9 +375,18 @@ class MaskFiLMGMMVAE(nn.Module):
             hidden_dim=dec_hidden_dim,
             dropout=dropout,
         )
+        self.nb_theta_decoder = PoissonDecoder(
+            latent_dim=latent_dim,
+            num_genes=num_genes,
+            hidden_dim=dec_hidden_dim,
+            dropout=dropout,
+        )
         self.num_components = int(num_components)
         self.latent_dim = int(latent_dim)
         self.posterior_cov_rank = max(0, int(posterior_cov_rank))
+        self.recon_loss_type = str(recon_loss_type).lower()
+        if self.recon_loss_type not in ("poisson", "nb"):
+            raise ValueError(f"Unsupported recon_loss_type: {self.recon_loss_type}")
         if self.prior_type == "gmm":
             post_hidden = max(64, int(expr_hidden_dim) // 2)
             self.post_c_logits = MLP(
@@ -480,9 +490,11 @@ class MaskFiLMGMMVAE(nn.Module):
             z_comp = None
             factor_comp = None
         gene_logits = self.decoder(z)
+        nb_theta_logits = self.nb_theta_decoder(z)
         library_size = F.softplus(self.library_head(z)) + 1e-8
         gene_probs = F.softmax(gene_logits, dim=-1)
         rate = gene_probs * library_size
+        nb_theta = F.softplus(nb_theta_logits) + 1e-8
         out = {
             "mu": mu,
             "mu_base": mu_enc,
@@ -491,6 +503,7 @@ class MaskFiLMGMMVAE(nn.Module):
             "library_size": library_size,
             "gene_logits": gene_logits,
             "rate": rate,
+            "nb_theta": nb_theta,
         }
         if self.celltype_head is not None:
             out["celltype_logits"] = self.celltype_head(z)
@@ -549,11 +562,18 @@ class MaskFiLMGMMVAE(nn.Module):
         logvar = out["logvar"]
         z = out["z"]
         rate = out["rate"]
+        nb_theta = out["nb_theta"]
 
-        if recon_mask is None:
-            recon_loss = poisson_nll(x_count=x_count, rate=rate)
+        if self.recon_loss_type == "nb":
+            if recon_mask is None:
+                recon_loss = nb_nll(x_count=x_count, mu=rate, theta=nb_theta)
+            else:
+                recon_loss = nb_nll_masked(x_count=x_count, mu=rate, mask=recon_mask, theta=nb_theta)
         else:
-            recon_loss = poisson_nll_masked(x_count=x_count, rate=rate, mask=recon_mask)
+            if recon_mask is None:
+                recon_loss = poisson_nll(x_count=x_count, rate=rate)
+            else:
+                recon_loss = poisson_nll_masked(x_count=x_count, rate=rate, mask=recon_mask)
 
         if self.prior_type == "gaussian" or (self.prior_type == "gmm" and force_base_posterior):
             # Closed-form KL(q(z|x)||N(0,I)) for diagonal Gaussian posterior.
@@ -795,6 +815,43 @@ def poisson_nll_masked(x_count: torch.Tensor, rate: torch.Tensor, mask: torch.Te
     nll = r - x * torch.log(r)
     nll = nll * m
     denom = torch.clamp(m.sum(), min=1.0)
+    return nll.sum() / denom
+
+
+def nb_nll(x_count: torch.Tensor, mu: torch.Tensor, theta: torch.Tensor) -> torch.Tensor:
+    """
+    Negative binomial NLL with mean mu and inverse-dispersion theta.
+    log_theta is gene-wise parameter of shape (G,).
+    """
+    x = x_count.float()
+    m = torch.clamp(mu, min=1e-8)
+    theta = torch.clamp(theta.float(), min=1e-8)
+    log_theta_mu = torch.log(theta + m)
+    log_prob = (
+        torch.lgamma(x + theta)
+        - torch.lgamma(theta)
+        - torch.lgamma(x + 1.0)
+        + theta * (torch.log(theta) - log_theta_mu)
+        + x * (torch.log(m) - log_theta_mu)
+    )
+    return (-log_prob).mean()
+
+
+def nb_nll_masked(x_count: torch.Tensor, mu: torch.Tensor, mask: torch.Tensor, theta: torch.Tensor) -> torch.Tensor:
+    x = x_count.float()
+    m = torch.clamp(mu, min=1e-8)
+    ms = mask.float()
+    theta = torch.clamp(theta.float(), min=1e-8)
+    log_theta_mu = torch.log(theta + m)
+    log_prob = (
+        torch.lgamma(x + theta)
+        - torch.lgamma(theta)
+        - torch.lgamma(x + 1.0)
+        + theta * (torch.log(theta) - log_theta_mu)
+        + x * (torch.log(m) - log_theta_mu)
+    )
+    nll = (-log_prob) * ms
+    denom = torch.clamp(ms.sum(), min=1.0)
     return nll.sum() / denom
 
 

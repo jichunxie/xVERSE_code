@@ -114,6 +114,8 @@ def parse_args():
     parser.add_argument("--dropout", type=float, default=0.1, help="Dropout for gmm_vae MLP blocks.")
     parser.add_argument("--recon-observed-only", action="store_true",
                         help="For gmm_vae, compute Poisson NLL only on observed genes.")
+    parser.add_argument("--recon-loss", choices=["poisson", "nb"], default="poisson",
+                        help="Reconstruction loss type for count model.")
     parser.add_argument("--mask-aug-prob", type=float, default=1.0,
                         help="For gmm_vae training, probability of applying random observed->unobserved masking per cell.")
     parser.add_argument("--mask-aug-policy", choices=["xverse", "simple"], default="xverse",
@@ -535,6 +537,7 @@ def main():
         num_cell_types=num_cell_types,
         conditional_prior_on_tissue=args.conditional_prior_on_tissue,
         num_tissues=num_tissues,
+        recon_loss_type=args.recon_loss,
     ).to(device)
 
     total_params, trainable_params = count_parameters(model)
