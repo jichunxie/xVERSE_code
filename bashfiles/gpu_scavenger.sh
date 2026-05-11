@@ -27,22 +27,31 @@ FIG2_OUT_DIR="/hpc/group/xielab/xj58/xVerse_results/fig2_gmmvae_current"
 FIG2_EVAL_DIR="${FIG2_OUT_DIR}/evaluation_scib_full"
 FIG2_OLD_EVAL_DIR="/hpc/group/xielab/xj58/xVerse_results/fig2/evaluation"
 
-echo ">>> Running Task: Extract GMVAE embeddings on fig2 donor h5ad files"
-python reproduce_manuscript/fig2_biology_signal_gmmvae_current/02_extract_gmmvae_embedding.py \
-    --ckpt "${CKPT_PATH}" \
-    --gene-ids-path "${FIG2_GENE_IDS}" \
-    --liver-dir "${FIG2_LIVER_DIR}" \
-    --brain-dir "${FIG2_BRAIN_DIR}" \
-    --output-dir "${FIG2_OUT_DIR}" \
-    --embedding-key xVerse_gmmvae_mixmu
+# echo ">>> Running Task: Extract GMVAE embeddings on fig2 donor h5ad files"
+# python reproduce_manuscript/fig2_biology_signal_gmmvae_current/02_extract_gmmvae_embedding.py \
+#     --ckpt "${CKPT_PATH}" \
+#     --gene-ids-path "${FIG2_GENE_IDS}" \
+#     --liver-dir "${FIG2_LIVER_DIR}" \
+#     --brain-dir "${FIG2_BRAIN_DIR}" \
+#     --output-dir "${FIG2_OUT_DIR}" \
+#     --embedding-key xVerse_gmmvae_mixmu
 
-echo ">>> Running Task: Evaluate FMs + GMVAE with full scIB metrics"
-python reproduce_manuscript/fig2_biology_signal_gmmvae_current/03_evaluate_scib_full.py \
+# echo ">>> Running Task: Evaluate FMs + GMVAE with full scIB metrics"
+# python reproduce_manuscript/fig2_biology_signal_gmmvae_current/03_evaluate_scib_full.py \
+#     --liver-dir "${FIG2_LIVER_DIR}" \
+#     --brain-dir "${FIG2_BRAIN_DIR}" \
+#     --output-dir "${FIG2_EVAL_DIR}" \
+#     --old-eval-dir "${FIG2_OLD_EVAL_DIR}" \
+#     --gmm-key xVerse_gmmvae_mixmu \
+#     --max-cells 20000
+
+echo ">>> Running Task: Plot UMAP for GMVAE mixmu embedding"
+python reproduce_manuscript/fig2_biology_signal_gmmvae_current/04_plot_umap.py \
     --liver-dir "${FIG2_LIVER_DIR}" \
     --brain-dir "${FIG2_BRAIN_DIR}" \
-    --output-dir "${FIG2_EVAL_DIR}" \
-    --old-eval-dir "${FIG2_OLD_EVAL_DIR}" \
-    --gmm-key xVerse_gmmvae_mixmu \
+    --output-dir "${FIG2_OUT_DIR}/umap" \
+    --embedding-key xVerse_gmmvae_mixmu \
+    --gene-set all \
     --max-cells 20000
 
 
