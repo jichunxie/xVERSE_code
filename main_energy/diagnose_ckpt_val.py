@@ -14,7 +14,6 @@ REPO_ROOT = THIS_FILE.parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from main_energy.train_pantissue import _linear_warmup_scale
 from main_energy.utils_model import (
     MaskFiLMGMMVAE,
     evaluate_gmm_vae_one_epoch,
@@ -55,60 +54,18 @@ def _normalize_state_keys_for_model(state_dict, model_state_keys):
 
 
 def _stage_and_weights(a, epoch_id: int):
-    beta_end = _get(a, "beta_kl", 1.0) if _get(a, "beta_kl_end", None) is None else _get(a, "beta_kl_end", 1.0)
-    beta_t = beta_end
-    if _get(a, "beta_kl_warmup_epochs", 0) > 0:
-        alpha = min(1.0, max(0.0, (epoch_id - 1) / float(_get(a, "beta_kl_warmup_epochs", 0))))
-        beta_t = _get(a, "beta_kl_start", 0.0) + (beta_end - _get(a, "beta_kl_start", 0.0)) * alpha
+    beta_t = float(_get(a, "beta_kl", 1.0))
+    stage_name = "stage3"
 
-    phase1_epochs = max(0, int(_get(a, "gmm_init_after_epochs", 0)))
-    stage2_epochs = max(0, int(_get(a, "gmm_stage2_epochs", 0)))
-    post_init_epoch = epoch_id - phase1_epochs
-    in_stage1 = bool(phase1_epochs > 0 and epoch_id <= phase1_epochs)
-    in_stage2 = bool(phase1_epochs > 0 and stage2_epochs > 0 and epoch_id > phase1_epochs and epoch_id <= phase1_epochs + stage2_epochs)
-    stage_name = "stage1" if in_stage1 else ("stage2" if in_stage2 else "stage3")
-
-    bal_scale = _linear_warmup_scale(epoch_id, int(_get(a, "lambda_resp_balance_warmup_epochs", 0)))
-    conf_scale = _linear_warmup_scale(epoch_id, int(_get(a, "lambda_resp_confidence_warmup_epochs", 0)))
-    lambda_resp_balance_t = float(_get(a, "lambda_resp_balance", 0.0)) * bal_scale
-    lambda_resp_confidence_t = float(_get(a, "lambda_resp_confidence", 0.0)) * conf_scale
+    lambda_resp_balance_t = float(_get(a, "lambda_resp_balance", 0.0))
+    lambda_resp_confidence_t = float(_get(a, "lambda_resp_confidence", 0.0))
     lambda_resp_anchor_t = float(_get(a, "lambda_resp_anchor", 0.0))
-    lambda_cov_t = float(_get(a, "lambda_cov", 0.0)) * _linear_warmup_scale(epoch_id, int(_get(a, "lambda_cov_warmup_epochs", 0)))
-
-    resp_temp_start = float(_get(a, "resp_temperature", 1.0)) if _get(a, "resp_temperature_start", None) is None else float(_get(a, "resp_temperature_start", 1.0))
-    resp_temp_end = float(_get(a, "resp_temperature", 1.0))
-    temp_scale = _linear_warmup_scale(epoch_id, int(_get(a, "resp_temperature_warmup_epochs", 0)))
-    resp_temperature_t = resp_temp_start + (resp_temp_end - resp_temp_start) * temp_scale
-
-    if phase1_epochs > 0:
-        if in_stage1:
-            if phase1_epochs <= 1:
-                beta_t = beta_end
-            else:
-                stage1_prog = min(1.0, max(0.0, (epoch_id - 1) / float(phase1_epochs - 1)))
-                beta_t = _get(a, "beta_kl_start", 0.0) + (beta_end - _get(a, "beta_kl_start", 0.0)) * stage1_prog
-            lambda_resp_balance_t = 0.0
-            lambda_resp_confidence_t = 0.0
-            lambda_resp_anchor_t = 0.0
-            resp_temperature_t = resp_temp_start
-        else:
-            post_warm_kl = max(0, int(_get(a, "gmm_post_init_kl_warmup_epochs", 0)))
-            if post_warm_kl > 0:
-                kl_prog = min(1.0, max(0.0, (post_init_epoch - 1) / float(post_warm_kl)))
-                beta_t = beta_end * kl_prog
-            else:
-                beta_t = beta_end
-            bal_scale = _linear_warmup_scale(post_init_epoch, int(_get(a, "lambda_resp_balance_warmup_epochs", 0)))
-            conf_scale = _linear_warmup_scale(post_init_epoch, int(_get(a, "lambda_resp_confidence_warmup_epochs", 0)))
-            temp_scale = _linear_warmup_scale(post_init_epoch, int(_get(a, "resp_temperature_warmup_epochs", 0)))
-            lambda_resp_balance_t = float(_get(a, "lambda_resp_balance", 0.0)) * bal_scale
-            lambda_resp_confidence_t = float(_get(a, "lambda_resp_confidence", 0.0)) * conf_scale
-            lambda_resp_anchor_t = float(_get(a, "lambda_resp_anchor", 0.0))
-            resp_temperature_t = resp_temp_start + (resp_temp_end - resp_temp_start) * temp_scale
+    lambda_cov_t = float(_get(a, "lambda_cov", 0.0))
+    resp_temperature_t = float(_get(a, "resp_temperature", 1.0))
 
     return {
         "stage_name": stage_name,
-        "force_base_posterior": in_stage1,
+        "force_base_posterior": False,
         "beta_t": float(beta_t),
         "lambda_cov_t": float(lambda_cov_t),
         "lambda_resp_balance_t": float(lambda_resp_balance_t),

@@ -17,6 +17,7 @@ import argparse
 import os
 import random
 import json
+import csv
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
@@ -71,10 +72,10 @@ def parse_args():
                         help="Train/validate using only a specific tissue name (e.g., kidney).")
     parser.add_argument("--filter-bad-cells", action="store_true",
                         help="Filter cells with max count > 1000 or total count > 200000 when building dataset/index.")
-    parser.add_argument("--cell-type-csv", default="/hpc/group/xielab/xj58/sparest_code/standard_type/cellxgene_cell_type_mapped.csv",
-                        help="CSV containing cell-type mapping info.")
-    parser.add_argument("--result-dir", default="/hpc/group/xielab/xj58/pretrain_model_celltype/pantissue_model_1118",
-                        help="Directory for checkpoints.")
+    parser.add_argument("--cell-type-csv", default=None,
+                        help="CSV containing cell-type mapping info. Must be provided.")
+    parser.add_argument("--result-dir", default=None,
+                        help="Directory for checkpoints. Must be provided.")
     parser.add_argument("--total-gene", type=int, default=17999, help="Total number of genes.")
     parser.add_argument("--num-epochs", type=int, default=100, help="Training epochs.")
     parser.add_argument("--val-every", type=int, default=1, help="Run validation every N epochs.")
@@ -98,11 +99,7 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=42, help="Random seed.")
     parser.add_argument("--last-ckpt-name", default="last_model.pth", help="Filename for last checkpoint.")
     parser.add_argument("--best-ckpt-name", default="best_model.pth", help="Filename for best checkpoint.")
-    parser.add_argument("--beta-kl", type=float, default=1.0, help="KL weight.")
-    parser.add_argument("--beta-kl-start", type=float, default=0.0, help="KL warmup start value.")
-    parser.add_argument("--beta-kl-end", type=float, default=None, help="KL warmup end value. Defaults to --beta-kl.")
-    parser.add_argument("--beta-kl-warmup-epochs", type=int, default=10,
-                        help="Linear warmup epochs for KL weight. <=0 disables warmup.")
+    parser.add_argument("--beta-kl", type=float, default=0.01, help="KL weight.")
     parser.add_argument("--prior-type", choices=["gmm", "gaussian"], default="gmm",
                         help="Latent prior type. 'gaussian' uses N(0,I) with closed-form KL.")
     parser.add_argument("--latent-dim", type=int, default=128, help="Latent dim.")
@@ -111,18 +108,6 @@ def parse_args():
                         help="Low-rank size R for each GMM component covariance: diag + U U^T.")
     parser.add_argument("--posterior-cov-rank", type=int, default=0,
                         help="Low-rank size R for posterior q(z|x,c) covariance: diag + U U^T. 0 keeps diagonal posterior.")
-    parser.add_argument("--gmm-init-after-epochs", type=int, default=0,
-                        help="Run one-shot GMM initialization after this many completed epochs. 0 disables.")
-    parser.add_argument("--gmm-post-init-kl-warmup-epochs", type=int, default=5,
-                        help="After one-shot GMM init, linearly warm up KL from 0 to target over this many epochs. <=0 disables.")
-    parser.add_argument("--gmm-stage2-epochs", type=int, default=5,
-                        help="Stage-2 epochs after GMM init: freeze AE backbone, train GMM-related heads/priors.")
-    parser.add_argument("--gmm-init-max-samples", type=int, default=200000,
-                        help="Max samples used for one-shot GMM initialization.")
-    parser.add_argument("--gmm-init-max-batches", type=int, default=300,
-                        help="Max train batches scanned for one-shot GMM initialization.")
-    parser.add_argument("--gmm-init-iters", type=int, default=30,
-                        help="KMeans iterations for one-shot GMM initialization.")
     parser.add_argument("--expr-hidden-dim", type=int, default=1024, help="Expression encoder hidden dim.")
     parser.add_argument("--mask-hidden-dim", type=int, default=512, help="Mask encoder hidden dim.")
     parser.add_argument("--dec-hidden-dim", type=int, default=1024, help="Decoder hidden dim.")
@@ -137,64 +122,20 @@ def parse_args():
                         help="Minimum fraction of observed genes to hide when mask augmentation is applied.")
     parser.add_argument("--mask-aug-max-frac", type=float, default=0.5,
                         help="Maximum fraction of observed genes to hide when mask augmentation is applied.")
-    parser.add_argument("--lambda-score", type=float, default=0.0,
-                        help="Weight of auxiliary score loss. Keep small when enabled.")
-    parser.add_argument("--lambda-cov", type=float, default=0.0,
-                        help="Weight of posterior-prior covariance matching loss (off-diagonal covariance).")
-    parser.add_argument("--lambda-cov-warmup-epochs", type=int, default=0,
-                        help="Linear warmup epochs for lambda-cov from 0 to target. <=0 disables warmup.")
-    parser.add_argument("--lambda-resp-balance", type=float, default=0.0,
-                        help="Weight for batch-average responsibility balancing toward uniform component usage.")
-    parser.add_argument("--lambda-resp-balance-warmup-epochs", type=int, default=0,
-                        help="Linear warmup epochs for lambda-resp-balance from 0 to target. <=0 disables warmup.")
-    parser.add_argument("--lambda-resp-confidence", type=float, default=0.0,
-                        help="Weight for per-cell responsibility entropy minimization (encourages sparse/peaky assignments).")
-    parser.add_argument("--lambda-resp-confidence-warmup-epochs", type=int, default=0,
-                        help="Linear warmup epochs for lambda-resp-confidence from 0 to target. <=0 disables warmup.")
-    parser.add_argument("--lambda-resp-anchor", type=float, default=0.0,
-                        help="Soft anchoring weight: encourage similar q(c|x) within the same known celltype. celltype=-1 is ignored.")
-    parser.add_argument("--lambda-prior-mu-l2", type=float, default=0.0,
-                        help="L2 regularization weight for GMM prior means prior_mu.")
-    parser.add_argument("--lambda-prior-factor-l2", type=float, default=0.0,
-                        help="L2 regularization weight for GMM prior low-rank factors prior_factor.")
-    parser.add_argument("--lambda-prior-pi-balance", type=float, default=0.0,
-                        help="Regularization weight for prior mixture weights toward uniform (KL(pi || uniform)).")
-    parser.add_argument("--lambda-prior-logvar-l2", type=float, default=0.0,
-                        help="L2 regularization weight for prior_logvar toward --prior-logvar-target.")
-    parser.add_argument("--prior-logvar-target", type=float, default=-2.0,
-                        help="Target value used by prior_logvar L2 regularization.")
     parser.add_argument("--num-cell-types", type=int, default=0,
                         help="Number of supervised cell types for auxiliary classification head. <=0 means auto infer from dataset.")
+    parser.add_argument("--num-tissues", type=int, default=0,
+                        help="Number of tissue ids for conditional prior. <=0 means auto infer from dataset.")
+    parser.add_argument("--conditional-prior-on-tissue", action="store_true",
+                        help="Use tissue-conditional GMM prior p(z|tissue).")
     parser.add_argument("--lambda-celltype-cls", type=float, default=0.0,
                         help="Weight for auxiliary celltype cross-entropy loss (ignore label -1).")
-    parser.add_argument("--resp-temperature", type=float, default=1.0,
-                        help="Temperature for posterior responsibilities used by entropy regularization (>1 softens).")
-    parser.add_argument("--resp-temperature-start", type=float, default=None,
-                        help="Optional start value for responsibility temperature schedule. Defaults to --resp-temperature.")
-    parser.add_argument("--resp-temperature-warmup-epochs", type=int, default=0,
-                        help="Linear warmup epochs for resp temperature from start to --resp-temperature. <=0 disables schedule.")
-    parser.add_argument("--resp-topk", type=int, default=0,
-                        help="Top-k routing for GMM responsibilities/log_prob in KL. 0 disables, 1/2 recommended.")
-    parser.add_argument("--prior-logvar-min", type=float, default=-6.0,
-                        help="Lower clamp bound for GMM prior log-variance.")
     parser.add_argument("--prior-logvar-max", type=float, default=4.0,
                         help="Upper clamp bound for GMM prior log-variance.")
-    parser.add_argument("--cov-use-mu", action="store_true", default=True,
-                        help="Use posterior mean mu for covariance matching (recommended).")
-    parser.add_argument("--cov-use-z", dest="cov_use_mu", action="store_false",
-                        help="Use sampled z for covariance matching.")
-    parser.add_argument("--score-noise-std", type=float, default=0.1,
-                        help="Gaussian noise std for score head training.")
-    parser.add_argument("--score-detach-z", action="store_true", default=True,
-                        help="Detach z before score head to prevent score loss from updating encoder.")
-    parser.add_argument("--no-score-detach-z", dest="score_detach_z", action="store_false",
-                        help="Allow score loss to update encoder (not recommended for your current objective).")
-    parser.add_argument("--lambda-contrast", type=float, default=0.0,
+    parser.add_argument("--lambda-contrast", type=float, default=1.0,
                         help="Weight of contrastive loss between real-mask and fake-mask views.")
     parser.add_argument("--contrast-temp", type=float, default=0.1,
                         help="Temperature for bidirectional InfoNCE contrastive loss.")
-    parser.add_argument("--lambda-real-recon", type=float, default=0.0,
-                        help="Weight of real-mask reconstruction loss term.")
     parser.add_argument("--ddp", action="store_true", default=True,
                         help="Use torch DistributedDataParallel when launched with torchrun.")
     parser.add_argument("--no-ddp", dest="ddp", action="store_false",
@@ -276,43 +217,41 @@ def _get_last_linear(module):
     return last
 
 
+def _write_args_csv(result_dir: str, args_namespace, rank: int):
+    if not is_main_process(rank):
+        return
+    args_dict = vars(args_namespace).copy()
+    items = sorted(args_dict.items(), key=lambda kv: kv[0])
+
+    cur_path = os.path.join(result_dir, "train_args.csv")
+    with open(cur_path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["key", "value"])
+        for k, v in items:
+            w.writerow([k, v])
+
+    hist_path = os.path.join(result_dir, "train_args_history.csv")
+    run_ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+    file_exists = os.path.exists(hist_path)
+    with open(hist_path, "a", newline="") as f:
+        w = csv.writer(f)
+        if not file_exists:
+            w.writerow(["run_timestamp", "key", "value"])
+        for k, v in items:
+            w.writerow([run_ts, k, v])
+
+
 def _apply_training_stage(base_model, stage: str):
-    """
-    stage:
-      - stage1: train AE backbone only (base posterior pretrain)
-      - stage2: freeze AE backbone, train GMM prior/posterior heads
-      - stage3: joint fine-tuning
-    """
-    if stage == "stage1":
-        _set_requires_grad(getattr(base_model, "encoder", None), True)
-        _set_requires_grad(getattr(base_model, "decoder", None), True)
-        _set_requires_grad(getattr(base_model, "library_head", None), True)
-        _set_requires_grad(getattr(base_model, "prior", None), False)
-        _set_requires_grad(getattr(base_model, "post_c_logits", None), False)
-        _set_requires_grad(getattr(base_model, "post_mu", None), False)
-        _set_requires_grad(getattr(base_model, "post_logvar", None), False)
-        _set_requires_grad(getattr(base_model, "post_factor", None), False)
-        _set_requires_grad(getattr(base_model, "score_head", None), False)
-    elif stage == "stage2":
-        _set_requires_grad(getattr(base_model, "encoder", None), False)
-        _set_requires_grad(getattr(base_model, "decoder", None), False)
-        _set_requires_grad(getattr(base_model, "library_head", None), False)
-        _set_requires_grad(getattr(base_model, "prior", None), True)
-        _set_requires_grad(getattr(base_model, "post_c_logits", None), True)
-        _set_requires_grad(getattr(base_model, "post_mu", None), True)
-        _set_requires_grad(getattr(base_model, "post_logvar", None), True)
-        _set_requires_grad(getattr(base_model, "post_factor", None), True)
-        _set_requires_grad(getattr(base_model, "score_head", None), False)
-    else:
-        _set_requires_grad(getattr(base_model, "encoder", None), True)
-        _set_requires_grad(getattr(base_model, "decoder", None), True)
-        _set_requires_grad(getattr(base_model, "library_head", None), True)
-        _set_requires_grad(getattr(base_model, "prior", None), True)
-        _set_requires_grad(getattr(base_model, "post_c_logits", None), True)
-        _set_requires_grad(getattr(base_model, "post_mu", None), True)
-        _set_requires_grad(getattr(base_model, "post_logvar", None), True)
-        _set_requires_grad(getattr(base_model, "post_factor", None), True)
-        _set_requires_grad(getattr(base_model, "score_head", None), True)
+    # Single-stage training (former stage3): train all modules jointly.
+    _set_requires_grad(getattr(base_model, "encoder", None), True)
+    _set_requires_grad(getattr(base_model, "decoder", None), True)
+    _set_requires_grad(getattr(base_model, "library_head", None), True)
+    _set_requires_grad(getattr(base_model, "prior", None), True)
+    _set_requires_grad(getattr(base_model, "post_c_logits", None), True)
+    _set_requires_grad(getattr(base_model, "post_mu", None), True)
+    _set_requires_grad(getattr(base_model, "post_logvar", None), True)
+    _set_requires_grad(getattr(base_model, "post_factor", None), True)
+    _set_requires_grad(getattr(base_model, "score_head", None), True)
 
 
 def _kmeans_torch(x: torch.Tensor, k: int, iters: int, seed: int):
@@ -338,94 +277,12 @@ def _kmeans_torch(x: torch.Tensor, k: int, iters: int, seed: int):
     return centers, assign
 
 
-def init_gmm_from_encoder_latent(
-    model,
-    train_loader,
-    train_sampler,
-    device,
-    num_components: int,
-    max_samples: int,
-    max_batches: int,
-    iters: int,
-    seed: int,
-    prior_logvar_min: float,
-    prior_logvar_max: float,
-    log_fn=print,
-):
-    base = _unwrap_model(model)
-    if getattr(base, "prior_type", None) != "gmm":
-        return False
-    if hasattr(train_sampler, "set_epoch"):
-        train_sampler.set_epoch(0)
-
-    base.eval()
-    latents = []
-    seen = 0
-    with torch.no_grad():
-        for bidx, (_, _, _, x_count, x_mask, _) in enumerate(train_loader):
-            if bidx >= int(max_batches) or seen >= int(max_samples):
-                break
-            x_count = x_count.to(device, non_blocking=True)
-            x_mask = x_mask.to(device, non_blocking=True)
-            out = base.forward(x_count=x_count, x_mask=x_mask)
-            mu_base = out.get("mu_base", out["mu"]).detach().float()
-            if seen + mu_base.size(0) > int(max_samples):
-                mu_base = mu_base[: int(max_samples) - seen]
-            latents.append(mu_base)
-            seen += mu_base.size(0)
-
-    if seen < int(num_components):
-        log_fn(f"[GMMInit][WARN] samples={seen} < K={num_components}, skip.")
-        base.train()
-        return False
-
-    x = torch.cat(latents, dim=0)
-    centers, assign = _kmeans_torch(x=x, k=int(num_components), iters=int(iters), seed=int(seed))
-    counts = torch.bincount(assign, minlength=int(num_components)).float()
-    pi = (counts + 1.0) / (counts.sum() + float(num_components))
-    pi_logits = torch.log(pi)
-
-    d = x.size(1)
-    var = torch.zeros((int(num_components), d), device=x.device, dtype=x.dtype)
-    for k in range(int(num_components)):
-        idx = (assign == k).nonzero(as_tuple=False).flatten()
-        if idx.numel() <= 1:
-            var[k] = torch.ones((d,), device=x.device, dtype=x.dtype)
-        else:
-            var[k] = torch.clamp(torch.var(x[idx], dim=0, unbiased=False), min=1e-4)
-    logvar = torch.log(var).clamp(min=float(prior_logvar_min), max=float(prior_logvar_max))
-
-    base.prior.pi_logits.data.copy_(pi_logits.to(base.prior.pi_logits.dtype))
-    base.prior.prior_mu.data.copy_(centers.to(base.prior.prior_mu.dtype))
-    base.prior.prior_logvar.data.copy_(logvar.to(base.prior.prior_logvar.dtype))
-    if getattr(base.prior, "prior_factor", None) is not None:
-        base.prior.prior_factor.data.zero_()
-
-    # Initialize q(c|x) head from prior weights.
-    if hasattr(base, "post_c_logits") and base.post_c_logits is not None:
-        last_linear = _get_last_linear(base.post_c_logits)
-        if last_linear is not None:
-            with torch.no_grad():
-                for p in base.post_c_logits.parameters():
-                    p.zero_()
-                last_linear.bias.copy_(pi_logits.to(last_linear.bias.dtype))
-
-    log_fn(
-        f"[GMMInit] done: samples={seen}, K={num_components}, "
-        f"pi_min={pi.min().item():.4f}, pi_max={pi.max().item():.4f}"
-    )
-    base.train()
-    return True
-
-
-def _linear_warmup_scale(epoch_id: int, warmup_epochs: int) -> float:
-    if warmup_epochs <= 0:
-        return 1.0
-    return float(min(1.0, max(0.0, (epoch_id - 1) / float(warmup_epochs))))
-
-
 def main():
     args = parse_args()
+    if args.result_dir is None:
+        raise ValueError("`--result-dir` is required.")
+    if (not args.compiled_dataset_root) and (args.cell_type_csv is None):
+        raise ValueError("`--cell-type-csv` is required when not using --compiled-dataset-root.")
     ddp_enabled, rank, world_size, local_rank = setup_distributed(args)
     if args.ddp and not ddp_enabled:
         print("[Info] --ddp is enabled by default, but torchrun env was not found. Falling back to single-process mode.")
@@ -440,6 +297,7 @@ def main():
             print(msg)
 
     os.makedirs(args.result_dir, exist_ok=True)
+    _write_args_csv(args.result_dir, args, rank)
     ckpt_path = os.path.join(args.result_dir, args.last_ckpt_name)
     best_ckpt_path = os.path.join(args.result_dir, args.best_ckpt_name)
 
@@ -571,6 +429,13 @@ def main():
         num_cell_types = int(inferred_num_cell_types)
     log(f"[CellType] num_cell_types={num_cell_types}, lambda_celltype_cls={args.lambda_celltype_cls}")
 
+    inferred_num_tissues = max(ds.infer_num_tissues(), val_ds.infer_num_tissues())
+    if int(args.num_tissues) > 0:
+        num_tissues = int(args.num_tissues)
+    else:
+        num_tissues = int(inferred_num_tissues)
+    log(f"[Tissue] num_tissues={num_tissues}, conditional_prior_on_tissue={args.conditional_prior_on_tissue}")
+
     loader_kwargs = dict(num_workers=args.num_workers, pin_memory=True)
     if args.num_workers > 0:
         loader_kwargs["prefetch_factor"] = args.prefetch_factor
@@ -653,6 +518,8 @@ def main():
         dropout=args.dropout,
         prior_type=args.prior_type,
         num_cell_types=num_cell_types,
+        conditional_prior_on_tissue=args.conditional_prior_on_tissue,
+        num_tissues=num_tissues,
     ).to(device)
 
     total_params, trainable_params = count_parameters(model)
@@ -682,7 +549,6 @@ def main():
 
     start_round = 1
     best_val_metric = float("inf")
-    gmm_init_done = False
 
     if os.path.exists(ckpt_path):
         map_location = device
@@ -707,7 +573,6 @@ def main():
         best_val_metric = float(ckpt.get("best_val_metric", best_val_metric))
         last_epoch = int(ckpt.get("epoch", 0))
         start_round = last_epoch + 1
-        gmm_init_done = bool(args.prior_type == "gmm" and int(args.gmm_init_after_epochs) > 0 and last_epoch >= int(args.gmm_init_after_epochs) + 1)
         log(
             f"[Resume] Loaded {ckpt_path} (epoch={last_epoch}, best_val_metric={best_val_metric:.6f}). "
             f"Continue from epoch {start_round}."
@@ -722,138 +587,24 @@ def main():
     while epoch_id <= args.num_epochs:
         start_time = time.time()
         log(f"\n[Epoch {epoch_id}] Starting...")
-        beta_end = args.beta_kl if args.beta_kl_end is None else args.beta_kl_end
-        if args.beta_kl_warmup_epochs > 0:
-            alpha = min(1.0, max(0.0, (epoch_id - 1) / float(args.beta_kl_warmup_epochs)))
-            beta_t = args.beta_kl_start + (beta_end - args.beta_kl_start) * alpha
-        else:
-            beta_t = beta_end
-        cov_scale = _linear_warmup_scale(epoch_id, int(args.lambda_cov_warmup_epochs))
-        lambda_cov_t = float(args.lambda_cov) * cov_scale
-        phase1_epochs = max(0, int(args.gmm_init_after_epochs))
-        stage2_epochs = max(0, int(args.gmm_stage2_epochs))
-        post_init_epoch = epoch_id - phase1_epochs  # starts from 1 right after init trigger epoch
-        in_stage1 = bool(phase1_epochs > 0 and epoch_id <= phase1_epochs)
-        in_stage2 = bool(phase1_epochs > 0 and stage2_epochs > 0 and epoch_id > phase1_epochs and epoch_id <= phase1_epochs + stage2_epochs)
-        stage_name = "stage1" if in_stage1 else ("stage2" if in_stage2 else "stage3")
+        beta_t = float(args.beta_kl)
+        stage_name = "stage3"
         base_model = _unwrap_model(model)
         _apply_training_stage(base_model, stage_name)
 
         # Default: global schedules.
-        bal_scale = _linear_warmup_scale(epoch_id, int(args.lambda_resp_balance_warmup_epochs))
-        conf_scale = _linear_warmup_scale(epoch_id, int(args.lambda_resp_confidence_warmup_epochs))
-        lambda_resp_balance_t = float(args.lambda_resp_balance) * bal_scale
-        lambda_resp_confidence_t = float(args.lambda_resp_confidence) * conf_scale
-        lambda_resp_anchor_t = float(args.lambda_resp_anchor)
-
-        resp_temp_start = float(args.resp_temperature) if args.resp_temperature_start is None else float(args.resp_temperature_start)
-        resp_temp_end = float(args.resp_temperature)
-        temp_scale = _linear_warmup_scale(epoch_id, int(args.resp_temperature_warmup_epochs))
-        resp_temperature_t = resp_temp_start + (resp_temp_end - resp_temp_start) * temp_scale
-
-        if phase1_epochs > 0:
-            if in_stage1:
-                # Phase-1: standard VAE pretraining with base posterior and N(0, I) KL.
-                # Use an in-stage ramp to avoid early KL shock.
-                if phase1_epochs <= 1:
-                    beta_t = beta_end
-                else:
-                    stage1_prog = min(1.0, max(0.0, (epoch_id - 1) / float(phase1_epochs - 1)))
-                    beta_t = args.beta_kl_start + (beta_end - args.beta_kl_start) * stage1_prog
-                lambda_resp_balance_t = 0.0
-                lambda_resp_confidence_t = 0.0
-                lambda_resp_anchor_t = 0.0
-                resp_temperature_t = resp_temp_start
-            else:
-                # Phase-2/3: schedules are relative to post-init timeline.
-                post_warm_kl = max(0, int(args.gmm_post_init_kl_warmup_epochs))
-                if post_warm_kl > 0:
-                    # first post-init epoch -> 0.0, then linearly rise.
-                    kl_prog = min(1.0, max(0.0, (post_init_epoch - 1) / float(post_warm_kl)))
-                    beta_t = beta_end * kl_prog
-                else:
-                    beta_t = beta_end
-
-                bal_scale = _linear_warmup_scale(post_init_epoch, int(args.lambda_resp_balance_warmup_epochs))
-                conf_scale = _linear_warmup_scale(post_init_epoch, int(args.lambda_resp_confidence_warmup_epochs))
-                temp_scale = _linear_warmup_scale(post_init_epoch, int(args.resp_temperature_warmup_epochs))
-                lambda_resp_balance_t = float(args.lambda_resp_balance) * bal_scale
-                lambda_resp_confidence_t = float(args.lambda_resp_confidence) * conf_scale
-                lambda_resp_anchor_t = float(args.lambda_resp_anchor)
-                resp_temperature_t = resp_temp_start + (resp_temp_end - resp_temp_start) * temp_scale
+        lambda_resp_anchor_t = 0.0
 
         log(
             f"[Epoch {epoch_id}] stage={stage_name}, beta_kl={beta_t:.6f}, "
-            f"lambda_cov={lambda_cov_t:.6f}, "
-            f"lambda_resp_balance={lambda_resp_balance_t:.6f}, "
-            f"lambda_resp_confidence={lambda_resp_confidence_t:.6f}, "
-            f"lambda_resp_anchor={lambda_resp_anchor_t:.6f}, "
-            f"resp_temperature={resp_temperature_t:.6f}"
+            f"lambda_resp_anchor={lambda_resp_anchor_t:.6f}"
         )
 
-        phase1_force_base_posterior = in_stage1
+        force_base_posterior = False
 
         train_sampler.set_epoch(epoch_id)
         if val_sampler is not None:
             val_sampler.set_epoch(epoch_id)
-        if (
-            args.prior_type == "gmm"
-            and int(args.gmm_init_after_epochs) > 0
-            and (not gmm_init_done)
-            and epoch_id == int(args.gmm_init_after_epochs) + 1
-        ):
-            tag = f"epoch-{epoch_id}-start"
-            inited = False
-            if ddp_enabled:
-                if is_main_process(rank):
-                    log(f"[GMMInit] Triggered at {tag}")
-                    inited = init_gmm_from_encoder_latent(
-                        model=model,
-                        train_loader=train_loader,
-                        train_sampler=train_sampler,
-                        device=device,
-                        num_components=args.num_components,
-                        max_samples=args.gmm_init_max_samples,
-                        max_batches=args.gmm_init_max_batches,
-                        iters=args.gmm_init_iters,
-                        seed=args.seed,
-                        prior_logvar_min=args.prior_logvar_min,
-                        prior_logvar_max=args.prior_logvar_max,
-                        log_fn=log,
-                    )
-                flag = torch.tensor([1 if inited else 0], device=device, dtype=torch.int64)
-                dist.broadcast(flag, src=0)
-                base = _unwrap_model(model)
-                dist.broadcast(base.prior.pi_logits.data, src=0)
-                dist.broadcast(base.prior.prior_mu.data, src=0)
-                dist.broadcast(base.prior.prior_logvar.data, src=0)
-                if getattr(base.prior, "prior_factor", None) is not None:
-                    dist.broadcast(base.prior.prior_factor.data, src=0)
-                if hasattr(base, "post_c_logits") and base.post_c_logits is not None:
-                    for p in base.post_c_logits.parameters():
-                        dist.broadcast(p.data, src=0)
-                gmm_init_done = bool(flag.item())
-                if is_main_process(rank):
-                    log(f"[GMMInit] broadcast done, enabled={gmm_init_done}")
-            else:
-                log(f"[GMMInit] Triggered at {tag}")
-                gmm_init_done = bool(
-                    init_gmm_from_encoder_latent(
-                        model=model,
-                        train_loader=train_loader,
-                        train_sampler=train_sampler,
-                        device=device,
-                        num_components=args.num_components,
-                        max_samples=args.gmm_init_max_samples,
-                        max_batches=args.gmm_init_max_batches,
-                        iters=args.gmm_init_iters,
-                        seed=args.seed,
-                        prior_logvar_min=args.prior_logvar_min,
-                        prior_logvar_max=args.prior_logvar_max,
-                        log_fn=log,
-                    )
-                )
-
         loss_full, loss_recon, loss_kl, loss_score, loss_contrast, loss_cov, loss_prior_pi_balance, loss_celltype_cls = train_gmm_vae_one_epoch(
             model=model,
             optimizer=optimizer,
@@ -866,28 +617,28 @@ def main():
             mask_aug_policy=args.mask_aug_policy,
             mask_aug_min_frac=args.mask_aug_min_frac,
             mask_aug_max_frac=args.mask_aug_max_frac,
-            lambda_score=args.lambda_score,
-            score_noise_std=args.score_noise_std,
-            score_detach_z=args.score_detach_z,
             lambda_contrast=args.lambda_contrast,
             contrast_temp=args.contrast_temp,
-            lambda_real_recon=args.lambda_real_recon,
-            lambda_cov=lambda_cov_t,
-            cov_use_mu=args.cov_use_mu,
-            lambda_resp_balance=lambda_resp_balance_t,
-            lambda_resp_confidence=lambda_resp_confidence_t,
+            lambda_real_recon=0.0,
             lambda_resp_anchor=lambda_resp_anchor_t,
-            resp_temperature=resp_temperature_t,
-            resp_topk=args.resp_topk,
-            prior_logvar_min=args.prior_logvar_min,
+            lambda_score=0.0,
+            score_noise_std=0.0,
+            score_detach_z=True,
+            lambda_cov=0.0,
+            cov_use_mu=True,
+            lambda_resp_balance=0.0,
+            lambda_resp_confidence=0.0,
+            resp_temperature=1.0,
+            resp_topk=0,
+            prior_logvar_min=None,
             prior_logvar_max=args.prior_logvar_max,
-            lambda_prior_mu_l2=args.lambda_prior_mu_l2,
-            lambda_prior_factor_l2=args.lambda_prior_factor_l2,
-            lambda_prior_pi_balance=args.lambda_prior_pi_balance,
+            lambda_prior_mu_l2=0.0,
+            lambda_prior_factor_l2=0.0,
+            lambda_prior_pi_balance=0.0,
             lambda_celltype_cls=args.lambda_celltype_cls,
-            lambda_prior_logvar_l2=args.lambda_prior_logvar_l2,
-            prior_logvar_target=args.prior_logvar_target,
-            force_base_posterior=phase1_force_base_posterior,
+            lambda_prior_logvar_l2=0.0,
+            prior_logvar_target=0.0,
+            force_base_posterior=force_base_posterior,
         )
         train_msg = (
             f"[Epoch {epoch_id}] "
@@ -910,32 +661,32 @@ def main():
                 device=device,
                 beta_kl=beta_t,
                 recon_observed_only=args.recon_observed_only,
-                lambda_score=args.lambda_score,
-                score_noise_std=args.score_noise_std,
-                score_detach_z=args.score_detach_z,
+                lambda_score=0.0,
+                score_noise_std=0.0,
+                score_detach_z=True,
                 lambda_contrast=args.lambda_contrast,
                 contrast_temp=args.contrast_temp,
-                lambda_real_recon=args.lambda_real_recon,
-                lambda_cov=lambda_cov_t,
-                cov_use_mu=args.cov_use_mu,
-                lambda_resp_balance=lambda_resp_balance_t,
-                lambda_resp_confidence=lambda_resp_confidence_t,
+                lambda_real_recon=0.0,
+                lambda_cov=0.0,
+                cov_use_mu=True,
+                lambda_resp_balance=0.0,
+                lambda_resp_confidence=0.0,
                 lambda_resp_anchor=lambda_resp_anchor_t,
-                resp_temperature=resp_temperature_t,
-                resp_topk=args.resp_topk,
-                prior_logvar_min=args.prior_logvar_min,
+                resp_temperature=1.0,
+                resp_topk=0,
+                prior_logvar_min=None,
                 prior_logvar_max=args.prior_logvar_max,
-                lambda_prior_mu_l2=args.lambda_prior_mu_l2,
-                lambda_prior_factor_l2=args.lambda_prior_factor_l2,
-                lambda_prior_pi_balance=args.lambda_prior_pi_balance,
+                lambda_prior_mu_l2=0.0,
+                lambda_prior_factor_l2=0.0,
+                lambda_prior_pi_balance=0.0,
                 lambda_celltype_cls=args.lambda_celltype_cls,
-                lambda_prior_logvar_l2=args.lambda_prior_logvar_l2,
-                prior_logvar_target=args.prior_logvar_target,
+                lambda_prior_logvar_l2=0.0,
+                prior_logvar_target=0.0,
                 mask_aug_prob=args.mask_aug_prob,
                 mask_aug_policy=args.mask_aug_policy,
                 mask_aug_min_frac=args.mask_aug_min_frac,
                 mask_aug_max_frac=args.mask_aug_max_frac,
-                force_base_posterior=phase1_force_base_posterior,
+                force_base_posterior=force_base_posterior,
             )
             val_msg = (
                 f"[Epoch {epoch_id}] Validation Loss: "

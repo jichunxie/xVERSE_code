@@ -1,53 +1,75 @@
 #!/bin/bash
-#SBATCH -p biostat-gpu                     
-#SBATCH -A biostat                           
-#SBATCH --gres=gpu:1                        
-#SBATCH -c 10                              
-#SBATCH --mem=100G                        
-#SBATCH -t 20:00:00                            
+#SBATCH -p biostat-gpu
+#SBATCH -A biostat
+#SBATCH --gres=gpu:1
+#SBATCH -c 10
+#SBATCH --mem=100G
+#SBATCH -t 20:00:00
 #SBATCH -J bios
-#SBATCH --output=/hpc/group/xielab/xj58/sbatch_output/%x_output_%j.txt  
-#SBATCH --error=/hpc/group/xielab/xj58/sbatch_output/%x_error_%j.txt  
-#SBATCH --mail-user=xj58@duke.edu                 
-#SBATCH --mail-type=BEGIN,END,FAIL                
+#SBATCH --output=/hpc/group/xielab/xj58/sbatch_output/%x_output_%j.txt
+#SBATCH --error=/hpc/group/xielab/xj58/sbatch_output/%x_error_%j.txt
+#SBATCH --mail-user=xj58@duke.edu
+#SBATCH --mail-type=BEGIN,END,FAIL
 
-# Load environment
 source ~/.bashrc
 conda activate SpaRest
 
 cd /hpc/group/xielab/xj58/xVERSE_code
 
-DATA_ROOT="/hpc/group/xielab/xj58/xVerseAtlas/npz_tissue_dataset_donor"
 COMPILED_ROOT="/hpc/group/xielab/xj58/xVerseAtlas/compiled_train_v1_all"
+CELLTYPE_CSV="/hpc/group/xielab/xj58/sparest_code/standard_type/cellxgene_cell_type_mapped.csv"
 RESULT_DIR="/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_all_tissue3"
 
-CKPT_PATH="${RESULT_DIR}/best_model.pth"
-FIG2_LIVER_DIR="/hpc/group/xielab/xj58/xVerse_results/fig2/liver"
-FIG2_BRAIN_DIR="/hpc/group/xielab/xj58/xVerse_results/fig2/brain"
-FIG2_GENE_IDS="/hpc/group/xielab/xj58/xVerseAtlas/npz_tissue_dataset_donor/ensg_keys_high_quality.txt"
-FIG2_OUT_DIR="/hpc/group/xielab/xj58/xVerse_results/fig2_gmmvae_current"
-FIG2_EVAL_DIR="${FIG2_OUT_DIR}/evaluation_scib_full"
-FIG2_OLD_EVAL_DIR="/hpc/group/xielab/xj58/xVerse_results/fig2/evaluation"
+NPROC_PER_NODE=$(python - <<'PY'
+import torch
+try:
+    n = int(torch.cuda.device_count())
+except Exception:
+    n = 0
+print(max(1, n))
+PY
+)
 
-echo ">>> Running Task: Extract GMVAE embeddings on fig2 donor h5ad files"
-python reproduce_manuscript/fig2_biology_signal_gmmvae_current/02_extract_gmmvae_embedding.py \
-    --ckpt "${CKPT_PATH}" \
-    --gene-ids-path "${FIG2_GENE_IDS}" \
-    --liver-dir "${FIG2_LIVER_DIR}" \
-    --brain-dir "${FIG2_BRAIN_DIR}" \
-    --output-dir "${FIG2_OUT_DIR}" \
-    --embedding-key xVerse_gmmvae
+if [ -z "${NPROC_PER_NODE}" ]; then
+  NPROC_PER_NODE=1
+fi
 
-echo ">>> Running Task: Evaluate FMs + GMVAE with full scIB metrics"
-python reproduce_manuscript/fig2_biology_signal_gmmvae_current/03_evaluate_scib_full.py \
-    --liver-dir "${FIG2_LIVER_DIR}" \
-    --brain-dir "${FIG2_BRAIN_DIR}" \
-    --output-dir "${FIG2_EVAL_DIR}" \
-    --old-eval-dir "${FIG2_OLD_EVAL_DIR}" \
-    --gmm-key xVerse_gmmvae
+echo ">>> Running pretraining"
+echo ">>> NPROC_PER_NODE=${NPROC_PER_NODE}"
+echo ">>> COMPILED_ROOT=${COMPILED_ROOT}"
+echo ">>> RESULT_DIR=${RESULT_DIR}"
 
-
-# python main_energy/diagnose_ckpt_val.py \
-#   --ckpt /hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_all_tissue2/last_model.pth \
-#   --compiled-dataset-root /hpc/group/xielab/xj58/xVerseAtlas/compiled_train_v1_all \
-#   --val-num-workers 4
+stdbuf -oL -eL torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" -m main_energy.train_pantissue \
+  --compiled-dataset-root "${COMPILED_ROOT}" \
+  --cell-type-csv "${CELLTYPE_CSV}" \
+  --result-dir "${RESULT_DIR}" \
+  --num-epochs 100 \
+  --val-every 5 \
+  --batch-size 1024 \
+  --val-batch-size 1024 \
+  --num-workers 8 \
+  --val-num-workers 5 \
+  --prefetch-factor 8 \
+  --samples-per-id 500 \
+  --lr 5e-4 \
+  --weight-decay 1e-5 \
+  --prior-type gmm \
+  --conditional-prior-on-tissue \
+  --num-tissues 0 \
+  --latent-dim 128 \
+  --num-components 32 \
+  --prior-cov-rank 4 \
+  --posterior-cov-rank 4 \
+  --prior-logvar-max 2 \
+  --expr-hidden-dim 512 \
+  --mask-hidden-dim 512 \
+  --dec-hidden-dim 512 \
+  --beta-kl 0.001 \
+  --recon-observed-only \
+  --mask-aug-prob 1.0 \
+  --mask-aug-policy simple \
+  --mask-aug-min-frac 0.1 \
+  --mask-aug-max-frac 0.5 \
+  --lambda-celltype-cls 0 \
+  --lambda-contrast 1 \
+  --contrast-temp 0.1
