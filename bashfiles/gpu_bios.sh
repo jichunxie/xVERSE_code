@@ -59,6 +59,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --num-workers 8 \
   --val-num-workers 5 \
   --prefetch-factor 8 \
+  --no-persistent-workers \
   --samples-per-id 500 \
   --lr 5e-4 \
   --weight-decay 1e-5 \
