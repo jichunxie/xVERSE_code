@@ -18,7 +18,6 @@ import numpy as np
 import pandas as pd
 import scanpy as sc
 import torch
-import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -46,7 +45,7 @@ def parse_args():
     ap.add_argument("--liver-dir", default="/hpc/group/xielab/xj58/xVerse_results/fig2/liver")
     ap.add_argument("--brain-dir", default="/hpc/group/xielab/xj58/xVerse_results/fig2/brain")
     ap.add_argument("--output-dir", default="/hpc/group/xielab/xj58/xVerse_results/fig2_gmmvae_current")
-    ap.add_argument("--embedding-key", default="xVerse_gmmvae")
+    ap.add_argument("--embedding-key", default="xVerse_gmmvae_mixmu")
     ap.add_argument("--batch-size", type=int, default=128)
     ap.add_argument("--num-workers", type=int, default=8)
     ap.add_argument("--max-files-per-set", type=int, default=0, help="0 means all files.")
@@ -122,12 +121,11 @@ def extract_embedding_for_file(
             with torch.amp.autocast(device.type, enabled=(device.type == "cuda")):
                 out = model(x_count=x_count, x_mask=x_mask)
 
-            # Use training-style soft routing for GMVAE posterior:
-            # z = sum_k gumbel_softmax(q_c_logits)_k * z_comp_k
-            if ("q_c_logits" in out) and ("z_comp" in out):
-                c_sel = F.gumbel_softmax(out["q_c_logits"], tau=1.0, hard=False, dim=-1)
-                z_train_style = torch.sum(c_sel.unsqueeze(-1) * out["z_comp"], dim=1)
-                z_list.append(z_train_style.detach().cpu().numpy())
+            # Deterministic GMVAE embedding:
+            # mixmu = sum_k q(c=k|x) * mu_k(x)
+            if ("q_c" in out) and ("mu_comp" in out):
+                z_mixmu = torch.sum(out["q_c"].unsqueeze(-1) * out["mu_comp"], dim=1)
+                z_list.append(z_mixmu.detach().cpu().numpy())
             else:
                 z_list.append(out["z"].detach().cpu().numpy())
 

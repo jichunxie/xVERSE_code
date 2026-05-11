@@ -26,7 +26,7 @@ def parse_args():
     ap.add_argument("--brain-dir", default="/hpc/group/xielab/xj58/xVerse_results/fig2/brain")
     ap.add_argument("--output-dir", default="/hpc/group/xielab/xj58/xVerse_results/fig2_gmmvae_current/evaluation_scib_full")
     ap.add_argument("--old-eval-dir", default="/hpc/group/xielab/xj58/xVerse_results/fig2/evaluation")
-    ap.add_argument("--gmm-key", default="xVerse_gmmvae")
+    ap.add_argument("--gmm-key", default="xVerse_gmmvae_mixmu")
     ap.add_argument("--neighbors-k", type=int, default=15)
     ap.add_argument("--max-cells", type=int, default=20000, help="0 means all cells; otherwise random subsample for speed.")
     ap.add_argument("--seed", type=int, default=42)

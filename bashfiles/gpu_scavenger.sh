@@ -34,7 +34,7 @@ python reproduce_manuscript/fig2_biology_signal_gmmvae_current/02_extract_gmmvae
     --liver-dir "${FIG2_LIVER_DIR}" \
     --brain-dir "${FIG2_BRAIN_DIR}" \
     --output-dir "${FIG2_OUT_DIR}" \
-    --embedding-key xVerse_gmmvae
+    --embedding-key xVerse_gmmvae_mixmu
 
 echo ">>> Running Task: Evaluate FMs + GMVAE with full scIB metrics"
 python reproduce_manuscript/fig2_biology_signal_gmmvae_current/03_evaluate_scib_full.py \
@@ -42,7 +42,7 @@ python reproduce_manuscript/fig2_biology_signal_gmmvae_current/03_evaluate_scib_
     --brain-dir "${FIG2_BRAIN_DIR}" \
     --output-dir "${FIG2_EVAL_DIR}" \
     --old-eval-dir "${FIG2_OLD_EVAL_DIR}" \
-    --gmm-key xVerse_gmmvae \
+    --gmm-key xVerse_gmmvae_mixmu \
     --max-cells 20000
 
 
