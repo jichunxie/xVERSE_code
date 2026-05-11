@@ -18,6 +18,7 @@ import numpy as np
 import pandas as pd
 import scanpy as sc
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -120,7 +121,15 @@ def extract_embedding_for_file(
 
             with torch.amp.autocast(device.type, enabled=(device.type == "cuda")):
                 out = model(x_count=x_count, x_mask=x_mask)
-            z_list.append(out["z"].detach().cpu().numpy())
+
+            # Use training-style soft routing for GMVAE posterior:
+            # z = sum_k gumbel_softmax(q_c_logits)_k * z_comp_k
+            if ("q_c_logits" in out) and ("z_comp" in out):
+                c_sel = F.gumbel_softmax(out["q_c_logits"], tau=1.0, hard=False, dim=-1)
+                z_train_style = torch.sum(c_sel.unsqueeze(-1) * out["z_comp"], dim=1)
+                z_list.append(z_train_style.detach().cpu().numpy())
+            else:
+                z_list.append(out["z"].detach().cpu().numpy())
 
     return np.concatenate(z_list, axis=0)
 
@@ -129,42 +138,42 @@ def process_tissue_dir(args, model, gene_ids, tissue_name: str, tissue_dir: Path
     if not tissue_dir.exists():
         print(f"[WARN] tissue dir not found: {tissue_dir}")
         return
-    for gene_set in ["all", "5k", "xenium"]:
-        files = sorted(tissue_dir.glob(f"{tissue_name}_*_{gene_set}.h5ad"))
-        if args.max_files_per_set > 0:
-            files = files[: args.max_files_per_set]
-        if not files:
-            print(f"[INFO] no files for {tissue_name} / {gene_set} in {tissue_dir}")
-            continue
-        print(f"[INFO] {tissue_name}/{gene_set}: {len(files)} files")
-        for fp in files:
-            adata = sc.read_h5ad(fp)
-            start = time.time()
-            emb = extract_embedding_for_file(
-                model=model,
-                h5ad_path=fp,
-                tissue_name=tissue_name,
-                gene_ids=gene_ids,
-                tissue_map=tissue_map,
-                device=choose_device(args.device),
-                batch_size=args.batch_size,
-                num_workers=args.num_workers,
-            )
-            cost = time.time() - start
-            adata.obsm[args.embedding_key] = emb
-            adata.write(fp)
-            print(f"[OK] wrote {args.embedding_key} to {fp.name} shape={emb.shape} time={cost:.2f}s")
-            timing_records.append(
-                {
-                    "model": "gmmvae_current",
-                    "tissue": tissue_name,
-                    "gene_set": gene_set,
-                    "file": fp.name,
-                    "n_cells": int(adata.n_obs),
-                    "n_genes": int(adata.n_vars),
-                    "time_seconds": cost,
-                }
-            )
+    gene_set = "all"
+    files = sorted(tissue_dir.glob(f"{tissue_name}_*_{gene_set}.h5ad"))
+    if args.max_files_per_set > 0:
+        files = files[: args.max_files_per_set]
+    if not files:
+        print(f"[INFO] no files for {tissue_name} / {gene_set} in {tissue_dir}")
+        return
+    print(f"[INFO] {tissue_name}/{gene_set}: {len(files)} files")
+    for fp in files:
+        adata = sc.read_h5ad(fp)
+        start = time.time()
+        emb = extract_embedding_for_file(
+            model=model,
+            h5ad_path=fp,
+            tissue_name=tissue_name,
+            gene_ids=gene_ids,
+            tissue_map=tissue_map,
+            device=choose_device(args.device),
+            batch_size=args.batch_size,
+            num_workers=args.num_workers,
+        )
+        cost = time.time() - start
+        adata.obsm[args.embedding_key] = emb
+        adata.write(fp)
+        print(f"[OK] wrote {args.embedding_key} to {fp.name} shape={emb.shape} time={cost:.2f}s")
+        timing_records.append(
+            {
+                "model": "gmmvae_current",
+                "tissue": tissue_name,
+                "gene_set": gene_set,
+                "file": fp.name,
+                "n_cells": int(adata.n_obs),
+                "n_genes": int(adata.n_vars),
+                "time_seconds": cost,
+            }
+        )
 
 
 def main():

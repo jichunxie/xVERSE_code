@@ -28,7 +28,7 @@ def parse_args():
     ap.add_argument("--old-eval-dir", default="/hpc/group/xielab/xj58/xVerse_results/fig2/evaluation")
     ap.add_argument("--gmm-key", default="xVerse_gmmvae")
     ap.add_argument("--neighbors-k", type=int, default=15)
-    ap.add_argument("--max-cells", type=int, default=0, help="0 means all cells; otherwise random subsample for speed.")
+    ap.add_argument("--max-cells", type=int, default=20000, help="0 means all cells; otherwise random subsample for speed.")
     ap.add_argument("--seed", type=int, default=42)
     return ap.parse_args()
 
@@ -157,7 +157,7 @@ def main():
     all_rows = []
     all_err_rows = []
     for tissue_name, tissue_dir in [("liver", args.liver_dir), ("brain", args.brain_dir)]:
-        for gene_set in ["all", "5k", "xenium"]:
+        for gene_set in ["all"]:
             print(f"\n=== {tissue_name}/{gene_set} ===")
             adata = load_merged_tissue(tissue_dir, tissue_name, gene_set)
             adata = maybe_subsample(adata, args.max_cells, args.seed)

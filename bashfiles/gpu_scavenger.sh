@@ -17,8 +17,6 @@ conda activate SpaRest
 
 cd /hpc/group/xielab/xj58/xVERSE_code
 
-DATA_ROOT="/hpc/group/xielab/xj58/xVerseAtlas/npz_tissue_dataset_donor"
-COMPILED_ROOT="/hpc/group/xielab/xj58/xVerseAtlas/compiled_train_v1_all"
 RESULT_DIR="/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_all_tissue3"
 
 CKPT_PATH="${RESULT_DIR}/best_model.pth"
@@ -44,7 +42,8 @@ python reproduce_manuscript/fig2_biology_signal_gmmvae_current/03_evaluate_scib_
     --brain-dir "${FIG2_BRAIN_DIR}" \
     --output-dir "${FIG2_EVAL_DIR}" \
     --old-eval-dir "${FIG2_OLD_EVAL_DIR}" \
-    --gmm-key xVerse_gmmvae
+    --gmm-key xVerse_gmmvae \
+    --max-cells 20000
 
 
 # python main_energy/diagnose_ckpt_val.py \
