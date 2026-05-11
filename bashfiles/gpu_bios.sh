@@ -50,6 +50,8 @@ fi
 
 stdbuf -oL -eL "${RUN_CMD[@]}" \
   --compiled-dataset-root "${COMPILED_ROOT}" \
+  --compiled-max-cached-shards 32 \
+  --sampler-shard-reorder-window 16384 \
   --cell-type-csv "${CELLTYPE_CSV}" \
   --result-dir "${RESULT_DIR}" \
   --num-epochs 100 \
