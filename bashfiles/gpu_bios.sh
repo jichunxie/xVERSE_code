@@ -15,6 +15,7 @@ source ~/.bashrc
 conda activate SpaRest
 
 cd /hpc/group/xielab/xj58/xVERSE_code
+export PYTHONUNBUFFERED=1
 
 COMPILED_ROOT="/hpc/group/xielab/xj58/xVerseAtlas/compiled_train_v1_all"
 CELLTYPE_CSV="/hpc/group/xielab/xj58/sparest_code/standard_type/cellxgene_cell_type_mapped.csv"
@@ -39,7 +40,15 @@ echo ">>> NPROC_PER_NODE=${NPROC_PER_NODE}"
 echo ">>> COMPILED_ROOT=${COMPILED_ROOT}"
 echo ">>> RESULT_DIR=${RESULT_DIR}"
 
-stdbuf -oL -eL torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" -m main_energy.train_pantissue \
+if [ "${NPROC_PER_NODE}" -le 1 ]; then
+  echo ">>> Single GPU mode: use python -m (no torchrun)"
+  RUN_CMD=(python -u -m main_energy.train_pantissue)
+else
+  echo ">>> Multi-GPU mode: use torchrun"
+  RUN_CMD=(torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" -m main_energy.train_pantissue)
+fi
+
+stdbuf -oL -eL "${RUN_CMD[@]}" \
   --compiled-dataset-root "${COMPILED_ROOT}" \
   --cell-type-csv "${CELLTYPE_CSV}" \
   --result-dir "${RESULT_DIR}" \
