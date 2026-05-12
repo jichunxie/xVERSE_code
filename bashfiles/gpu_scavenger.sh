@@ -17,42 +17,48 @@ conda activate SpaRest
 
 cd /hpc/group/xielab/xj58/xVERSE_code
 
-RESULT_DIR="/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_all_tissue3"
-
-CKPT_PATH="${RESULT_DIR}/best_model.pth"
 FIG2_LIVER_DIR="/hpc/group/xielab/xj58/xVerse_results/fig2/liver"
 FIG2_BRAIN_DIR="/hpc/group/xielab/xj58/xVerse_results/fig2/brain"
 FIG2_GENE_IDS="/hpc/group/xielab/xj58/xVerseAtlas/npz_tissue_dataset_donor/ensg_keys_high_quality.txt"
-FIG2_OUT_DIR="/hpc/group/xielab/xj58/xVerse_results/fig2_gmmvae_current"
-FIG2_EVAL_DIR="${FIG2_OUT_DIR}/evaluation_scib_full"
 FIG2_OLD_EVAL_DIR="/hpc/group/xielab/xj58/xVerse_results/fig2/evaluation"
 
-# echo ">>> Running Task: Extract GMVAE embeddings on fig2 donor h5ad files"
-# python reproduce_manuscript/fig2_biology_signal_gmmvae_current/02_extract_gmmvae_embedding.py \
-#     --ckpt "${CKPT_PATH}" \
-#     --gene-ids-path "${FIG2_GENE_IDS}" \
-#     --liver-dir "${FIG2_LIVER_DIR}" \
-#     --brain-dir "${FIG2_BRAIN_DIR}" \
-#     --output-dir "${FIG2_OUT_DIR}" \
-#     --embedding-key xVerse_gmmvae_mixmu
+run_one_model () {
+  MODEL_TAG="$1"
+  RESULT_DIR="$2"
+  CKPT_PATH="${RESULT_DIR}/best_model.pth"
+  FIG2_OUT_DIR="/hpc/group/xielab/xj58/xVerse_results/fig2_gmmvae_${MODEL_TAG}"
+  FIG2_EVAL_DIR="${FIG2_OUT_DIR}/evaluation_scib_full"
 
-# echo ">>> Running Task: Evaluate FMs + GMVAE with full scIB metrics"
-# python reproduce_manuscript/fig2_biology_signal_gmmvae_current/03_evaluate_scib_full.py \
-#     --liver-dir "${FIG2_LIVER_DIR}" \
-#     --brain-dir "${FIG2_BRAIN_DIR}" \
-#     --output-dir "${FIG2_EVAL_DIR}" \
-#     --old-eval-dir "${FIG2_OLD_EVAL_DIR}" \
-#     --gmm-key xVerse_gmmvae_mixmu \
-#     --max-cells 20000
+  echo ">>> [${MODEL_TAG}] Extract embeddings from ${CKPT_PATH}"
+  python reproduce_manuscript/fig2_biology_signal_gmmvae_current/02_extract_gmmvae_embedding.py \
+      --ckpt "${CKPT_PATH}" \
+      --gene-ids-path "${FIG2_GENE_IDS}" \
+      --liver-dir "${FIG2_LIVER_DIR}" \
+      --brain-dir "${FIG2_BRAIN_DIR}" \
+      --output-dir "${FIG2_OUT_DIR}" \
+      --embedding-key xVerse_gmmvae_mixmu
 
-echo ">>> Running Task: Plot UMAP for GMVAE mixmu embedding"
-python reproduce_manuscript/fig2_biology_signal_gmmvae_current/04_plot_umap.py \
-    --liver-dir "${FIG2_LIVER_DIR}" \
-    --brain-dir "${FIG2_BRAIN_DIR}" \
-    --output-dir "${FIG2_OUT_DIR}/umap" \
-    --embedding-key xVerse_gmmvae_mixmu \
-    --gene-set all \
-    --max-cells 20000
+  echo ">>> [${MODEL_TAG}] Evaluate FMs + GMVAE (scIB full)"
+  python reproduce_manuscript/fig2_biology_signal_gmmvae_current/03_evaluate_scib_full.py \
+      --liver-dir "${FIG2_LIVER_DIR}" \
+      --brain-dir "${FIG2_BRAIN_DIR}" \
+      --output-dir "${FIG2_EVAL_DIR}" \
+      --old-eval-dir "${FIG2_OLD_EVAL_DIR}" \
+      --gmm-key xVerse_gmmvae_mixmu \
+      --max-cells 20000
+
+  echo ">>> [${MODEL_TAG}] Plot UMAP"
+  python reproduce_manuscript/fig2_biology_signal_gmmvae_current/04_plot_umap.py \
+      --liver-dir "${FIG2_LIVER_DIR}" \
+      --brain-dir "${FIG2_BRAIN_DIR}" \
+      --output-dir "${FIG2_OUT_DIR}/umap" \
+      --embedding-key xVerse_gmmvae_mixmu \
+      --gene-set all \
+      --max-cells 20000
+}
+
+run_one_model "poisson" "/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_all_tissue_poisson"
+run_one_model "nb" "/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_all_tissue_nb"
 
 
 # python main_energy/diagnose_ckpt_val.py \
