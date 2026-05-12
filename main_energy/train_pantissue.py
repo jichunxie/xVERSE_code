@@ -136,6 +136,8 @@ def parse_args():
                         help="Upper clamp bound for GMM prior log-variance.")
     parser.add_argument("--lambda-contrast", type=float, default=1.0,
                         help="Weight of contrastive loss between real-mask and fake-mask views.")
+    parser.add_argument("--lambda-real-recon", type=float, default=0.1,
+                        help="Weight of real-mask reconstruction loss term.")
     parser.add_argument("--contrast-temp", type=float, default=0.1,
                         help="Temperature for bidirectional InfoNCE contrastive loss.")
     parser.add_argument("--ddp", action="store_true", default=True,
@@ -645,7 +647,7 @@ def main():
             mask_aug_max_frac=args.mask_aug_max_frac,
             lambda_contrast=args.lambda_contrast,
             contrast_temp=args.contrast_temp,
-            lambda_real_recon=0.0,
+            lambda_real_recon=args.lambda_real_recon,
             lambda_resp_anchor=lambda_resp_anchor_t,
             lambda_score=0.0,
             score_noise_std=0.0,
@@ -692,7 +694,7 @@ def main():
                 score_detach_z=True,
                 lambda_contrast=args.lambda_contrast,
                 contrast_temp=args.contrast_temp,
-                lambda_real_recon=0.0,
+                lambda_real_recon=args.lambda_real_recon,
                 lambda_cov=0.0,
                 cov_use_mu=True,
                 lambda_resp_balance=0.0,

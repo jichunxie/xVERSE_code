@@ -82,4 +82,5 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --mask-aug-max-frac 0.25 \
   --lambda-celltype-cls 0.1 \
   --lambda-contrast 0.1 \
+  --lambda-real-recon 0.1 \
   --contrast-temp 0.1
