@@ -134,6 +134,12 @@ def parse_args():
                         help="Weight for auxiliary celltype cross-entropy loss (ignore label -1).")
     parser.add_argument("--prior-logvar-max", type=float, default=4.0,
                         help="Upper clamp bound for GMM prior log-variance.")
+    parser.add_argument("--lambda-prior-pi-balance", type=float, default=0.0,
+                        help="Weight for balancing global mixture weights toward uniform.")
+    parser.add_argument("--lambda-prior-mu-spread", type=float, default=0.0,
+                        help="Weight for repulsive regularization between prior component means.")
+    parser.add_argument("--prior-mu-spread-tau", type=float, default=1.0,
+                        help="Length scale for prior mean spread regularization (smaller => stronger local repulsion).")
     parser.add_argument("--lambda-contrast", type=float, default=1.0,
                         help="Weight of contrastive loss between real-mask and fake-mask views.")
     parser.add_argument("--lambda-real-recon", type=float, default=0.1,
@@ -662,7 +668,9 @@ def main():
             prior_logvar_max=args.prior_logvar_max,
             lambda_prior_mu_l2=0.0,
             lambda_prior_factor_l2=0.0,
-            lambda_prior_pi_balance=0.0,
+            lambda_prior_pi_balance=args.lambda_prior_pi_balance,
+            lambda_prior_mu_spread=args.lambda_prior_mu_spread,
+            prior_mu_spread_tau=args.prior_mu_spread_tau,
             lambda_celltype_cls=args.lambda_celltype_cls,
             lambda_prior_logvar_l2=0.0,
             prior_logvar_target=0.0,
@@ -706,7 +714,9 @@ def main():
                 prior_logvar_max=args.prior_logvar_max,
                 lambda_prior_mu_l2=0.0,
                 lambda_prior_factor_l2=0.0,
-                lambda_prior_pi_balance=0.0,
+                lambda_prior_pi_balance=args.lambda_prior_pi_balance,
+                lambda_prior_mu_spread=args.lambda_prior_mu_spread,
+                prior_mu_spread_tau=args.prior_mu_spread_tau,
                 lambda_celltype_cls=args.lambda_celltype_cls,
                 lambda_prior_logvar_l2=0.0,
                 prior_logvar_target=0.0,
