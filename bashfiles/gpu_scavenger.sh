@@ -57,7 +57,7 @@ run_one_model () {
       --max-cells 20000
 }
 
-run_one_model "nb" "/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_all_tissue0511_nb_smallcontrast_weighted"
+run_one_model "nb" "/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_all_tissue0511_nb_smallcontrast"
 # run_one_model "poisson" "/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_all_tissue_poisson"
 
 
