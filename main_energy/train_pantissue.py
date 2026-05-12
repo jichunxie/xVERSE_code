@@ -116,6 +116,18 @@ def parse_args():
                         help="For gmm_vae, compute Poisson NLL only on observed genes.")
     parser.add_argument("--recon-loss", choices=["poisson", "nb"], default="poisson",
                         help="Reconstruction loss type for count model.")
+    parser.add_argument("--recon-gene-weight-mode", choices=["none", "inv_log1p_mean_ema"], default="none",
+                        help="Optional gene-wise reconstruction reweighting mode.")
+    parser.add_argument("--recon-gene-weight-alpha", type=float, default=0.0,
+                        help="Mixing strength for gene-wise recon weighting. 0 disables weighting.")
+    parser.add_argument("--recon-gene-weight-ema-momentum", type=float, default=0.99,
+                        help="EMA momentum for gene mean used by recon weighting.")
+    parser.add_argument("--recon-gene-weight-min", type=float, default=0.3,
+                        help="Lower clip bound for gene recon weights.")
+    parser.add_argument("--recon-gene-weight-max", type=float, default=3.0,
+                        help="Upper clip bound for gene recon weights.")
+    parser.add_argument("--recon-gene-weight-eps", type=float, default=1e-6,
+                        help="Numerical epsilon for gene recon weighting.")
     parser.add_argument("--mask-aug-prob", type=float, default=1.0,
                         help="For gmm_vae training, probability of applying random observed->unobserved masking per cell.")
     parser.add_argument("--mask-aug-policy", choices=["xverse", "simple"], default="xverse",
@@ -674,6 +686,12 @@ def main():
             lambda_celltype_cls=args.lambda_celltype_cls,
             lambda_prior_logvar_l2=0.0,
             prior_logvar_target=0.0,
+            recon_gene_weight_mode=args.recon_gene_weight_mode,
+            recon_gene_weight_alpha=args.recon_gene_weight_alpha,
+            recon_gene_weight_ema_momentum=args.recon_gene_weight_ema_momentum,
+            recon_gene_weight_min=args.recon_gene_weight_min,
+            recon_gene_weight_max=args.recon_gene_weight_max,
+            recon_gene_weight_eps=args.recon_gene_weight_eps,
             force_base_posterior=force_base_posterior,
         )
         train_msg = (
@@ -720,6 +738,12 @@ def main():
                 lambda_celltype_cls=args.lambda_celltype_cls,
                 lambda_prior_logvar_l2=0.0,
                 prior_logvar_target=0.0,
+                recon_gene_weight_mode=args.recon_gene_weight_mode,
+                recon_gene_weight_alpha=args.recon_gene_weight_alpha,
+                recon_gene_weight_ema_momentum=args.recon_gene_weight_ema_momentum,
+                recon_gene_weight_min=args.recon_gene_weight_min,
+                recon_gene_weight_max=args.recon_gene_weight_max,
+                recon_gene_weight_eps=args.recon_gene_weight_eps,
                 mask_aug_prob=args.mask_aug_prob,
                 mask_aug_policy=args.mask_aug_policy,
                 mask_aug_min_frac=args.mask_aug_min_frac,
