@@ -57,8 +57,8 @@ run_one_model () {
       --max-cells 20000
 }
 
-run_one_model "poisson" "/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_all_tissue_poisson"
-run_one_model "nb" "/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_all_tissue_nb"
+run_one_model "poisson" "/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_all_tissue0511_poisson"
+run_one_model "nb" "/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_all_tissue0511_nb"
 
 
 # python main_energy/diagnose_ckpt_val.py \
