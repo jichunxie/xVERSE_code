@@ -74,16 +74,16 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --expr-hidden-dim 512 \
   --mask-hidden-dim 512 \
   --dec-hidden-dim 512 \
-  --beta-kl 0.1 \
+  --beta-kl 0.01 \
   --recon-observed-only \
   --mask-aug-prob 1.0 \
   --mask-aug-policy simple \
   --mask-aug-min-frac 0.1 \
   --mask-aug-max-frac 0.5 \
-  --lambda-celltype-cls 0.1 \
-  --lambda-contrast 0.1 \
+  --lambda-celltype-cls 1 \
+  --lambda-contrast 1 \
   --lambda-real-recon 0.1 \
   --lambda-prior-pi-balance 0.01 \
-  --lambda-prior-mu-spread 0.01 \
+  --lambda-prior-mu-spread 0 \
   --prior-mu-spread-tau 1.0 \
   --contrast-temp 0.1
