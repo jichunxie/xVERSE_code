@@ -79,7 +79,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --mask-aug-prob 1.0 \
   --mask-aug-policy simple \
   --mask-aug-min-frac 0.1 \
-  --mask-aug-max-frac 0.25 \
+  --mask-aug-max-frac 0.5 \
   --lambda-celltype-cls 0.1 \
   --lambda-contrast 0.1 \
   --lambda-real-recon 0.1 \
