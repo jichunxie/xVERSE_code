@@ -64,11 +64,18 @@ def choose_device(mode: str) -> torch.device:
 def build_model_from_ckpt(ckpt_path: str, device: torch.device):
     ckpt = torch.load(ckpt_path, map_location=device)
     saved_args = ckpt.get("args", {})
+    state = ckpt.get("model_state_dict", ckpt)
+    state = {k.replace("module.", ""): v for k, v in state.items()}
+    prior_shared_cov = bool(saved_args.get("prior_shared_cov", saved_args.get("prior_shared_covariance", False)))
+    num_batches = int(saved_args.get("num_batches", 0))
+    if num_batches <= 0 and "batch_embedding.weight" in state:
+        num_batches = int(state["batch_embedding.weight"].shape[0])
     model = MaskFiLMGMMVAE(
         num_genes=int(saved_args.get("total_gene", 17999)),
         latent_dim=int(saved_args.get("latent_dim", 128)),
         num_components=int(saved_args.get("num_components", 16)),
         prior_cov_rank=int(saved_args.get("prior_cov_rank", 8)),
+        prior_shared_covariance=prior_shared_cov,
         posterior_cov_rank=int(saved_args.get("posterior_cov_rank", 0)),
         expr_hidden_dim=int(saved_args.get("expr_hidden_dim", 1024)),
         mask_hidden_dim=int(saved_args.get("mask_hidden_dim", 512)),
@@ -76,11 +83,14 @@ def build_model_from_ckpt(ckpt_path: str, device: torch.device):
         dropout=float(saved_args.get("dropout", 0.1)),
         prior_type=str(saved_args.get("prior_type", "gmm")),
         num_cell_types=int(saved_args.get("num_cell_types", 0)),
+        conditional_prior_on_tissue=bool(saved_args.get("conditional_prior_on_tissue", False)),
+        num_tissues=int(saved_args.get("num_tissues", 0)),
+        num_batches=num_batches,
+        batch_emb_dim=int(saved_args.get("batch_emb_dim", 0)),
+        batch_cond_drop_prob=0.0,
+        recon_loss_type=str(saved_args.get("recon_loss", saved_args.get("recon_loss_type", "poisson"))),
     ).to(device)
 
-    state = ckpt.get("model_state_dict", ckpt)
-    # DDP compatibility: strip "module." if present
-    state = {k.replace("module.", ""): v for k, v in state.items()}
     ret = model.load_state_dict(state, strict=False)
     model.eval()
     return model, ret
@@ -119,7 +129,7 @@ def extract_embedding_for_file(
             x_count = torch.clamp(x_count, min=0.0)
 
             with torch.amp.autocast(device.type, enabled=(device.type == "cuda")):
-                out = model(x_count=x_count, x_mask=x_mask)
+                out = model(x_count=x_count, x_mask=x_mask, use_batch_condition=False)
 
             # Deterministic GMVAE embedding:
             # mixmu = sum_k q(c=k|x) * mu_k(x)
