@@ -176,6 +176,8 @@ def parse_args():
                         help="Weight for repulsive regularization between prior component means.")
     parser.add_argument("--prior-mu-spread-tau", type=float, default=1.0,
                         help="Length scale for prior mean spread regularization (smaller => stronger local repulsion).")
+    parser.add_argument("--lambda-post-c-balance", type=float, default=0.0,
+                        help="Weight for batch-level posterior component usage balance KL(q_mean(c)||uniform).")
     parser.add_argument("--lambda-contrast", type=float, default=1.0,
                         help="Weight of contrastive loss between real-mask and fake-mask views.")
     parser.add_argument("--lambda-real-recon", type=float, default=0.1,
@@ -721,6 +723,7 @@ def main():
             lambda_prior_pi_balance=args.lambda_prior_pi_balance,
             lambda_prior_mu_spread=args.lambda_prior_mu_spread,
             prior_mu_spread_tau=args.prior_mu_spread_tau,
+            lambda_post_c_balance=args.lambda_post_c_balance,
             lambda_celltype_cls=args.lambda_celltype_cls,
             lambda_prior_logvar_l2=0.0,
             prior_logvar_target=0.0,
@@ -783,6 +786,7 @@ def main():
                 lambda_prior_pi_balance=args.lambda_prior_pi_balance,
                 lambda_prior_mu_spread=args.lambda_prior_mu_spread,
                 prior_mu_spread_tau=args.prior_mu_spread_tau,
+                lambda_post_c_balance=args.lambda_post_c_balance,
                 lambda_celltype_cls=args.lambda_celltype_cls,
                 lambda_prior_logvar_l2=0.0,
                 prior_logvar_target=0.0,

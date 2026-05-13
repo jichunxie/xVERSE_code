@@ -622,6 +622,7 @@ class MaskFiLMGMMVAE(nn.Module):
         lambda_prior_pi_balance: float = 0.0,
         lambda_prior_mu_spread: float = 0.0,
         prior_mu_spread_tau: float = 1.0,
+        lambda_post_c_balance: float = 0.0,
         lambda_celltype_cls: float = 0.0,
         lambda_prior_logvar_l2: float = 0.0,
         prior_logvar_target: float = -2.0,
@@ -750,6 +751,7 @@ class MaskFiLMGMMVAE(nn.Module):
         prior_factor_l2_loss = torch.zeros((), device=z.device, dtype=z.dtype)
         prior_pi_balance_loss = torch.zeros((), device=z.device, dtype=z.dtype)
         prior_mu_spread_loss = torch.zeros((), device=z.device, dtype=z.dtype)
+        post_c_balance_loss = torch.zeros((), device=z.device, dtype=z.dtype)
         celltype_cls_loss = torch.zeros((), device=z.device, dtype=z.dtype)
         prior_logvar_l2_loss = torch.zeros((), device=z.device, dtype=z.dtype)
 
@@ -788,6 +790,16 @@ class MaskFiLMGMMVAE(nn.Module):
                 off = d2.masked_fill(eye, float("inf"))
                 tau = max(float(prior_mu_spread_tau), 1e-6)
                 prior_mu_spread_loss = torch.exp(-off / tau).mean().to(z.dtype)
+        if self.prior_type == "gmm" and lambda_post_c_balance > 0 and (not force_base_posterior):
+            q_c_cur = out.get("q_c", None)
+            if q_c_cur is not None:
+                q_mean = q_c_cur.float().mean(dim=0)
+                target = torch.full_like(q_mean, 1.0 / float(q_mean.numel()))
+                post_c_balance_loss = F.kl_div(
+                    torch.log(torch.clamp(q_mean, min=1e-12)),
+                    target,
+                    reduction="sum",
+                ).to(z.dtype)
         if self.prior_type == "gmm" and lambda_prior_logvar_l2 > 0:
             if getattr(self.prior, "conditional_on_tissue", False) and getattr(self.prior, "prior_logvar_t", None) is not None:
                 tgt = torch.full_like(self.prior.prior_logvar_t, float(prior_logvar_target)).float()
@@ -823,6 +835,8 @@ class MaskFiLMGMMVAE(nn.Module):
             total_loss = total_loss + float(lambda_prior_pi_balance) * prior_pi_balance_loss
         if float(lambda_prior_mu_spread) != 0.0:
             total_loss = total_loss + float(lambda_prior_mu_spread) * prior_mu_spread_loss
+        if float(lambda_post_c_balance) != 0.0:
+            total_loss = total_loss + float(lambda_post_c_balance) * post_c_balance_loss
         if float(lambda_celltype_cls) != 0.0:
             total_loss = total_loss + float(lambda_celltype_cls) * celltype_cls_loss
         if float(lambda_prior_logvar_l2) != 0.0:
@@ -845,6 +859,7 @@ class MaskFiLMGMMVAE(nn.Module):
             "prior_factor_l2_loss": prior_factor_l2_loss,
             "prior_pi_balance_loss": prior_pi_balance_loss,
             "prior_mu_spread_loss": prior_mu_spread_loss,
+            "post_c_balance_loss": post_c_balance_loss,
             "celltype_cls_loss": celltype_cls_loss,
             "prior_logvar_l2_loss": prior_logvar_l2_loss,
             "score_norm_pred": score_norm_pred,
@@ -1324,6 +1339,7 @@ def train_gmm_vae_one_epoch(
     lambda_prior_pi_balance=0.0,
     lambda_prior_mu_spread=0.0,
     prior_mu_spread_tau=1.0,
+    lambda_post_c_balance=0.0,
     lambda_celltype_cls=0.0,
     lambda_prior_logvar_l2=0.0,
     prior_logvar_target=-2.0,
@@ -1390,6 +1406,7 @@ def train_gmm_vae_one_epoch(
                 lambda_prior_pi_balance=lambda_prior_pi_balance,
                 lambda_prior_mu_spread=lambda_prior_mu_spread,
                 prior_mu_spread_tau=prior_mu_spread_tau,
+                lambda_post_c_balance=lambda_post_c_balance,
                 lambda_celltype_cls=lambda_celltype_cls,
                 lambda_prior_logvar_l2=lambda_prior_logvar_l2,
                 prior_logvar_target=prior_logvar_target,
@@ -1437,6 +1454,7 @@ def train_gmm_vae_one_epoch(
                     lambda_prior_pi_balance=0.0,
                     lambda_prior_mu_spread=0.0,
                     prior_mu_spread_tau=prior_mu_spread_tau,
+                    lambda_post_c_balance=0.0,
                     lambda_celltype_cls=0.0,
                     lambda_prior_logvar_l2=0.0,
                     prior_logvar_target=prior_logvar_target,
@@ -1485,6 +1503,7 @@ def train_gmm_vae_one_epoch(
                     lambda_prior_pi_balance=0.0,
                     lambda_prior_mu_spread=0.0,
                     prior_mu_spread_tau=prior_mu_spread_tau,
+                    lambda_post_c_balance=0.0,
                     lambda_celltype_cls=0.0,
                     lambda_prior_logvar_l2=0.0,
                     prior_logvar_target=prior_logvar_target,
@@ -1524,6 +1543,7 @@ def train_gmm_vae_one_epoch(
             score = out_fake["score_loss"]
             cov = out_fake["cov_loss"]
             prior_pi_balance = out_fake.get("prior_pi_balance_loss", torch.zeros_like(cov))
+            post_c_balance = out_fake.get("post_c_balance_loss", torch.zeros_like(cov))
             celltype_cls = out_fake.get("celltype_cls_loss", torch.zeros_like(cov))
 
         if not torch.isfinite(loss):
@@ -1564,6 +1584,8 @@ def train_gmm_vae_one_epoch(
                 msg += f", RealRecon={real_recon.item():.4f}"
             if lambda_batchless_recon > 0:
                 msg += f", BatchlessRecon={batchless_recon.item():.4f}"
+            if lambda_post_c_balance > 0:
+                msg += f", postCBal={post_c_balance.item():.4f}"
             msg += (
                 f", respH={out_fake['resp_entropy'].item():.4f}"
             )
@@ -1625,6 +1647,7 @@ def evaluate_gmm_vae_one_epoch(
     lambda_prior_pi_balance=0.0,
     lambda_prior_mu_spread=0.0,
     prior_mu_spread_tau=1.0,
+    lambda_post_c_balance=0.0,
     lambda_celltype_cls=0.0,
     lambda_prior_logvar_l2=0.0,
     prior_logvar_target=-2.0,
@@ -1706,6 +1729,7 @@ def evaluate_gmm_vae_one_epoch(
                 lambda_prior_pi_balance=lambda_prior_pi_balance,
                 lambda_prior_mu_spread=lambda_prior_mu_spread,
                 prior_mu_spread_tau=prior_mu_spread_tau,
+                lambda_post_c_balance=lambda_post_c_balance,
                 lambda_celltype_cls=lambda_celltype_cls,
                 lambda_prior_logvar_l2=lambda_prior_logvar_l2,
                 prior_logvar_target=prior_logvar_target,
@@ -1753,6 +1777,7 @@ def evaluate_gmm_vae_one_epoch(
                     lambda_prior_pi_balance=0.0,
                     lambda_prior_mu_spread=0.0,
                     prior_mu_spread_tau=prior_mu_spread_tau,
+                    lambda_post_c_balance=0.0,
                     lambda_celltype_cls=0.0,
                     lambda_prior_logvar_l2=0.0,
                     prior_logvar_target=prior_logvar_target,
@@ -1801,6 +1826,7 @@ def evaluate_gmm_vae_one_epoch(
                     lambda_prior_pi_balance=0.0,
                     lambda_prior_mu_spread=0.0,
                     prior_mu_spread_tau=prior_mu_spread_tau,
+                    lambda_post_c_balance=0.0,
                     lambda_celltype_cls=0.0,
                     lambda_prior_logvar_l2=0.0,
                     prior_logvar_target=prior_logvar_target,
