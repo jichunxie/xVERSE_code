@@ -130,7 +130,7 @@ def parse_args():
                         help="Upper clip bound for gene recon weights.")
     parser.add_argument("--recon-gene-weight-eps", type=float, default=1e-6,
                         help="Numerical epsilon for gene recon weighting.")
-    parser.add_argument("--recon-cell-weight-mode", choices=["none", "component_usage"], default="none",
+    parser.add_argument("--recon-cell-weight-mode", choices=["none", "component_usage", "batch_kmeans"], default="none",
                         help="Optional cell-wise reconstruction reweighting mode.")
     parser.add_argument("--recon-cell-weight-alpha", type=float, default=0.0,
                         help="Mixing strength for cell-wise recon weighting. 0 disables weighting.")
@@ -140,6 +140,10 @@ def parse_args():
                         help="Upper clip bound for cell recon weights.")
     parser.add_argument("--recon-cell-weight-eps", type=float, default=1e-6,
                         help="Numerical epsilon for cell recon weighting.")
+    parser.add_argument("--recon-cell-weight-clusters", type=int, default=32,
+                        help="Number of batch k-means clusters for cell recon weighting.")
+    parser.add_argument("--recon-cell-weight-kmeans-iters", type=int, default=2,
+                        help="Fast k-means iterations for batch_kmeans cell recon weighting.")
     parser.add_argument("--mask-aug-prob", type=float, default=1.0,
                         help="For gmm_vae training, probability of applying random observed->unobserved masking per cell.")
     parser.add_argument("--mask-aug-policy", choices=["xverse", "simple"], default="xverse",
@@ -731,6 +735,8 @@ def main():
             recon_cell_weight_min=args.recon_cell_weight_min,
             recon_cell_weight_max=args.recon_cell_weight_max,
             recon_cell_weight_eps=args.recon_cell_weight_eps,
+            recon_cell_weight_clusters=args.recon_cell_weight_clusters,
+            recon_cell_weight_kmeans_iters=args.recon_cell_weight_kmeans_iters,
             lambda_batchless_recon=args.lambda_batchless_recon,
             force_base_posterior=force_base_posterior,
         )
@@ -791,6 +797,8 @@ def main():
                 recon_cell_weight_min=args.recon_cell_weight_min,
                 recon_cell_weight_max=args.recon_cell_weight_max,
                 recon_cell_weight_eps=args.recon_cell_weight_eps,
+                recon_cell_weight_clusters=args.recon_cell_weight_clusters,
+                recon_cell_weight_kmeans_iters=args.recon_cell_weight_kmeans_iters,
                 lambda_batchless_recon=args.lambda_batchless_recon,
                 mask_aug_prob=args.mask_aug_prob,
                 mask_aug_policy=args.mask_aug_policy,

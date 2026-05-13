@@ -636,6 +636,8 @@ class MaskFiLMGMMVAE(nn.Module):
         recon_cell_weight_min: float = 0.5,
         recon_cell_weight_max: float = 2.0,
         recon_cell_weight_eps: float = 1e-6,
+        recon_cell_weight_clusters: int = 32,
+        recon_cell_weight_kmeans_iters: int = 2,
     ) -> Dict[str, torch.Tensor]:
         if encoder_mask is None:
             encoder_mask = x_mask
@@ -669,11 +671,14 @@ class MaskFiLMGMMVAE(nn.Module):
             q_c_for_weight = out.get("q_c", None)
         cell_weight = self._build_recon_cell_weight(
             q_c=q_c_for_weight,
+            z=z,
             mode=recon_cell_weight_mode,
             alpha=recon_cell_weight_alpha,
             w_min=recon_cell_weight_min,
             w_max=recon_cell_weight_max,
             eps=recon_cell_weight_eps,
+            num_clusters=recon_cell_weight_clusters,
+            kmeans_iters=recon_cell_weight_kmeans_iters,
         )
         if self.recon_loss_type == "nb":
             if recon_mask is None:
@@ -888,28 +893,60 @@ class MaskFiLMGMMVAE(nn.Module):
     def _build_recon_cell_weight(
         self,
         q_c: Optional[torch.Tensor],
+        z: Optional[torch.Tensor] = None,
         mode: str = "none",
         alpha: float = 0.0,
         w_min: float = 0.5,
         w_max: float = 2.0,
         eps: float = 1e-6,
+        num_clusters: int = 32,
+        kmeans_iters: int = 2,
     ) -> Optional[torch.Tensor]:
         mode = str(mode).lower()
         alpha = float(alpha)
-        if mode == "none" or alpha <= 0.0 or q_c is None:
+        if mode == "none" or alpha <= 0.0:
             return None
-        if mode != "component_usage":
+        if mode not in ("component_usage", "batch_kmeans"):
             return None
 
         with torch.no_grad():
-            qc = q_c.detach().float()
-            usage = qc.mean(dim=0)
-            cell_usage = (qc * usage.view(1, -1)).sum(dim=1)
-            w = torch.rsqrt(torch.clamp(cell_usage, min=float(eps)))
+            if mode == "component_usage":
+                if q_c is None:
+                    return None
+                qc = q_c.detach().float()
+                usage = qc.mean(dim=0)
+                cell_usage = (qc * usage.view(1, -1)).sum(dim=1)
+                w = torch.rsqrt(torch.clamp(cell_usage, min=float(eps)))
+                dtype = q_c.dtype
+                device = q_c.device
+            else:
+                if z is None or z.size(0) <= 1:
+                    return None
+                zf = F.normalize(z.detach().float(), dim=-1)
+                bsz = int(zf.size(0))
+                k = max(1, min(int(num_clusters), bsz))
+                stride = max(1, bsz // k)
+                centers = zf[torch.arange(0, stride * k, stride, device=zf.device)[:k]].clone()
+                assign = torch.zeros((bsz,), dtype=torch.long, device=zf.device)
+                for _ in range(max(1, int(kmeans_iters))):
+                    assign = torch.argmin(torch.cdist(zf, centers, p=2), dim=1)
+                    new_centers = torch.zeros_like(centers)
+                    counts = torch.bincount(assign, minlength=k).to(zf.dtype)
+                    new_centers.index_add_(0, assign, zf)
+                    non_empty = counts > 0
+                    new_centers[non_empty] = new_centers[non_empty] / counts[non_empty].unsqueeze(1)
+                    if (~non_empty).any():
+                        new_centers[~non_empty] = centers[~non_empty]
+                    centers = F.normalize(new_centers, dim=-1)
+                counts = torch.bincount(assign, minlength=k).to(zf.dtype)
+                cell_usage = counts[assign] / float(bsz)
+                w = torch.rsqrt(torch.clamp(cell_usage, min=float(eps)))
+                dtype = z.dtype
+                device = z.device
             w = w / torch.clamp(w.mean(), min=float(eps))
             w = torch.clamp(w, min=float(w_min), max=float(w_max))
             w = (1.0 - alpha) + alpha * w
-        return w.to(dtype=q_c.dtype, device=q_c.device)
+        return w.to(dtype=dtype, device=device)
 
 
 def reparameterize(mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
@@ -1301,6 +1338,8 @@ def train_gmm_vae_one_epoch(
     recon_cell_weight_min=0.5,
     recon_cell_weight_max=2.0,
     recon_cell_weight_eps=1e-6,
+    recon_cell_weight_clusters=32,
+    recon_cell_weight_kmeans_iters=2,
     lambda_batchless_recon=0.0,
     force_base_posterior=False,
 ):
@@ -1365,6 +1404,8 @@ def train_gmm_vae_one_epoch(
                 recon_cell_weight_min=recon_cell_weight_min,
                 recon_cell_weight_max=recon_cell_weight_max,
                 recon_cell_weight_eps=recon_cell_weight_eps,
+                recon_cell_weight_clusters=recon_cell_weight_clusters,
+                recon_cell_weight_kmeans_iters=recon_cell_weight_kmeans_iters,
             )
             need_real_view = (lambda_contrast > 0) or (lambda_real_recon > 0)
             real_recon = torch.zeros((), device=x_count.device, dtype=out_fake["z"].dtype)
@@ -1410,6 +1451,8 @@ def train_gmm_vae_one_epoch(
                     recon_cell_weight_min=recon_cell_weight_min,
                     recon_cell_weight_max=recon_cell_weight_max,
                     recon_cell_weight_eps=recon_cell_weight_eps,
+                    recon_cell_weight_clusters=recon_cell_weight_clusters,
+                    recon_cell_weight_kmeans_iters=recon_cell_weight_kmeans_iters,
                 )
                 real_recon = out_real["recon_loss"]
             batchless_recon = torch.zeros((), device=x_count.device, dtype=out_fake["z"].dtype)
@@ -1456,6 +1499,8 @@ def train_gmm_vae_one_epoch(
                     recon_cell_weight_min=recon_cell_weight_min,
                     recon_cell_weight_max=recon_cell_weight_max,
                     recon_cell_weight_eps=recon_cell_weight_eps,
+                    recon_cell_weight_clusters=recon_cell_weight_clusters,
+                    recon_cell_weight_kmeans_iters=recon_cell_weight_kmeans_iters,
                 )
                 batchless_recon = out_batchless["recon_loss"]
             if lambda_contrast > 0:
@@ -1598,6 +1643,8 @@ def evaluate_gmm_vae_one_epoch(
     recon_cell_weight_min=0.5,
     recon_cell_weight_max=2.0,
     recon_cell_weight_eps=1e-6,
+    recon_cell_weight_clusters=32,
+    recon_cell_weight_kmeans_iters=2,
     lambda_batchless_recon=0.0,
     force_base_posterior=False,
 ):
@@ -1673,6 +1720,8 @@ def evaluate_gmm_vae_one_epoch(
                 recon_cell_weight_min=recon_cell_weight_min,
                 recon_cell_weight_max=recon_cell_weight_max,
                 recon_cell_weight_eps=recon_cell_weight_eps,
+                recon_cell_weight_clusters=recon_cell_weight_clusters,
+                recon_cell_weight_kmeans_iters=recon_cell_weight_kmeans_iters,
             )
             need_real_view = (lambda_contrast > 0) or (lambda_real_recon > 0)
             real_recon = torch.zeros((), device=x_count.device, dtype=out_fake["z"].dtype)
@@ -1718,6 +1767,8 @@ def evaluate_gmm_vae_one_epoch(
                     recon_cell_weight_min=recon_cell_weight_min,
                     recon_cell_weight_max=recon_cell_weight_max,
                     recon_cell_weight_eps=recon_cell_weight_eps,
+                    recon_cell_weight_clusters=recon_cell_weight_clusters,
+                    recon_cell_weight_kmeans_iters=recon_cell_weight_kmeans_iters,
                 )
                 real_recon = out_real["recon_loss"]
             batchless_recon = torch.zeros((), device=x_count.device, dtype=out_fake["z"].dtype)
@@ -1764,6 +1815,8 @@ def evaluate_gmm_vae_one_epoch(
                     recon_cell_weight_min=recon_cell_weight_min,
                     recon_cell_weight_max=recon_cell_weight_max,
                     recon_cell_weight_eps=recon_cell_weight_eps,
+                    recon_cell_weight_clusters=recon_cell_weight_clusters,
+                    recon_cell_weight_kmeans_iters=recon_cell_weight_kmeans_iters,
                 )
                 batchless_recon = out_batchless["recon_loss"]
             if lambda_contrast > 0:
