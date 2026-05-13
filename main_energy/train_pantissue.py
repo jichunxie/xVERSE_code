@@ -106,6 +106,8 @@ def parse_args():
     parser.add_argument("--num-components", type=int, default=16, help="GMM component count K.")
     parser.add_argument("--prior-cov-rank", type=int, default=8,
                         help="Low-rank size R for each GMM component covariance: diag + U U^T.")
+    parser.add_argument("--prior-shared-cov", action="store_true",
+                        help="Share GMM prior log-variance and low-rank covariance factor across components.")
     parser.add_argument("--posterior-cov-rank", type=int, default=0,
                         help="Low-rank size R for posterior q(z|x,c) covariance: diag + U U^T. 0 keeps diagonal posterior.")
     parser.add_argument("--expr-hidden-dim", type=int, default=1024, help="Expression encoder hidden dim.")
@@ -128,6 +130,16 @@ def parse_args():
                         help="Upper clip bound for gene recon weights.")
     parser.add_argument("--recon-gene-weight-eps", type=float, default=1e-6,
                         help="Numerical epsilon for gene recon weighting.")
+    parser.add_argument("--recon-cell-weight-mode", choices=["none", "component_usage"], default="none",
+                        help="Optional cell-wise reconstruction reweighting mode.")
+    parser.add_argument("--recon-cell-weight-alpha", type=float, default=0.0,
+                        help="Mixing strength for cell-wise recon weighting. 0 disables weighting.")
+    parser.add_argument("--recon-cell-weight-min", type=float, default=0.5,
+                        help="Lower clip bound for cell recon weights.")
+    parser.add_argument("--recon-cell-weight-max", type=float, default=2.0,
+                        help="Upper clip bound for cell recon weights.")
+    parser.add_argument("--recon-cell-weight-eps", type=float, default=1e-6,
+                        help="Numerical epsilon for cell recon weighting.")
     parser.add_argument("--mask-aug-prob", type=float, default=1.0,
                         help="For gmm_vae training, probability of applying random observed->unobserved masking per cell.")
     parser.add_argument("--mask-aug-policy", choices=["xverse", "simple"], default="xverse",
@@ -140,6 +152,14 @@ def parse_args():
                         help="Number of supervised cell types for auxiliary classification head. <=0 means auto infer from dataset.")
     parser.add_argument("--num-tissues", type=int, default=0,
                         help="Number of tissue ids for conditional prior. <=0 means auto infer from dataset.")
+    parser.add_argument("--num-batches", type=int, default=0,
+                        help="Number of sample/batch ids for decoder conditioning. <=0 means auto infer from dataset.")
+    parser.add_argument("--batch-emb-dim", type=int, default=0,
+                        help="Sample/batch embedding dim for decoder FiLM conditioning. 0 disables batch conditioning.")
+    parser.add_argument("--batch-cond-drop-prob", type=float, default=0.0,
+                        help="Probability of dropping decoder batch condition during training.")
+    parser.add_argument("--lambda-batchless-recon", type=float, default=0.0,
+                        help="Weight of reconstruction loss with decoder batch condition disabled.")
     parser.add_argument("--conditional-prior-on-tissue", action="store_true",
                         help="Use tissue-conditional GMM prior p(z|tissue).")
     parser.add_argument("--lambda-celltype-cls", type=float, default=0.0,
@@ -473,6 +493,16 @@ def main():
         num_tissues = int(inferred_num_tissues)
     log(f"[Tissue] num_tissues={num_tissues}, conditional_prior_on_tissue={args.conditional_prior_on_tissue}")
 
+    inferred_num_batches = max(ds.infer_num_samples(), val_ds.infer_num_samples())
+    if int(args.num_batches) > 0:
+        num_batches = int(args.num_batches)
+    else:
+        num_batches = int(inferred_num_batches)
+    log(
+        f"[BatchCond] num_batches={num_batches}, batch_emb_dim={args.batch_emb_dim}, "
+        f"drop_prob={args.batch_cond_drop_prob}, lambda_batchless_recon={args.lambda_batchless_recon}"
+    )
+
     loader_kwargs = dict(num_workers=args.num_workers, pin_memory=True)
     if args.num_workers > 0:
         loader_kwargs["prefetch_factor"] = args.prefetch_factor
@@ -548,6 +578,7 @@ def main():
         latent_dim=args.latent_dim,
         num_components=args.num_components,
         prior_cov_rank=args.prior_cov_rank,
+        prior_shared_covariance=args.prior_shared_cov,
         posterior_cov_rank=args.posterior_cov_rank,
         expr_hidden_dim=args.expr_hidden_dim,
         mask_hidden_dim=args.mask_hidden_dim,
@@ -557,6 +588,9 @@ def main():
         num_cell_types=num_cell_types,
         conditional_prior_on_tissue=args.conditional_prior_on_tissue,
         num_tissues=num_tissues,
+        num_batches=num_batches,
+        batch_emb_dim=args.batch_emb_dim,
+        batch_cond_drop_prob=args.batch_cond_drop_prob,
         recon_loss_type=args.recon_loss,
     ).to(device)
 
@@ -651,7 +685,7 @@ def main():
         train_sampler.set_epoch(epoch_id)
         if val_sampler is not None:
             val_sampler.set_epoch(epoch_id)
-        loss_full, loss_recon, loss_kl, loss_score, loss_contrast, loss_cov, loss_prior_pi_balance, loss_celltype_cls = train_gmm_vae_one_epoch(
+        loss_full, loss_recon, loss_kl, loss_score, loss_contrast, loss_cov, loss_prior_pi_balance, loss_celltype_cls, loss_batchless_recon = train_gmm_vae_one_epoch(
             model=model,
             optimizer=optimizer,
             scaler=scaler,
@@ -692,6 +726,12 @@ def main():
             recon_gene_weight_min=args.recon_gene_weight_min,
             recon_gene_weight_max=args.recon_gene_weight_max,
             recon_gene_weight_eps=args.recon_gene_weight_eps,
+            recon_cell_weight_mode=args.recon_cell_weight_mode,
+            recon_cell_weight_alpha=args.recon_cell_weight_alpha,
+            recon_cell_weight_min=args.recon_cell_weight_min,
+            recon_cell_weight_max=args.recon_cell_weight_max,
+            recon_cell_weight_eps=args.recon_cell_weight_eps,
+            lambda_batchless_recon=args.lambda_batchless_recon,
             force_base_posterior=force_base_posterior,
         )
         train_msg = (
@@ -701,6 +741,8 @@ def main():
         )
         if args.lambda_contrast > 0:
             train_msg += f", Contrast={loss_contrast:.4f}"
+        if args.lambda_batchless_recon > 0:
+            train_msg += f", BatchlessRecon={loss_batchless_recon:.4f}"
         log(train_msg)
 
         do_val = (
@@ -709,7 +751,7 @@ def main():
             or (epoch_id == args.num_epochs)
         )
         if do_val:
-            val_loss_full, val_loss_recon, val_loss_kl, val_loss_score, val_loss_contrast, val_loss_cov, val_loss_prior_pi_balance, val_loss_celltype_cls = evaluate_gmm_vae_one_epoch(
+            val_loss_full, val_loss_recon, val_loss_kl, val_loss_score, val_loss_contrast, val_loss_cov, val_loss_prior_pi_balance, val_loss_celltype_cls, val_loss_batchless_recon = evaluate_gmm_vae_one_epoch(
                 model=model,
                 val_loader=val_loader,
                 device=device,
@@ -744,6 +786,12 @@ def main():
                 recon_gene_weight_min=args.recon_gene_weight_min,
                 recon_gene_weight_max=args.recon_gene_weight_max,
                 recon_gene_weight_eps=args.recon_gene_weight_eps,
+                recon_cell_weight_mode=args.recon_cell_weight_mode,
+                recon_cell_weight_alpha=args.recon_cell_weight_alpha,
+                recon_cell_weight_min=args.recon_cell_weight_min,
+                recon_cell_weight_max=args.recon_cell_weight_max,
+                recon_cell_weight_eps=args.recon_cell_weight_eps,
+                lambda_batchless_recon=args.lambda_batchless_recon,
                 mask_aug_prob=args.mask_aug_prob,
                 mask_aug_policy=args.mask_aug_policy,
                 mask_aug_min_frac=args.mask_aug_min_frac,
@@ -757,6 +805,8 @@ def main():
             )
             if args.lambda_contrast > 0:
                 val_msg += f", Contrast={val_loss_contrast:.4f}"
+            if args.lambda_batchless_recon > 0:
+                val_msg += f", BatchlessRecon={val_loss_batchless_recon:.4f}"
             log(val_msg)
             val_metric = val_loss_full
 
