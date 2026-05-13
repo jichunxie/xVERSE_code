@@ -25,13 +25,15 @@ FIG2_OLD_EVAL_DIR="/hpc/group/xielab/xj58/xVerse_results/fig2/evaluation"
 run_one_model () {
   MODEL_TAG="$1"
   RESULT_DIR="$2"
+  MODEL_FAMILY="${3:-auto}"
   CKPT_PATH="${RESULT_DIR}/best_model.pth"
   FIG2_OUT_DIR="/hpc/group/xielab/xj58/xVerse_results/fig2_gmmvae_${MODEL_TAG}"
   FIG2_EVAL_DIR="${FIG2_OUT_DIR}/evaluation_scib_full"
 
-  echo ">>> [${MODEL_TAG}] Extract embeddings from ${CKPT_PATH}"
+  echo ">>> [${MODEL_TAG}] Extract embeddings from ${CKPT_PATH} (${MODEL_FAMILY})"
   python reproduce_manuscript/fig2_biology_signal_gmmvae_current/02_extract_gmmvae_embedding.py \
       --ckpt "${CKPT_PATH}" \
+      --model-family "${MODEL_FAMILY}" \
       --gene-ids-path "${FIG2_GENE_IDS}" \
       --liver-dir "${FIG2_LIVER_DIR}" \
       --brain-dir "${FIG2_BRAIN_DIR}" \
@@ -57,7 +59,8 @@ run_one_model () {
       --max-cells 20000
 }
 
-run_one_model "nb" "/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_all_tissue0512"
+# run_one_model "mfa_rank4" "/hpc/group/xielab/xj58/pretrain_model_celltype/mfa_all_tissue0513_rank4" "main_mfa"
+run_one_model "nb" "/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_all_tissue0512" "main_energy"
 # run_one_model "poisson" "/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_all_tissue_poisson"
 
 

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Extract GMVAE embeddings (current main_energy model) for fig2 biology signal datasets.
+Extract GMVAE/MFA embeddings for fig2 biology signal datasets.
 
 This mirrors the original fig2 xVerse embedding extraction flow but uses:
-- main_energy MaskFiLMGMMVAE checkpoint
+- main_energy or main_mfa MaskFiLMGMMVAE checkpoint
 - same donor h5ad files and gene-set splits
-- output embedding key: obsm["xVerse_gmmvae"]
+- output embedding key: obsm["xVerse_gmmvae_mixmu"] by default
 """
 
 import argparse
@@ -28,7 +28,8 @@ if str(REPO_ROOT) not in sys.path:
 
 from main.utils_ft import XVerseFineTuneDataset
 from main.utils_model import load_gene_ids
-from main_energy.utils_model import MaskFiLMGMMVAE
+from main_energy.utils_model import MaskFiLMGMMVAE as EnergyMaskFiLMGMMVAE
+from main_mfa.utils_model import MaskFiLMGMMVAE as MFAMaskFiLMGMMVAE
 
 
 def parse_args():
@@ -46,6 +47,12 @@ def parse_args():
     ap.add_argument("--brain-dir", default="/hpc/group/xielab/xj58/xVerse_results/fig2/brain")
     ap.add_argument("--output-dir", default="/hpc/group/xielab/xj58/xVerse_results/fig2_gmmvae_current")
     ap.add_argument("--embedding-key", default="xVerse_gmmvae_mixmu")
+    ap.add_argument(
+        "--model-family",
+        default="auto",
+        choices=["auto", "main_energy", "main_mfa"],
+        help="Which model implementation to instantiate. auto detects explicit-MFA checkpoints from state_dict keys.",
+    )
     ap.add_argument("--batch-size", type=int, default=128)
     ap.add_argument("--num-workers", type=int, default=8)
     ap.add_argument("--max-files-per-set", type=int, default=0, help="0 means all files.")
@@ -61,6 +68,15 @@ def choose_device(mode: str) -> torch.device:
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
+def detect_model_family(state, requested: str) -> str:
+    if requested != "auto":
+        return requested
+    keys = set(state.keys())
+    if any(k.startswith(("post_u_mu.", "post_u_logvar.", "post_eps_mu.", "post_eps_logvar.")) for k in keys):
+        return "main_mfa"
+    return "main_energy"
+
+
 def build_model_from_ckpt(ckpt_path: str, device: torch.device):
     ckpt = torch.load(ckpt_path, map_location=device)
     saved_args = ckpt.get("args", {})
@@ -70,7 +86,13 @@ def build_model_from_ckpt(ckpt_path: str, device: torch.device):
     num_batches = int(saved_args.get("num_batches", 0))
     if num_batches <= 0 and "batch_embedding.weight" in state:
         num_batches = int(state["batch_embedding.weight"].shape[0])
-    model = MaskFiLMGMMVAE(
+    model_family = detect_model_family(state, str(saved_args.get("model_family", "auto")))
+    if getattr(build_model_from_ckpt, "_requested_family", "auto") != "auto":
+        model_family = getattr(build_model_from_ckpt, "_requested_family")
+    ModelCls = MFAMaskFiLMGMMVAE if model_family == "main_mfa" else EnergyMaskFiLMGMMVAE
+    print(f"[Load] model_family={model_family}")
+
+    model = ModelCls(
         num_genes=int(saved_args.get("total_gene", 17999)),
         latent_dim=int(saved_args.get("latent_dim", 128)),
         num_components=int(saved_args.get("num_components", 16)),
@@ -97,7 +119,7 @@ def build_model_from_ckpt(ckpt_path: str, device: torch.device):
 
 
 def extract_embedding_for_file(
-    model: MaskFiLMGMMVAE,
+    model,
     h5ad_path: Path,
     tissue_name: str,
     gene_ids,
@@ -131,8 +153,9 @@ def extract_embedding_for_file(
             with torch.amp.autocast(device.type, enabled=(device.type == "cuda")):
                 out = model(x_count=x_count, x_mask=x_mask, use_batch_condition=False)
 
-            # Deterministic GMVAE embedding:
-            # mixmu = sum_k q(c=k|x) * mu_k(x)
+            # Deterministic mixture embedding:
+            # main_energy: sum_k q(c=k|x) * posterior mu_k(x)
+            # main_mfa:    sum_k q(c=k|x) * E[z|x,c=k]
             if ("q_c" in out) and ("mu_comp" in out):
                 z_mixmu = torch.sum(out["q_c"].unsqueeze(-1) * out["mu_comp"], dim=1)
                 z_list.append(z_mixmu.detach().cpu().numpy())
@@ -197,8 +220,13 @@ def main():
     gene_ids = load_gene_ids(args.gene_ids_path)
 
     print("[Load] model ...")
+    build_model_from_ckpt._requested_family = args.model_family
     model, load_ret = build_model_from_ckpt(args.ckpt, device)
     print(f"[Load] missing={len(load_ret.missing_keys)} unexpected={len(load_ret.unexpected_keys)}")
+    if load_ret.missing_keys:
+        print(f"[Load] missing_keys={load_ret.missing_keys[:20]}")
+    if load_ret.unexpected_keys:
+        print(f"[Load] unexpected_keys={load_ret.unexpected_keys[:20]}")
 
     tissue_map = {"liver": 31, "brain": 7}
     timing_records = []

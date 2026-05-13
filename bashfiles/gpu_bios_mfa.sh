@@ -88,7 +88,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --lambda-prior-pi-balance 0.1 \
   --lambda-prior-mu-spread 0.1 \
   --prior-mu-spread-tau 1.0 \
-  --lambda-post-c-balance 0.01 \
+  --lambda-post-c-balance 0.1 \
   --recon-gene-weight-mode inv_log1p_mean_ema \
   --recon-gene-weight-alpha 0.8 \
   --recon-cell-weight-mode batch_kmeans \
