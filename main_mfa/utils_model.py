@@ -1634,7 +1634,7 @@ def train_gmm_vae_one_epoch(
         total_celltype_cls += celltype_cls.item() * bsz
         total_batchless_recon += batchless_recon.item() * bsz
 
-        if (batch_idx + 1) % 100 == 0 and is_rank0:
+        if (batch_idx + 1) % 1000 == 0 and is_rank0:
             msg = (
                 f"[Batch {batch_idx + 1}] "
                 f"Loss={loss.item():.4f}, Recon={recon.item():.4f}, KL={kl.item():.4f}, cls={celltype_cls.item():.4f}"
@@ -1934,7 +1934,7 @@ def evaluate_gmm_vae_one_epoch(
             total_celltype_cls += out_fake.get("celltype_cls_loss", torch.zeros_like(out_fake["cov_loss"])).item() * bsz
             total_batchless_recon += batchless_recon.item() * bsz
 
-            if (batch_idx + 1) % 100 == 0 and is_rank0:
+            if (batch_idx + 1) % 1000 == 0 and is_rank0:
                 msg = (
                     f"[Val Batch {batch_idx + 1}] "
                     f"Loss={loss.item():.4f}, Recon={out_fake['recon_loss'].item():.4f}, "
