@@ -1700,6 +1700,7 @@ def evaluate_gmm_vae_one_epoch(
                 celltype_id=celltype_id,
                 force_base_posterior=force_base_posterior,
                 beta=beta_kl,
+                use_batch_condition=False,
                 encoder_mask=(
                     _random_hide_observed(
                         x_mask=x_mask,
@@ -1758,6 +1759,7 @@ def evaluate_gmm_vae_one_epoch(
                     celltype_id=celltype_id,
                     force_base_posterior=force_base_posterior,
                     beta=0.0,
+                    use_batch_condition=False,
                     encoder_mask=x_mask,
                     recon_mask=x_mask if recon_observed_only else None,
                     lambda_score=0.0,
