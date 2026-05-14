@@ -104,6 +104,27 @@ def build_model_from_ckpt(ckpt_path: str, device: torch.device):
     num_batches = int(saved_args.get("num_batches", 0))
     if num_batches <= 0 and "batch_embedding.weight" in state:
         num_batches = int(state["batch_embedding.weight"].shape[0])
+    num_tissues = int(saved_args.get("num_tissues", 0))
+    if num_tissues <= 0 and "tissue_embedding.weight" in state:
+        num_tissues = int(state["tissue_embedding.weight"].shape[0])
+    batch_emb_dim = int(saved_args.get("batch_emb_dim", 0))
+    if batch_emb_dim <= 0 and "batch_embedding.weight" in state:
+        batch_emb_dim = int(state["batch_embedding.weight"].shape[1])
+    tissue_emb_dim = int(saved_args.get("tissue_emb_dim", 0))
+    if tissue_emb_dim <= 0 and "tissue_embedding.weight" in state:
+        tissue_emb_dim = int(state["tissue_embedding.weight"].shape[1])
+    # Backward/transition compatibility: some checkpoints were saved before
+    # tissue_emb_dim was recorded in args, but decoder FiLM already includes it.
+    cond_dim_from_decoder = None
+    for key in ("decoder.film1.weight", "decoder.film2.weight"):
+        if key in state:
+            cond_dim_from_decoder = int(state[key].shape[1])
+            break
+    if cond_dim_from_decoder is not None:
+        inferred_tissue_dim = max(0, cond_dim_from_decoder - batch_emb_dim)
+        if tissue_emb_dim <= 0 and inferred_tissue_dim > 0:
+            tissue_emb_dim = inferred_tissue_dim
+            print(f"[Load] inferred tissue_emb_dim={tissue_emb_dim} from decoder cond_dim={cond_dim_from_decoder}")
     model_family = detect_model_family(state, str(saved_args.get("model_family", "auto")))
     if getattr(build_model_from_ckpt, "_requested_family", "auto") != "auto":
         model_family = getattr(build_model_from_ckpt, "_requested_family")
@@ -124,10 +145,10 @@ def build_model_from_ckpt(ckpt_path: str, device: torch.device):
         prior_type=str(saved_args.get("prior_type", "gmm")),
         num_cell_types=int(saved_args.get("num_cell_types", 0)),
         conditional_prior_on_tissue=bool(saved_args.get("conditional_prior_on_tissue", False)),
-        num_tissues=int(saved_args.get("num_tissues", 0)),
+        num_tissues=num_tissues,
         num_batches=num_batches,
-        batch_emb_dim=int(saved_args.get("batch_emb_dim", 0)),
-        tissue_emb_dim=int(saved_args.get("tissue_emb_dim", 0)),
+        batch_emb_dim=batch_emb_dim,
+        tissue_emb_dim=tissue_emb_dim,
         batch_cond_drop_prob=0.0,
         recon_loss_type=str(saved_args.get("recon_loss", saved_args.get("recon_loss_type", "poisson"))),
     ).to(device)
