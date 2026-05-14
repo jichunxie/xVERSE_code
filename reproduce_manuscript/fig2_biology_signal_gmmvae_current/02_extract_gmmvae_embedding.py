@@ -137,14 +137,21 @@ def build_model_from_ckpt(ckpt_path: str, device: torch.device):
     return model, ret
 
 
-def _extract_model_embedding(model, x_count, x_mask, embedding_mode: str):
+def _extract_model_embedding(model, x_count, x_mask, embedding_mode: str, tissue_id=None):
     mode = str(embedding_mode).lower()
     if mode == "encoder_hidden":
         x_expr = torch.log1p(x_count.float())
         _, _, h = model.encoder(x_expr=x_expr, x_mask=x_mask.float(), return_hidden=True)
         return h
 
-    out = model(x_count=x_count, x_mask=x_mask, use_batch_condition=False)
+    out = model(
+        x_count=x_count,
+        x_mask=x_mask,
+        tissue_id=tissue_id,
+        sample_id=None,
+        use_batch_condition=False,
+        use_tissue_condition=True,
+    )
     if mode == "mixmu":
         if ("q_c" in out) and ("mu_comp" in out):
             return torch.sum(out["q_c"].unsqueeze(-1) * out["mu_comp"], dim=1)
@@ -183,14 +190,21 @@ def extract_embedding_for_file(
 
     z_list = []
     with torch.no_grad():
-        for _, values, _ in tqdm(loader, desc=f"extract {h5ad_path.name}", leave=False):
+        for _, values, tissue_ids in tqdm(loader, desc=f"extract {h5ad_path.name}", leave=False):
             values = values.to(device, non_blocking=True)
+            tissue_ids = tissue_ids.to(device, non_blocking=True)
             x_mask = (values != -1).float()
             x_count = torch.where(x_mask > 0, values, torch.zeros_like(values))
             x_count = torch.clamp(x_count, min=0.0)
 
             with torch.amp.autocast(device.type, enabled=(device.type == "cuda")):
-                emb = _extract_model_embedding(model, x_count=x_count, x_mask=x_mask, embedding_mode=embedding_mode)
+                emb = _extract_model_embedding(
+                    model,
+                    x_count=x_count,
+                    x_mask=x_mask,
+                    embedding_mode=embedding_mode,
+                    tissue_id=tissue_ids,
+                )
             z_list.append(emb.detach().cpu().numpy())
 
     return np.concatenate(z_list, axis=0)
@@ -211,6 +225,7 @@ def extract_embedding_from_adata(
     gene_ids,
     gene_id_col: str,
     count_layer: str,
+    tissue_id: int,
     device: torch.device,
     batch_size: int,
     embedding_mode: str,
@@ -247,10 +262,28 @@ def extract_embedding_from_adata(
             x_mask = (values != -1).float()
             x_count = torch.where(x_mask > 0, values, torch.zeros_like(values))
             x_count = torch.clamp(x_count, min=0.0)
+            tissue_ids = torch.full((ed - st,), int(tissue_id), dtype=torch.long, device=device)
             with torch.amp.autocast(device.type, enabled=(device.type == "cuda")):
-                emb = _extract_model_embedding(model, x_count=x_count, x_mask=x_mask, embedding_mode=embedding_mode)
+                emb = _extract_model_embedding(
+                    model,
+                    x_count=x_count,
+                    x_mask=x_mask,
+                    embedding_mode=embedding_mode,
+                    tissue_id=tissue_ids,
+                )
             z_list.append(emb.detach().cpu().numpy())
     return np.concatenate(z_list, axis=0)
+
+
+def _resolve_manifest_tissue_id(row, tissue_map):
+    if "tissue_id" in row and not pd.isna(row["tissue_id"]):
+        return int(row["tissue_id"])
+    tissue = str(row.get("tissue", row.get("dataset", ""))).strip().lower()
+    if tissue in tissue_map:
+        return int(tissue_map[tissue])
+    raise KeyError(
+        f"Cannot resolve tissue id for manifest row. Provide tissue_id or tissue in {sorted(tissue_map)}; got tissue={tissue!r}."
+    )
 
 
 def process_dataset_manifest(args, model, gene_ids, device: torch.device, timing_records):
@@ -266,6 +299,7 @@ def process_dataset_manifest(args, model, gene_ids, device: torch.device, timing
             continue
         dataset = str(row["dataset"])
         tissue = str(row.get("tissue", dataset))
+        tissue_id = _resolve_manifest_tissue_id(row, {"liver": 31, "brain": 7})
         gene_id_col = str(row.get("gene_id_col", args.default_gene_id_col))
         count_layer = str(row.get("count_layer", ""))
         print(f"[INFO] manifest dataset={dataset} file={fp}")
@@ -277,6 +311,7 @@ def process_dataset_manifest(args, model, gene_ids, device: torch.device, timing
             gene_ids=gene_ids,
             gene_id_col=gene_id_col,
             count_layer=count_layer,
+            tissue_id=tissue_id,
             device=device,
             batch_size=args.batch_size,
             embedding_mode=args.embedding_mode,
