@@ -93,8 +93,8 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --prior-refresh-every 0 \
   --recon-gene-weight-mode inv_log1p_mean_ema \
   --recon-gene-weight-alpha 0.5 \
-  --recon-gene-weight-min 0.1 \
-  --recon-gene-weight-max 8.0 \
+  --recon-gene-weight-min 0.2 \
+  --recon-gene-weight-max 5.0 \
   --recon-cell-weight-mode batch_kmeans \
   --recon-cell-weight-alpha 0.5 \
   --recon-cell-weight-clusters 32 \
