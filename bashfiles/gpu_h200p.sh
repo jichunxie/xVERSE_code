@@ -91,7 +91,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --lambda-prior-mu-spread 0 \
   --prior-mu-spread-tau 1.0 \
   --lambda-post-c-balance 0 \
-  --prior-refresh-every 1 \
+  --prior-refresh-every 0 \
   --prior-refresh-start-epoch 1 \
   --prior-refresh-samples 100000 \
   --prior-refresh-kmeans-iters 10 \
