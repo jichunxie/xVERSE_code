@@ -67,7 +67,7 @@ run_one_model () {
       --max-cells 20000
 }
 
-run_one_model "gene_theta_encoder_hidden" "/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_all_tissue0513_gene_theta" "main_energy" "encoder_hidden"
+run_one_model "gene_theta_encoder_hidden" "/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_all_tissue0514_ct" "main_energy" "encoder_hidden"
 # run_one_model "mfa_rank4" "/hpc/group/xielab/xj58/pretrain_model_celltype/mfa_all_tissue0513_rank4" "main_mfa"
 # run_one_model "nb" "/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_all_tissue0512" "main_energy"
 # run_one_model "poisson" "/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_all_tissue_poisson"
