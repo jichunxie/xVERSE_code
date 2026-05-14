@@ -86,9 +86,9 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --mask-aug-min-frac 0.1 \
   --mask-aug-max-frac 0.5 \
   --lambda-celltype-cls 1 \
-  --lambda-contrast 0.5 \
+  --lambda-contrast 5 \
   --contrast-embedding encoder_hidden \
-  --lambda-celltype-contrast 0.05 \
+  --lambda-celltype-contrast 0 \
   --celltype-contrast-temp 0.1 \
   --lambda-real-recon 0.01 \
   --lambda-prior-pi-balance 0 \
