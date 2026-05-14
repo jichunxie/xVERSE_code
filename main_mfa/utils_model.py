@@ -1220,6 +1220,12 @@ def bidirectional_contrastive_loss(z_real: torch.Tensor, z_fake: torch.Tensor, t
     return 0.5 * (loss_12 + loss_21)
 
 
+def deterministic_contrast_embedding(out: Dict[str, torch.Tensor]) -> torch.Tensor:
+    if ("q_c" in out) and ("mu_comp" in out):
+        return torch.sum(out["q_c"].unsqueeze(-1) * out["mu_comp"], dim=1)
+    return out["mu"]
+
+
 def gmm_collapse_diagnostics(
     prior: GaussianMixturePrior,
     z: torch.Tensor,
@@ -1621,8 +1627,8 @@ def train_gmm_vae_one_epoch(
                 batchless_recon = out_batchless["recon_loss"]
             if lambda_contrast > 0:
                 contrast = bidirectional_contrastive_loss(
-                    z_real=out_real["z"],
-                    z_fake=out_fake["z"],
+                    z_real=deterministic_contrast_embedding(out_real),
+                    z_fake=deterministic_contrast_embedding(out_fake),
                     temperature=contrast_temp,
                 )
             else:
@@ -1907,8 +1913,8 @@ def evaluate_gmm_vae_one_epoch(
                 batchless_recon = out_real["recon_loss"]
             if lambda_contrast > 0:
                 contrast = bidirectional_contrastive_loss(
-                    z_real=out_real["z"],
-                    z_fake=out_fake["z"],
+                    z_real=deterministic_contrast_embedding(out_real),
+                    z_fake=deterministic_contrast_embedding(out_fake),
                     temperature=contrast_temp,
                 )
             else:

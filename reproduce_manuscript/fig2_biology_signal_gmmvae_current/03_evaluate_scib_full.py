@@ -19,7 +19,9 @@ import pandas as pd
 import scanpy as sc
 import scib
 from sklearn.cluster import KMeans
+from sklearn.neighbors import NearestNeighbors
 from sklearn.metrics import adjusted_rand_score, normalized_mutual_info_score
+from scipy.stats import chisquare
 
 
 def parse_args():
@@ -188,6 +190,66 @@ def add_pcr_metrics(metrics, errors, adata_pre, adata_int, embed_key: str, batch
         errors["PCR_before"] = str(e)
         errors["PCR_after"] = str(e)
         errors["PCR_delta_after_minus_before"] = str(e)
+
+
+def _kbet_python_fallback(adata_int, embed_key: str, batch_key: str, label_key: str, alpha: float = 0.05):
+    emb_all = np.asarray(adata_int.obsm[embed_key], dtype=np.float32)
+    labels = adata_int.obs[label_key].astype(str).values
+    batches = adata_int.obs[batch_key].astype(str).values
+    label_scores = []
+
+    for label in pd.unique(labels):
+        idx = np.flatnonzero(labels == label)
+        if idx.size < 10:
+            continue
+        batch_sub = batches[idx]
+        batch_counts = pd.Series(batch_sub).value_counts()
+        if batch_counts.size <= 1:
+            continue
+        k0 = int(min(70, max(10, np.floor(batch_counts.mean() / 4.0))))
+        if idx.size <= k0:
+            continue
+
+        emb = emb_all[idx]
+        nn = NearestNeighbors(n_neighbors=k0 + 1, metric="euclidean")
+        nn.fit(emb)
+        neigh = nn.kneighbors(emb, return_distance=False)[:, 1:]
+
+        batch_levels = batch_counts.index.to_numpy()
+        probs = (batch_counts / batch_counts.sum()).reindex(batch_levels).to_numpy(dtype=float)
+        rejections = []
+        for row in neigh:
+            local = pd.Series(batch_sub[row]).value_counts().reindex(batch_levels, fill_value=0).to_numpy(dtype=float)
+            expected = probs * local.sum()
+            keep = expected > 0
+            if keep.sum() <= 1:
+                continue
+            _, pval = chisquare(f_obs=local[keep], f_exp=expected[keep])
+            rejections.append(float(pval < alpha))
+
+        if rejections:
+            label_scores.append(float(np.mean(rejections)))
+
+    if not label_scores:
+        raise ValueError("No label group had enough cells and >=2 batches for Python kBET fallback.")
+    # scIB reports scaled kBET as 1 - rejection rate; higher is better.
+    return 1.0 - float(np.mean(label_scores))
+
+
+def add_kbet_metrics(metrics, errors, adata_int, embed_key: str, batch_key: str, label_key: str):
+    try:
+        metrics["kBET"] = float(scib.metrics.kBET(adata_int, batch_key=batch_key, label_key=label_key, type_="knn"))
+        metrics["kBET_backend"] = "scib_r"
+        errors["kBET"] = ""
+    except Exception as e:
+        try:
+            metrics["kBET"] = float(_kbet_python_fallback(adata_int, embed_key=embed_key, batch_key=batch_key, label_key=label_key))
+            metrics["kBET_backend"] = "python_fallback"
+            errors["kBET"] = f"scib/r kBET failed; used python fallback: {e}"
+        except Exception as e2:
+            metrics["kBET"] = np.nan
+            metrics["kBET_backend"] = "failed"
+            errors["kBET"] = f"scib/r kBET failed: {e}; python fallback failed: {e2}"
 
 
 def add_scib_score_aliases(metrics):
@@ -407,19 +469,10 @@ def eval_one_embedding(
         ),
     )
     add_pcr_metrics(metrics, errors, adata_pre, adata_int, embed_key=embed_key, batch_key=batch_col)
-    add_metric("HVG_overlap", lambda: scib.metrics.hvg_overlap(adata_pre, adata_int, batch=batch_col))
-    add_metric("cell_cycle", lambda: scib.metrics.cell_cycle(adata_pre, adata_int, batch_key=batch_col))
-    add_metric("kBET", lambda: scib.metrics.kBET(adata_int, batch_key=batch_col, label_key=celltype_col, type_="knn"))
+    add_kbet_metrics(metrics, errors, adata_int, embed_key=embed_key, batch_key=batch_col, label_key=celltype_col)
     add_kmeans_metrics(metrics, errors, adata_int, embed_key=embed_key, label_key=celltype_col, seed=seed)
     add_metric("NMI", lambda: scib.metrics.nmi(adata_int, _ensure_cluster(adata_int), celltype_col))
     add_metric("ARI", lambda: scib.metrics.ari(adata_int, _ensure_cluster(adata_int), celltype_col))
-    if "dpt_pseudotime" in adata_pre.obs.columns:
-        add_metric("trajectory", lambda: scib.metrics.trajectory_conservation(adata_pre, adata_int, label_key=celltype_col))
-    else:
-        metrics["trajectory"] = np.nan
-        errors["trajectory"] = "missing adata_pre.obs['dpt_pseudotime']"
-    if hasattr(scib.metrics, "morans_i"):
-        add_metric("morans_i", lambda: scib.metrics.morans_i(adata_pre, adata_int))
 
     add_scib_score_aliases(metrics)
     return metrics, errors

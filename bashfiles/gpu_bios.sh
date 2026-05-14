@@ -19,7 +19,7 @@ export PYTHONUNBUFFERED=1
 
 COMPILED_ROOT="/hpc/group/xielab/xj58/xVerseAtlas/compiled_train_v1_all"
 CELLTYPE_CSV="/hpc/group/xielab/xj58/sparest_code/standard_type/cellxgene_cell_type_mapped.csv"
-RESULT_DIR="/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_all_tissue0513_base"
+RESULT_DIR="/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_all_tissue0513_gene_theta"
 
 NPROC_PER_NODE=$(python - <<'PY'
 import torch
@@ -96,9 +96,14 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --prior-refresh-kmeans-iters 10 \
   --prior-refresh-ema 0.1 \
   --recon-gene-weight-mode inv_log1p_mean_ema \
-  --recon-gene-weight-alpha 0.3 \
+  --recon-gene-weight-alpha 0.5 \
+  --recon-gene-weight-min 0.1 \
+  --recon-gene-weight-max 8.0 \
   --recon-cell-weight-mode batch_kmeans \
   --recon-cell-weight-alpha 0.5 \
   --recon-cell-weight-clusters 32 \
   --recon-cell-weight-kmeans-iters 5 \
+  --lambda-rank-recon 0.05 \
+  --rank-recon-gene-pairs 256 \
+  --rank-recon-cell-pairs 256 \
   --contrast-temp 0.1

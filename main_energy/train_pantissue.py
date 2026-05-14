@@ -144,6 +144,12 @@ def parse_args():
                         help="Number of batch k-means clusters for cell recon weighting.")
     parser.add_argument("--recon-cell-weight-kmeans-iters", type=int, default=2,
                         help="Fast k-means iterations for batch_kmeans cell recon weighting.")
+    parser.add_argument("--lambda-rank-recon", type=float, default=0.0,
+                        help="Weight for pairwise rank reconstruction loss on rate vs counts.")
+    parser.add_argument("--rank-recon-gene-pairs", type=int, default=256,
+                        help="Per-cell gene pairs sampled for rank reconstruction.")
+    parser.add_argument("--rank-recon-cell-pairs", type=int, default=256,
+                        help="Cross-cell pairs sampled per batch for same-gene rank reconstruction.")
     parser.add_argument("--mask-aug-prob", type=float, default=1.0,
                         help="For gmm_vae training, probability of applying random observed->unobserved masking per cell.")
     parser.add_argument("--mask-aug-policy", choices=["xverse", "simple"], default="xverse",
@@ -840,7 +846,7 @@ def main():
         train_sampler.set_epoch(epoch_id)
         if val_sampler is not None:
             val_sampler.set_epoch(epoch_id)
-        loss_full, loss_recon, loss_kl, loss_score, loss_contrast, loss_cov, loss_prior_pi_balance, loss_celltype_cls, loss_batchless_recon = train_gmm_vae_one_epoch(
+        loss_full, loss_recon, loss_kl, loss_score, loss_contrast, loss_cov, loss_prior_pi_balance, loss_celltype_cls, loss_batchless_recon, loss_rank_recon, loss_rank_gene, loss_rank_cell = train_gmm_vae_one_epoch(
             model=model,
             optimizer=optimizer,
             scaler=scaler,
@@ -890,6 +896,9 @@ def main():
             recon_cell_weight_clusters=args.recon_cell_weight_clusters,
             recon_cell_weight_kmeans_iters=args.recon_cell_weight_kmeans_iters,
             lambda_batchless_recon=args.lambda_batchless_recon,
+            lambda_rank_recon=args.lambda_rank_recon,
+            rank_recon_gene_pairs=args.rank_recon_gene_pairs,
+            rank_recon_cell_pairs=args.rank_recon_cell_pairs,
             force_base_posterior=force_base_posterior,
         )
         train_msg = (
@@ -901,6 +910,8 @@ def main():
             train_msg += f", Contrast={loss_contrast:.4f}"
         if args.lambda_batchless_recon > 0:
             train_msg += f", BatchlessRecon={loss_batchless_recon:.4f}"
+        if args.lambda_rank_recon > 0:
+            train_msg += f", RankRecon={loss_rank_recon:.4f}, RankGene={loss_rank_gene:.4f}, RankCell={loss_rank_cell:.4f}"
         log(train_msg)
 
         if (
@@ -928,7 +939,7 @@ def main():
             or (epoch_id == args.num_epochs)
         )
         if do_val:
-            val_loss_full, val_loss_recon, val_loss_kl, val_loss_score, val_loss_contrast, val_loss_cov, val_loss_prior_pi_balance, val_loss_celltype_cls, val_loss_batchless_recon = evaluate_gmm_vae_one_epoch(
+            val_loss_full, val_loss_recon, val_loss_kl, val_loss_score, val_loss_contrast, val_loss_cov, val_loss_prior_pi_balance, val_loss_celltype_cls, val_loss_batchless_recon, val_loss_rank_recon, val_loss_rank_gene, val_loss_rank_cell = evaluate_gmm_vae_one_epoch(
                 model=model,
                 val_loader=val_loader,
                 device=device,
@@ -972,6 +983,9 @@ def main():
                 recon_cell_weight_clusters=args.recon_cell_weight_clusters,
                 recon_cell_weight_kmeans_iters=args.recon_cell_weight_kmeans_iters,
                 lambda_batchless_recon=args.lambda_batchless_recon,
+                lambda_rank_recon=args.lambda_rank_recon,
+                rank_recon_gene_pairs=args.rank_recon_gene_pairs,
+                rank_recon_cell_pairs=args.rank_recon_cell_pairs,
                 mask_aug_prob=args.mask_aug_prob,
                 mask_aug_policy=args.mask_aug_policy,
                 mask_aug_min_frac=args.mask_aug_min_frac,
@@ -987,6 +1001,8 @@ def main():
                 val_msg += f", Contrast={val_loss_contrast:.4f}"
             if args.lambda_batchless_recon > 0:
                 val_msg += f", BatchlessRecon={val_loss_batchless_recon:.4f}"
+            if args.lambda_rank_recon > 0:
+                val_msg += f", RankRecon={val_loss_rank_recon:.4f}, RankGene={val_loss_rank_gene:.4f}, RankCell={val_loss_rank_cell:.4f}"
             log(val_msg)
             val_metric = val_loss_full
 
