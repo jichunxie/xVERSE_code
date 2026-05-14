@@ -1199,6 +1199,42 @@ def gmm_collapse_diagnostics(
     }
 
 
+def batch_kmeans_usage_diagnostics(
+    z: torch.Tensor,
+    num_clusters: int = 32,
+    kmeans_iters: int = 2,
+) -> Dict[str, float]:
+    with torch.no_grad():
+        if z is None or z.size(0) <= 1:
+            return {"km_active": 0, "km_eff": 0.0, "km_max": 0.0, "km_min": 0.0}
+        zf = F.normalize(z.detach().float(), dim=-1)
+        bsz = int(zf.size(0))
+        k = max(1, min(int(num_clusters), bsz))
+        stride = max(1, bsz // k)
+        centers = zf[torch.arange(0, stride * k, stride, device=zf.device)[:k]].clone()
+        assign = torch.zeros((bsz,), dtype=torch.long, device=zf.device)
+        for _ in range(max(1, int(kmeans_iters))):
+            assign = torch.argmin(torch.cdist(zf, centers, p=2), dim=1)
+            new_centers = torch.zeros_like(centers)
+            counts = torch.bincount(assign, minlength=k).to(zf.dtype)
+            new_centers.index_add_(0, assign, zf)
+            non_empty = counts > 0
+            new_centers[non_empty] = new_centers[non_empty] / counts[non_empty].unsqueeze(1)
+            if (~non_empty).any():
+                new_centers[~non_empty] = centers[~non_empty]
+            centers = F.normalize(new_centers, dim=-1)
+        counts = torch.bincount(assign, minlength=k).float()
+        usage = counts / max(float(bsz), 1.0)
+        nonzero = usage[usage > 0]
+        entropy = -(nonzero * torch.log(nonzero + 1e-12)).sum()
+        return {
+            "km_active": int((counts > 0).sum().item()),
+            "km_eff": float(torch.exp(entropy).item()),
+            "km_max": float(usage.max().item()),
+            "km_min": float(nonzero.min().item()) if nonzero.numel() > 0 else 0.0,
+        }
+
+
 # =========================
 # Training / evaluation (for GMM-VAE)
 # =========================
@@ -1573,7 +1609,7 @@ def train_gmm_vae_one_epoch(
         total_celltype_cls += celltype_cls.item() * bsz
         total_batchless_recon += batchless_recon.item() * bsz
 
-        if (batch_idx + 1) % 100 == 0 and is_rank0:
+        if (batch_idx + 1) % 1000 == 0 and is_rank0:
             msg = (
                 f"[Batch {batch_idx + 1}] "
                 f"Loss={loss.item():.4f}, Recon={recon.item():.4f}, KL={kl.item():.4f}, cls={celltype_cls.item():.4f}"
@@ -1586,6 +1622,16 @@ def train_gmm_vae_one_epoch(
                 msg += f", BatchlessRecon={batchless_recon.item():.4f}"
             if lambda_post_c_balance > 0:
                 msg += f", postCBal={post_c_balance.item():.4f}"
+            if str(recon_cell_weight_mode).lower() == "batch_kmeans" and float(recon_cell_weight_alpha) > 0:
+                km = batch_kmeans_usage_diagnostics(
+                    z=out_fake["z"],
+                    num_clusters=recon_cell_weight_clusters,
+                    kmeans_iters=recon_cell_weight_kmeans_iters,
+                )
+                msg += (
+                    f", kmKeff={km['km_eff']:.2f}, kmActive={km['km_active']}, "
+                    f"kmMax={km['km_max']:.3f}, kmMin={km['km_min']:.3f}"
+                )
             msg += (
                 f", respH={out_fake['resp_entropy'].item():.4f}"
             )
@@ -1873,7 +1919,7 @@ def evaluate_gmm_vae_one_epoch(
             total_celltype_cls += out_fake.get("celltype_cls_loss", torch.zeros_like(out_fake["cov_loss"])).item() * bsz
             total_batchless_recon += batchless_recon.item() * bsz
 
-            if (batch_idx + 1) % 100 == 0 and is_rank0:
+            if (batch_idx + 1) % 1000 == 0 and is_rank0:
                 msg = (
                     f"[Val Batch {batch_idx + 1}] "
                     f"Loss={loss.item():.4f}, Recon={out_fake['recon_loss'].item():.4f}, "

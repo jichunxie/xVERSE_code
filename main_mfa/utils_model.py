@@ -1260,6 +1260,42 @@ def gmm_collapse_diagnostics(
     }
 
 
+def batch_kmeans_usage_diagnostics(
+    z: torch.Tensor,
+    num_clusters: int = 32,
+    kmeans_iters: int = 2,
+) -> Dict[str, float]:
+    with torch.no_grad():
+        if z is None or z.size(0) <= 1:
+            return {"km_active": 0, "km_eff": 0.0, "km_max": 0.0, "km_min": 0.0}
+        zf = F.normalize(z.detach().float(), dim=-1)
+        bsz = int(zf.size(0))
+        k = max(1, min(int(num_clusters), bsz))
+        stride = max(1, bsz // k)
+        centers = zf[torch.arange(0, stride * k, stride, device=zf.device)[:k]].clone()
+        assign = torch.zeros((bsz,), dtype=torch.long, device=zf.device)
+        for _ in range(max(1, int(kmeans_iters))):
+            assign = torch.argmin(torch.cdist(zf, centers, p=2), dim=1)
+            new_centers = torch.zeros_like(centers)
+            counts = torch.bincount(assign, minlength=k).to(zf.dtype)
+            new_centers.index_add_(0, assign, zf)
+            non_empty = counts > 0
+            new_centers[non_empty] = new_centers[non_empty] / counts[non_empty].unsqueeze(1)
+            if (~non_empty).any():
+                new_centers[~non_empty] = centers[~non_empty]
+            centers = F.normalize(new_centers, dim=-1)
+        counts = torch.bincount(assign, minlength=k).float()
+        usage = counts / max(float(bsz), 1.0)
+        nonzero = usage[usage > 0]
+        entropy = -(nonzero * torch.log(nonzero + 1e-12)).sum()
+        return {
+            "km_active": int((counts > 0).sum().item()),
+            "km_eff": float(torch.exp(entropy).item()),
+            "km_max": float(usage.max().item()),
+            "km_min": float(nonzero.min().item()) if nonzero.numel() > 0 else 0.0,
+        }
+
+
 # =========================
 # Training / evaluation (for MFA-VAE)
 # =========================
@@ -1647,6 +1683,16 @@ def train_gmm_vae_one_epoch(
                 msg += f", BatchlessRecon={batchless_recon.item():.4f}"
             if lambda_post_c_balance > 0:
                 msg += f", postCBal={post_c_balance.item():.4f}"
+            if str(recon_cell_weight_mode).lower() == "batch_kmeans" and float(recon_cell_weight_alpha) > 0:
+                km = batch_kmeans_usage_diagnostics(
+                    z=out_fake["z"],
+                    num_clusters=recon_cell_weight_clusters,
+                    kmeans_iters=recon_cell_weight_kmeans_iters,
+                )
+                msg += (
+                    f", kmKeff={km['km_eff']:.2f}, kmActive={km['km_active']}, "
+                    f"kmMax={km['km_max']:.3f}, kmMin={km['km_min']:.3f}"
+                )
             msg += (
                 f", respH={out_fake['resp_entropy'].item():.4f}"
             )
@@ -1751,9 +1797,8 @@ def evaluate_gmm_vae_one_epoch(
             bsz = x_count.size(0)
             n_cells += bsz
 
-            out_fake = loss_fn(
-                # In validation, when contrastive term is enabled, build a fake-mask view
-                # on the fly while keeping reconstruction evaluated on the real observed mask.
+            out_real = loss_fn(
+                # Validation main metric uses the original observed mask, not random-mask augmentation.
                 x_count=x_count,
                 x_mask=x_mask,
                 tissue_id=tissue_id,
@@ -1762,17 +1807,7 @@ def evaluate_gmm_vae_one_epoch(
                 force_base_posterior=force_base_posterior,
                 beta=beta_kl,
                 use_batch_condition=False,
-                encoder_mask=(
-                    _random_hide_observed(
-                        x_mask=x_mask,
-                        apply_prob=mask_aug_prob,
-                        policy=mask_aug_policy,
-                        min_frac=mask_aug_min_frac,
-                        max_frac=mask_aug_max_frac,
-                    )
-                    if ((lambda_contrast > 0) or (lambda_real_recon > 0))
-                    else x_mask_encoder
-                ),
+                encoder_mask=x_mask,
                 recon_mask=x_mask if recon_observed_only else None,
                 lambda_score=lambda_score,
                 score_noise_std=score_noise_std,
@@ -1809,10 +1844,17 @@ def evaluate_gmm_vae_one_epoch(
                 recon_cell_weight_clusters=recon_cell_weight_clusters,
                 recon_cell_weight_kmeans_iters=recon_cell_weight_kmeans_iters,
             )
-            need_real_view = (lambda_contrast > 0) or (lambda_real_recon > 0)
-            real_recon = torch.zeros((), device=x_count.device, dtype=out_fake["z"].dtype)
-            if need_real_view:
-                out_real = loss_fn(
+            out_fake = out_real
+            real_recon = out_real["recon_loss"]
+            if lambda_contrast > 0:
+                fake_encoder_mask = _random_hide_observed(
+                    x_mask=x_mask,
+                    apply_prob=mask_aug_prob,
+                    policy=mask_aug_policy,
+                    min_frac=mask_aug_min_frac,
+                    max_frac=mask_aug_max_frac,
+                )
+                out_fake = loss_fn(
                     x_count=x_count,
                     x_mask=x_mask,
                     tissue_id=tissue_id,
@@ -1821,7 +1863,7 @@ def evaluate_gmm_vae_one_epoch(
                     force_base_posterior=force_base_posterior,
                     beta=0.0,
                     use_batch_condition=False,
-                    encoder_mask=x_mask,
+                    encoder_mask=fake_encoder_mask,
                     recon_mask=x_mask if recon_observed_only else None,
                     lambda_score=0.0,
                     score_noise_std=score_noise_std,
@@ -1858,56 +1900,11 @@ def evaluate_gmm_vae_one_epoch(
                     recon_cell_weight_clusters=recon_cell_weight_clusters,
                     recon_cell_weight_kmeans_iters=recon_cell_weight_kmeans_iters,
                 )
-                real_recon = out_real["recon_loss"]
-            batchless_recon = torch.zeros((), device=x_count.device, dtype=out_fake["z"].dtype)
+            batchless_recon = out_real["recon_loss"]
             if float(lambda_batchless_recon) != 0.0:
-                out_batchless = loss_fn(
-                    x_count=x_count,
-                    x_mask=x_mask,
-                    tissue_id=tissue_id,
-                    sample_id=sample_id,
-                    celltype_id=celltype_id,
-                    force_base_posterior=force_base_posterior,
-                    beta=0.0,
-                    encoder_mask=x_mask,
-                    use_batch_condition=False,
-                    recon_mask=x_mask if recon_observed_only else None,
-                    lambda_score=0.0,
-                    score_noise_std=score_noise_std,
-                    score_detach_z=score_detach_z,
-                    lambda_cov=0.0,
-                    cov_use_mu=cov_use_mu,
-                    lambda_resp_balance=0.0,
-                    lambda_resp_confidence=0.0,
-                    lambda_resp_anchor=0.0,
-                    resp_temperature=resp_temperature,
-                    resp_topk=0,
-                    prior_logvar_min=prior_logvar_min,
-                    prior_logvar_max=prior_logvar_max,
-                    lambda_prior_mu_l2=0.0,
-                    lambda_prior_factor_l2=0.0,
-                    lambda_prior_pi_balance=0.0,
-                    lambda_prior_mu_spread=0.0,
-                    prior_mu_spread_tau=prior_mu_spread_tau,
-                    lambda_post_c_balance=0.0,
-                    lambda_celltype_cls=0.0,
-                    lambda_prior_logvar_l2=0.0,
-                    prior_logvar_target=prior_logvar_target,
-                    recon_gene_weight_mode=recon_gene_weight_mode,
-                    recon_gene_weight_alpha=recon_gene_weight_alpha,
-                    recon_gene_weight_ema_momentum=recon_gene_weight_ema_momentum,
-                    recon_gene_weight_min=recon_gene_weight_min,
-                    recon_gene_weight_max=recon_gene_weight_max,
-                    recon_gene_weight_eps=recon_gene_weight_eps,
-                    recon_cell_weight_mode=recon_cell_weight_mode,
-                    recon_cell_weight_alpha=recon_cell_weight_alpha,
-                    recon_cell_weight_min=recon_cell_weight_min,
-                    recon_cell_weight_max=recon_cell_weight_max,
-                    recon_cell_weight_eps=recon_cell_weight_eps,
-                    recon_cell_weight_clusters=recon_cell_weight_clusters,
-                    recon_cell_weight_kmeans_iters=recon_cell_weight_kmeans_iters,
-                )
-                batchless_recon = out_batchless["recon_loss"]
+                # Validation main path is already batchless. Reuse it to avoid an extra
+                # stochastic forward pass that would make Recon and BatchlessRecon differ.
+                batchless_recon = out_real["recon_loss"]
             if lambda_contrast > 0:
                 contrast = bidirectional_contrastive_loss(
                     z_real=out_real["z"],
@@ -1916,7 +1913,7 @@ def evaluate_gmm_vae_one_epoch(
                 )
             else:
                 contrast = torch.zeros((), device=x_count.device, dtype=out_fake["z"].dtype)
-            loss = out_fake["loss"]
+            loss = out_real["loss"]
             if float(lambda_contrast) != 0.0:
                 loss = loss + float(lambda_contrast) * contrast
             if float(lambda_real_recon) != 0.0:
@@ -1925,26 +1922,26 @@ def evaluate_gmm_vae_one_epoch(
                 loss = loss + float(lambda_batchless_recon) * batchless_recon
 
             total_loss += loss.item() * bsz
-            total_recon += out_fake["recon_loss"].item() * bsz
-            total_kl += out_fake["kl_loss"].item() * bsz
-            total_score += out_fake["score_loss"].item() * bsz
+            total_recon += out_real["recon_loss"].item() * bsz
+            total_kl += out_real["kl_loss"].item() * bsz
+            total_score += out_real["score_loss"].item() * bsz
             total_contrast += contrast.item() * bsz
-            total_cov += out_fake["cov_loss"].item() * bsz
-            total_prior_pi_balance += out_fake.get("prior_pi_balance_loss", torch.zeros_like(out_fake["cov_loss"])).item() * bsz
-            total_celltype_cls += out_fake.get("celltype_cls_loss", torch.zeros_like(out_fake["cov_loss"])).item() * bsz
+            total_cov += out_real["cov_loss"].item() * bsz
+            total_prior_pi_balance += out_real.get("prior_pi_balance_loss", torch.zeros_like(out_real["cov_loss"])).item() * bsz
+            total_celltype_cls += out_real.get("celltype_cls_loss", torch.zeros_like(out_real["cov_loss"])).item() * bsz
             total_batchless_recon += batchless_recon.item() * bsz
 
             if (batch_idx + 1) % 1000 == 0 and is_rank0:
                 msg = (
                     f"[Val Batch {batch_idx + 1}] "
-                    f"Loss={loss.item():.4f}, Recon={out_fake['recon_loss'].item():.4f}, "
-                    f"KL={out_fake['kl_loss'].item():.4f}, "
-                    f"cls={out_fake.get('celltype_cls_loss', torch.zeros_like(out_fake['cov_loss'])).item():.4f}"
+                    f"Loss={loss.item():.4f}, Recon={out_real['recon_loss'].item():.4f}, "
+                    f"KL={out_real['kl_loss'].item():.4f}, "
+                    f"cls={out_real.get('celltype_cls_loss', torch.zeros_like(out_real['cov_loss'])).item():.4f}"
                 )
                 if lambda_batchless_recon > 0:
                     msg += f", BatchlessRecon={batchless_recon.item():.4f}"
                 if getattr(model.module if hasattr(model, "module") else model, "prior_type", None) == "gmm":
-                    diag = gmm_collapse_diagnostics(prior=prior_ref, z=out_fake["z"], tissue_id=tissue_id)
+                    diag = gmm_collapse_diagnostics(prior=prior_ref, z=out_real["z"], tissue_id=tissue_id)
                     msg += (
                         f", piH={diag['pi_entropy']:.3f}, K_eff={diag['k_eff']:.2f}, "
                         f"activeK={diag['active_comp']}, respTop1={diag['resp_top1']:.3f}, "
