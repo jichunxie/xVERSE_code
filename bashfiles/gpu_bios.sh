@@ -90,6 +90,11 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --lambda-prior-mu-spread 0 \
   --prior-mu-spread-tau 1.0 \
   --lambda-post-c-balance 0 \
+  --prior-refresh-every 1 \
+  --prior-refresh-start-epoch 1 \
+  --prior-refresh-samples 100000 \
+  --prior-refresh-kmeans-iters 10 \
+  --prior-refresh-ema 0.1 \
   --recon-gene-weight-mode inv_log1p_mean_ema \
   --recon-gene-weight-alpha 0.3 \
   --recon-cell-weight-mode batch_kmeans \

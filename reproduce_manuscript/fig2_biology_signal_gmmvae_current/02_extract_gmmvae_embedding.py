@@ -45,6 +45,15 @@ def parse_args():
     )
     ap.add_argument("--liver-dir", default="/hpc/group/xielab/xj58/xVerse_results/fig2/liver")
     ap.add_argument("--brain-dir", default="/hpc/group/xielab/xj58/xVerse_results/fig2/brain")
+    ap.add_argument(
+        "--dataset-manifest",
+        default=None,
+        help=(
+            "Optional CSV for gold-standard h5ad extraction. Required columns: dataset,path. "
+            "Optional columns: tissue,gene_id_col,count_layer. When set, liver/brain dirs are ignored."
+        ),
+    )
+    ap.add_argument("--default-gene-id-col", default="gene_ids", help="Default adata.var column containing Ensembl IDs.")
     ap.add_argument("--output-dir", default="/hpc/group/xielab/xj58/xVerse_results/fig2_gmmvae_current")
     ap.add_argument("--embedding-key", default="xVerse_gmmvae_mixmu")
     ap.add_argument(
@@ -165,6 +174,110 @@ def extract_embedding_for_file(
     return np.concatenate(z_list, axis=0)
 
 
+def _gene_ids_from_adata(adata, gene_id_col: str):
+    if gene_id_col and gene_id_col in adata.var.columns:
+        return adata.var[gene_id_col].astype(str).values
+    for col in ["gene_ids", "gene_id", "ensembl_id", "ensembl_ids", "feature_id"]:
+        if col in adata.var.columns:
+            return adata.var[col].astype(str).values
+    return adata.var_names.astype(str).values
+
+
+def extract_embedding_from_adata(
+    model,
+    adata,
+    gene_ids,
+    gene_id_col: str,
+    count_layer: str,
+    device: torch.device,
+    batch_size: int,
+):
+    source_gene_ids = _gene_ids_from_adata(adata, gene_id_col)
+    gene_to_idx = {g: i for i, g in enumerate(source_gene_ids)}
+    valid_pos = []
+    valid_gene_idx = []
+    for pos, g in enumerate(gene_ids):
+        idx = gene_to_idx.get(str(g))
+        if idx is not None:
+            valid_pos.append(pos)
+            valid_gene_idx.append(idx)
+    if not valid_pos:
+        raise ValueError("No overlap between model gene ids and adata genes.")
+
+    if count_layer and count_layer != "nan" and count_layer in adata.layers:
+        raw = adata.layers[count_layer]
+    elif count_layer == "raw" and adata.raw is not None:
+        raw = adata.raw.X
+    else:
+        raw = adata.raw.X if adata.raw is not None else adata.X
+    n = adata.n_obs
+    z_list = []
+    with torch.no_grad():
+        for st in tqdm(range(0, n, batch_size), desc="extract manifest h5ad", leave=False):
+            ed = min(st + batch_size, n)
+            block = raw[st:ed, :]
+            block = block[:, valid_gene_idx]
+            arr = block.toarray() if hasattr(block, "toarray") else np.asarray(block)
+            x_np = np.full((ed - st, len(gene_ids)), -1.0, dtype=np.float32)
+            x_np[:, valid_pos] = np.asarray(arr, dtype=np.float32)
+            values = torch.tensor(x_np, dtype=torch.float32, device=device)
+            x_mask = (values != -1).float()
+            x_count = torch.where(x_mask > 0, values, torch.zeros_like(values))
+            x_count = torch.clamp(x_count, min=0.0)
+            with torch.amp.autocast(device.type, enabled=(device.type == "cuda")):
+                out = model(x_count=x_count, x_mask=x_mask, use_batch_condition=False)
+            if ("q_c" in out) and ("mu_comp" in out):
+                emb = torch.sum(out["q_c"].unsqueeze(-1) * out["mu_comp"], dim=1)
+            else:
+                emb = out["z"]
+            z_list.append(emb.detach().cpu().numpy())
+    return np.concatenate(z_list, axis=0)
+
+
+def process_dataset_manifest(args, model, gene_ids, device: torch.device, timing_records):
+    df = pd.read_csv(args.dataset_manifest)
+    required = {"dataset", "path"}
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(f"dataset manifest missing columns: {sorted(missing)}")
+    for _, row in df.iterrows():
+        fp = Path(str(row["path"]))
+        if not fp.exists():
+            print(f"[WARN] h5ad path not found: {fp}")
+            continue
+        dataset = str(row["dataset"])
+        tissue = str(row.get("tissue", dataset))
+        gene_id_col = str(row.get("gene_id_col", args.default_gene_id_col))
+        count_layer = str(row.get("count_layer", ""))
+        print(f"[INFO] manifest dataset={dataset} file={fp}")
+        adata = sc.read_h5ad(fp)
+        start = time.time()
+        emb = extract_embedding_from_adata(
+            model=model,
+            adata=adata,
+            gene_ids=gene_ids,
+            gene_id_col=gene_id_col,
+            count_layer=count_layer,
+            device=device,
+            batch_size=args.batch_size,
+        )
+        cost = time.time() - start
+        adata.obsm[args.embedding_key] = emb
+        adata.write(fp)
+        print(f"[OK] wrote {args.embedding_key} to {fp} shape={emb.shape} time={cost:.2f}s")
+        timing_records.append(
+            {
+                "model": "gmmvae_current",
+                "tissue": tissue,
+                "gene_set": "all",
+                "file": fp.name,
+                "n_cells": int(adata.n_obs),
+                "n_genes": int(adata.n_vars),
+                "time_seconds": cost,
+            }
+        )
+
+
 def process_tissue_dir(args, model, gene_ids, tissue_name: str, tissue_dir: Path, tissue_map, timing_records):
     if not tissue_dir.exists():
         print(f"[WARN] tissue dir not found: {tissue_dir}")
@@ -231,24 +344,27 @@ def main():
     tissue_map = {"liver": 31, "brain": 7}
     timing_records = []
 
-    process_tissue_dir(
-        args=args,
-        model=model,
-        gene_ids=gene_ids,
-        tissue_name="liver",
-        tissue_dir=Path(args.liver_dir),
-        tissue_map=tissue_map,
-        timing_records=timing_records,
-    )
-    process_tissue_dir(
-        args=args,
-        model=model,
-        gene_ids=gene_ids,
-        tissue_name="brain",
-        tissue_dir=Path(args.brain_dir),
-        tissue_map=tissue_map,
-        timing_records=timing_records,
-    )
+    if args.dataset_manifest:
+        process_dataset_manifest(args, model, gene_ids, device, timing_records)
+    else:
+        process_tissue_dir(
+            args=args,
+            model=model,
+            gene_ids=gene_ids,
+            tissue_name="liver",
+            tissue_dir=Path(args.liver_dir),
+            tissue_map=tissue_map,
+            timing_records=timing_records,
+        )
+        process_tissue_dir(
+            args=args,
+            model=model,
+            gene_ids=gene_ids,
+            tissue_name="brain",
+            tissue_dir=Path(args.brain_dir),
+            tissue_map=tissue_map,
+            timing_records=timing_records,
+        )
 
     if timing_records:
         out_csv = os.path.join(args.output_dir, "gmmvae_current_inference_timing.csv")

@@ -18,28 +18,63 @@ import numpy as np
 import pandas as pd
 import scanpy as sc
 import scib
+from sklearn.cluster import KMeans
+from sklearn.metrics import adjusted_rand_score, normalized_mutual_info_score
 
 
 def parse_args():
     ap = argparse.ArgumentParser(description="Comprehensive scIB evaluation for fig2 embeddings.")
     ap.add_argument("--liver-dir", default="/hpc/group/xielab/xj58/xVerse_results/fig2/liver")
     ap.add_argument("--brain-dir", default="/hpc/group/xielab/xj58/xVerse_results/fig2/brain")
+    ap.add_argument(
+        "--dataset-manifest",
+        default=None,
+        help=(
+            "Optional CSV for gold-standard h5ad evaluation. Required columns: dataset,path,batch_key,label_key. "
+            "When set, liver/brain dirs are ignored."
+        ),
+    )
     ap.add_argument("--output-dir", default="/hpc/group/xielab/xj58/xVerse_results/fig2_gmmvae_current/evaluation_scib_full")
     ap.add_argument("--old-eval-dir", default="/hpc/group/xielab/xj58/xVerse_results/fig2/evaluation")
     ap.add_argument("--gmm-key", default="xVerse_gmmvae_mixmu")
     ap.add_argument("--neighbors-k", type=int, default=15)
     ap.add_argument("--max-cells", type=int, default=20000, help="0 means all cells; otherwise random subsample for speed.")
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--scib-n-cores", type=int, default=1, help="Cores passed to scIB LISI/kBET style metrics.")
+    ap.add_argument("--scib-subsample", type=float, default=0.5, help="Subsample fraction passed to scIB metrics().")
+    ap.add_argument("--scib-organism", default="human", help="Organism passed to scIB cell-cycle metric.")
+    ap.add_argument(
+        "--skip-official-metrics-all",
+        action="store_true",
+        help="Skip the official scib.metrics.metrics(... all flags ...) call and run only robust individual metrics.",
+    )
     return ap.parse_args()
 
 
 MODELS = [
+    ("Unintegrated", "X_pca"),
     ("xVerse", "xVerse"),
     ("GMVAE", "xVerse_gmmvae"),
     ("Harmony", "harmony"),
     ("scGPT", "scgpt"),
     ("Nicheformer", "nicheformer"),
     ("Geneformer", "geneformer"),
+]
+
+SCIB_SCORE_TABLE = [
+    ("Isolated labels", "Bio conservation"),
+    ("KMeans NMI", "Bio conservation"),
+    ("KMeans ARI", "Bio conservation"),
+    ("Silhouette label", "Bio conservation"),
+    ("cLISI", "Bio conservation"),
+    ("Silhouette batch", "Batch correction"),
+    ("iLISI", "Batch correction"),
+    ("KBET", "Batch correction"),
+    ("Graph connectivity", "Batch correction"),
+    ("PCR comparison", "Batch correction"),
+    ("Batch correction", "Aggregate score"),
+    ("Bio conservation", "Aggregate score"),
+    ("Total", "Aggregate score"),
 ]
 
 
@@ -67,6 +102,22 @@ def load_merged_tissue(tissue_dir: str, tissue_name: str, gene_set: str):
     return adata
 
 
+def load_merged_manifest_dataset(df: pd.DataFrame, dataset_name: str):
+    sub = df[df["dataset"].astype(str) == str(dataset_name)]
+    if sub.empty:
+        raise ValueError(f"No rows for dataset={dataset_name}")
+    adata_list = []
+    for _, row in sub.iterrows():
+        fp = Path(str(row["path"]))
+        ad = sc.read_h5ad(fp)
+        if "source_file" not in ad.obs.columns:
+            ad.obs["source_file"] = fp.name
+        adata_list.append(ad)
+    if len(adata_list) == 1:
+        return adata_list[0].copy()
+    return sc.concat(adata_list, join="outer", index_unique=None)
+
+
 def maybe_subsample(adata, max_cells: int, seed: int):
     if max_cells <= 0 or adata.n_obs <= max_cells:
         return adata
@@ -76,6 +127,15 @@ def maybe_subsample(adata, max_cells: int, seed: int):
     return adata[idx].copy()
 
 
+def ensure_unintegrated_pca(adata, key: str = "X_pca", n_comps: int = 50):
+    if key in adata.obsm:
+        return
+    n_comps = max(2, min(int(n_comps), adata.n_obs - 1, adata.n_vars - 1))
+    if n_comps < 2:
+        return
+    sc.pp.pca(adata, n_comps=n_comps)
+
+
 def run_one_metric(name, fn):
     try:
         return float(fn()), ""
@@ -83,57 +143,285 @@ def run_one_metric(name, fn):
         return np.nan, str(e)
 
 
-def eval_one_embedding(adata, embed_key: str, celltype_col: str, batch_col: str, neighbors_k: int):
+def add_kmeans_metrics(metrics, errors, adata_int, embed_key: str, label_key: str, seed: int):
+    try:
+        labels = adata_int.obs[label_key].astype(str).values
+        n_clusters = int(pd.Series(labels).nunique())
+        if n_clusters < 2:
+            raise ValueError(f"Need >=2 labels for KMeans metrics, got {n_clusters}")
+        emb = np.asarray(adata_int.obsm[embed_key], dtype=np.float32)
+        pred = KMeans(n_clusters=n_clusters, n_init=10, random_state=int(seed)).fit_predict(emb)
+        metrics["KMeans_NMI"] = float(normalized_mutual_info_score(labels, pred))
+        metrics["KMeans_ARI"] = float(adjusted_rand_score(labels, pred))
+        errors["KMeans_NMI"] = ""
+        errors["KMeans_ARI"] = ""
+    except Exception as e:
+        metrics["KMeans_NMI"] = np.nan
+        metrics["KMeans_ARI"] = np.nan
+        errors["KMeans_NMI"] = str(e)
+        errors["KMeans_ARI"] = str(e)
+
+
+def add_pcr_metrics(metrics, errors, adata_pre, adata_int, embed_key: str, batch_key: str):
+    try:
+        after_embed = None if embed_key == "X_pca" else embed_key
+        pcr_before = scib.metrics.pcr(adata_pre, covariate=batch_key, recompute_pca=False)
+        pcr_after = scib.metrics.pcr(adata_int, covariate=batch_key, embed=after_embed, recompute_pca=False)
+        pcr_delta = pcr_after - pcr_before
+        pcr_score = (pcr_before - pcr_after) / pcr_before if pcr_before > 0 else np.nan
+        if np.isfinite(pcr_score) and pcr_score < 0:
+            pcr_score = 0.0
+        metrics["PCR_batch"] = float(pcr_score)
+        metrics["PCR_before"] = float(pcr_before)
+        metrics["PCR_after"] = float(pcr_after)
+        metrics["PCR_delta_after_minus_before"] = float(pcr_delta)
+        errors["PCR_batch"] = ""
+        errors["PCR_before"] = ""
+        errors["PCR_after"] = ""
+        errors["PCR_delta_after_minus_before"] = ""
+    except Exception as e:
+        metrics["PCR_batch"] = np.nan
+        metrics["PCR_before"] = np.nan
+        metrics["PCR_after"] = np.nan
+        metrics["PCR_delta_after_minus_before"] = np.nan
+        errors["PCR_batch"] = str(e)
+        errors["PCR_before"] = str(e)
+        errors["PCR_after"] = str(e)
+        errors["PCR_delta_after_minus_before"] = str(e)
+
+
+def add_scib_score_aliases(metrics):
+    alias_map = {
+        "Isolated labels": "isolated_ASW",
+        "KMeans NMI": "KMeans_NMI",
+        "KMeans ARI": "KMeans_ARI",
+        "Silhouette label": "ASW_label",
+        "cLISI": "cLISI",
+        "Silhouette batch": "ASW_batch",
+        "iLISI": "iLISI",
+        "KBET": "kBET",
+        "Graph connectivity": "graph_conn",
+        "PCR comparison": "PCR_batch",
+    }
+    for display_name, source_name in alias_map.items():
+        metrics[display_name] = metrics.get(source_name, np.nan)
+
+    bio_vals = [metrics.get(k, np.nan) for k, t in SCIB_SCORE_TABLE[:5]]
+    batch_vals = [metrics.get(k, np.nan) for k, t in SCIB_SCORE_TABLE[5:10]]
+    metrics["Bio conservation"] = float(np.nanmean(bio_vals)) if np.isfinite(bio_vals).any() else np.nan
+    metrics["Batch correction"] = float(np.nanmean(batch_vals)) if np.isfinite(batch_vals).any() else np.nan
+    if np.isfinite(metrics["Bio conservation"]) and np.isfinite(metrics["Batch correction"]):
+        metrics["Total"] = 0.6 * metrics["Bio conservation"] + 0.4 * metrics["Batch correction"]
+    else:
+        metrics["Total"] = np.nan
+
+
+def write_score_table(df: pd.DataFrame, out_csv: str):
+    if df.empty:
+        return
+    rows = []
+    for metric_name, metric_type in SCIB_SCORE_TABLE:
+        row = {"Embedding": metric_name, "Metric Type": metric_type}
+        for _, rec in df.iterrows():
+            if df["tissue"].nunique() > 1 or df["gene_set"].nunique() > 1:
+                col = f"{rec['tissue']}/{rec['gene_set']}/{rec['model']}"
+            else:
+                col = str(rec["model"])
+            row[col] = rec.get(metric_name, np.nan)
+        rows.append(row)
+    score_df = pd.DataFrame(rows)
+    if df["tissue"].nunique() > 1 or df["gene_set"].nunique() > 1:
+        metric_cols = [f"{r['tissue']}/{r['gene_set']}/{r['model']}" for _, r in df.iterrows()]
+    else:
+        metric_cols = [str(x) for x in df["model"].tolist()]
+    cols = ["Embedding"] + metric_cols + ["Metric Type"]
+    score_df = score_df[[c for c in cols if c in score_df.columns]]
+    score_df.to_csv(out_csv, index=False)
+
+
+def _flatten_metric_output(obj):
+    flat = {}
+    if obj is None:
+        return flat
+    if isinstance(obj, pd.DataFrame):
+        if obj.shape[0] == 1:
+            for k, v in obj.iloc[0].items():
+                if pd.api.types.is_number(v):
+                    flat[str(k)] = float(v)
+        elif obj.shape[1] == 1:
+            col = obj.columns[0]
+            for k, v in obj[col].items():
+                if pd.api.types.is_number(v):
+                    flat[str(k)] = float(v)
+        else:
+            for ridx, row in obj.iterrows():
+                for col, v in row.items():
+                    if pd.api.types.is_number(v):
+                        flat[f"{ridx}_{col}"] = float(v)
+    elif isinstance(obj, pd.Series):
+        for k, v in obj.items():
+            if pd.api.types.is_number(v):
+                flat[str(k)] = float(v)
+    elif isinstance(obj, dict):
+        for k, v in obj.items():
+            if isinstance(v, (int, float, np.integer, np.floating)):
+                flat[str(k)] = float(v)
+    return flat
+
+
+def _make_scib_pair(adata, embed_key: str):
+    adata_pre = adata.copy()
+    adata_int = adata.copy()
+    adata_int.obsm[embed_key] = np.asarray(adata.obsm[embed_key], dtype=np.float32)
+    return adata_pre, adata_int
+
+
+def _ensure_neighbors(adata_int, embed_key: str, neighbors_k: int):
+    sc.pp.neighbors(adata_int, use_rep=embed_key, n_neighbors=neighbors_k)
+
+
+def _ensure_cluster(adata_int, cluster_key: str = "scib_leiden"):
+    if cluster_key in adata_int.obs.columns:
+        return cluster_key
+    sc.tl.leiden(adata_int, resolution=1.0, key_added=cluster_key)
+    return cluster_key
+
+
+def eval_one_embedding(
+    adata,
+    embed_key: str,
+    celltype_col: str,
+    batch_col: str,
+    neighbors_k: int,
+    run_official_metrics_all: bool = True,
+    scib_n_cores: int = 1,
+    scib_subsample: float = 0.5,
+    scib_organism: str = "human",
+    seed: int = 42,
+):
     """
-    Broader scIB-like set:
-    - Bio conservation: ASW_label, isolated label ASW, cLISI
-    - Batch mixing: iLISI, graph connectivity, PCR batch
+    Comprehensive scIB diagnosis.
+
+    It first attempts the official scIB metrics() call with all metric flags enabled.
+    Because some official metrics require optional annotations (cell-cycle genes,
+    pseudotime, HVG metadata) or slow dependencies, it then runs robust individual
+    metrics and records failures in the error table instead of stopping the run.
     """
     if embed_key not in adata.obsm:
         return None
 
-    work = sc.AnnData(obs=adata.obs.copy())
-    work.obsm[embed_key] = adata.obsm[embed_key]
-    sc.pp.neighbors(work, use_rep=embed_key, n_neighbors=neighbors_k)
+    adata_pre, adata_int = _make_scib_pair(adata, embed_key)
+    _ensure_neighbors(adata_int, embed_key=embed_key, neighbors_k=neighbors_k)
 
     metrics = {}
     errors = {}
 
-    metrics["ASW_label"], errors["ASW_label"] = run_one_metric(
-        "ASW_label",
-        lambda: scib.metrics.silhouette(work, label_key=celltype_col, embed=embed_key),
-    )
+    if run_official_metrics_all:
+        try:
+            official = scib.metrics.metrics(
+                adata_pre,
+                adata_int,
+                batch_key=batch_col,
+                label_key=celltype_col,
+                embed=embed_key,
+                cluster_key="scib_cluster",
+                ari_=True,
+                nmi_=True,
+                silhouette_=True,
+                pcr_=True,
+                cell_cycle_=True,
+                organism=scib_organism,
+                hvg_score_=True,
+                isolated_labels_=True,
+                isolated_labels_f1_=True,
+                isolated_labels_asw_=True,
+                graph_conn_=True,
+                trajectory_=True,
+                morans_i_=True,
+                kBET_=True,
+                lisi_graph_=True,
+                ilisi_=True,
+                clisi_=True,
+                subsample=scib_subsample,
+                n_cores=scib_n_cores,
+                type_="knn",
+                verbose=False,
+            )
+            for k, v in _flatten_metric_output(official).items():
+                metrics[f"official_{k}"] = v
+            errors["official_metrics_all"] = ""
+        except Exception as e:
+            errors["official_metrics_all"] = str(e)
 
-    metrics["ASW_batch"], errors["ASW_batch"] = run_one_metric(
+    def add_metric(name, fn):
+        metrics[name], errors[name] = run_one_metric(name, fn)
+
+    add_metric("ASW_label", lambda: scib.metrics.silhouette(adata_int, label_key=celltype_col, embed=embed_key))
+    add_metric(
         "ASW_batch",
-        lambda: scib.metrics.silhouette_batch(work, batch_key=batch_col, label_key=celltype_col, embed=embed_key),
+        lambda: scib.metrics.silhouette_batch(
+            adata_int,
+            batch_key=batch_col,
+            label_key=celltype_col,
+            embed=embed_key,
+        ),
     )
-
-    metrics["isolated_ASW"], errors["isolated_ASW"] = run_one_metric(
+    add_metric(
         "isolated_ASW",
-        lambda: scib.metrics.isolated_labels_asw(work, batch_key=batch_col, label_key=celltype_col, embed=embed_key),
+        lambda: scib.metrics.isolated_labels_asw(
+            adata_int,
+            batch_key=batch_col,
+            label_key=celltype_col,
+            embed=embed_key,
+            verbose=False,
+        ),
     )
-
-    metrics["graph_conn"], errors["graph_conn"] = run_one_metric(
-        "graph_conn",
-        lambda: scib.metrics.graph_connectivity(work, label_key=celltype_col),
-    )
-
-    metrics["iLISI"], errors["iLISI"] = run_one_metric(
+    if hasattr(scib.metrics, "isolated_labels_f1"):
+        add_metric(
+            "isolated_F1",
+            lambda: scib.metrics.isolated_labels_f1(
+                adata_int,
+                batch_key=batch_col,
+                label_key=celltype_col,
+                embed=embed_key,
+                verbose=False,
+            ),
+        )
+    add_metric("graph_conn", lambda: scib.metrics.graph_connectivity(adata_int, label_key=celltype_col))
+    add_metric(
         "iLISI",
-        lambda: scib.metrics.ilisi_graph(work, batch_key=batch_col, type_="knn"),
+        lambda: scib.metrics.ilisi_graph(
+            adata_int,
+            batch_key=batch_col,
+            type_="knn",
+            n_cores=scib_n_cores,
+        ),
     )
-
-    metrics["cLISI"], errors["cLISI"] = run_one_metric(
+    add_metric(
         "cLISI",
-        lambda: scib.metrics.clisi_graph(work, label_key=celltype_col, type_="knn"),
+        lambda: scib.metrics.clisi_graph(
+            adata_int,
+            label_key=celltype_col,
+            type_="knn",
+            n_cores=scib_n_cores,
+        ),
     )
+    add_pcr_metrics(metrics, errors, adata_pre, adata_int, embed_key=embed_key, batch_key=batch_col)
+    add_metric("HVG_overlap", lambda: scib.metrics.hvg_overlap(adata_pre, adata_int, batch=batch_col))
+    add_metric("cell_cycle", lambda: scib.metrics.cell_cycle(adata_pre, adata_int, batch_key=batch_col))
+    add_metric("kBET", lambda: scib.metrics.kBET(adata_int, batch_key=batch_col, label_key=celltype_col, type_="knn"))
+    add_kmeans_metrics(metrics, errors, adata_int, embed_key=embed_key, label_key=celltype_col, seed=seed)
+    add_metric("NMI", lambda: scib.metrics.nmi(adata_int, _ensure_cluster(adata_int), celltype_col))
+    add_metric("ARI", lambda: scib.metrics.ari(adata_int, _ensure_cluster(adata_int), celltype_col))
+    if "dpt_pseudotime" in adata_pre.obs.columns:
+        add_metric("trajectory", lambda: scib.metrics.trajectory_conservation(adata_pre, adata_int, label_key=celltype_col))
+    else:
+        metrics["trajectory"] = np.nan
+        errors["trajectory"] = "missing adata_pre.obs['dpt_pseudotime']"
+    if hasattr(scib.metrics, "morans_i"):
+        add_metric("morans_i", lambda: scib.metrics.morans_i(adata_pre, adata_int))
 
-    metrics["PCR_batch"], errors["PCR_batch"] = run_one_metric(
-        "PCR_batch",
-        lambda: scib.metrics.pcr_comparison(adata, work, covariate=batch_col, embed=embed_key),
-    )
-
+    add_scib_score_aliases(metrics)
     return metrics, errors
 
 
@@ -156,18 +444,52 @@ def main():
 
     all_rows = []
     all_err_rows = []
-    for tissue_name, tissue_dir in [("liver", args.liver_dir), ("brain", args.brain_dir)]:
-        for gene_set in ["all"]:
-            print(f"\n=== {tissue_name}/{gene_set} ===")
-            adata = load_merged_tissue(tissue_dir, tissue_name, gene_set)
-            adata = maybe_subsample(adata, args.max_cells, args.seed)
+    if args.dataset_manifest:
+        manifest = pd.read_csv(args.dataset_manifest)
+        required = {"dataset", "path", "batch_key", "label_key"}
+        missing = required - set(manifest.columns)
+        if missing:
+            raise ValueError(f"dataset manifest missing columns: {sorted(missing)}")
+        dataset_jobs = []
+        for dataset_name in manifest["dataset"].astype(str).unique():
+            sub = manifest[manifest["dataset"].astype(str) == dataset_name]
+            dataset_jobs.append(
+                {
+                    "tissue_name": dataset_name,
+                    "gene_set": "gold",
+                    "adata": load_merged_manifest_dataset(manifest, dataset_name),
+                    "batch_col": str(sub.iloc[0]["batch_key"]),
+                    "celltype_col": str(sub.iloc[0]["label_key"]),
+                }
+            )
+    else:
+        dataset_jobs = []
+        for tissue_name, tissue_dir in [("liver", args.liver_dir), ("brain", args.brain_dir)]:
+            dataset_jobs.append(
+                {
+                    "tissue_name": tissue_name,
+                    "gene_set": "all",
+                    "adata": load_merged_tissue(tissue_dir, tissue_name, "all"),
+                    "batch_col": "donor_id",
+                    "celltype_col": None,
+                }
+            )
 
-            celltype_col = pick_celltype_col(adata.obs)
+    for job in dataset_jobs:
+            tissue_name = job["tissue_name"]
+            gene_set = job["gene_set"]
+            print(f"\n=== {tissue_name}/{gene_set} ===")
+            adata = job["adata"]
+            adata = maybe_subsample(adata, args.max_cells, args.seed)
+            ensure_unintegrated_pca(adata, key="X_pca")
+
+            celltype_col = job["celltype_col"] or pick_celltype_col(adata.obs)
             if celltype_col is None:
                 print(f"[skip] no cell type column for {tissue_name}/{gene_set}")
                 continue
-            if "donor_id" not in adata.obs.columns:
-                print(f"[skip] no donor_id for {tissue_name}/{gene_set}")
+            batch_col = job["batch_col"]
+            if batch_col not in adata.obs.columns:
+                print(f"[skip] no batch column {batch_col} for {tissue_name}/{gene_set}")
                 continue
 
             for model_name, key in model_pairs:
@@ -179,8 +501,13 @@ def main():
                     adata=adata,
                     embed_key=key,
                     celltype_col=celltype_col,
-                    batch_col="donor_id",
+                    batch_col=batch_col,
                     neighbors_k=args.neighbors_k,
+                    run_official_metrics_all=(not args.skip_official_metrics_all),
+                    scib_n_cores=args.scib_n_cores,
+                    scib_subsample=args.scib_subsample,
+                    scib_organism=args.scib_organism,
+                    seed=args.seed,
                 )
                 if out is None:
                     continue
@@ -210,15 +537,21 @@ def main():
                 out_csv = os.path.join(args.output_dir, f"{tissue_name}_{gene_set}_scib_full_metrics.csv")
                 df_tg.to_csv(out_csv, index=False)
                 print(f"[save] {out_csv}")
+                score_csv = os.path.join(args.output_dir, f"{tissue_name}_{gene_set}_scib_score_table.csv")
+                write_score_table(df_tg, score_csv)
+                print(f"[save] {score_csv}")
 
     df_all = pd.DataFrame(all_rows)
     df_err = pd.DataFrame(all_err_rows)
     all_csv = os.path.join(args.output_dir, "all_scib_full_metrics.csv")
     err_csv = os.path.join(args.output_dir, "all_scib_metric_errors.csv")
+    score_csv = os.path.join(args.output_dir, "all_scib_score_table.csv")
     df_all.to_csv(all_csv, index=False)
     df_err.to_csv(err_csv, index=False)
+    write_score_table(df_all, score_csv)
     print(f"\n[done] metrics: {all_csv}")
     print(f"[done] errors:  {err_csv}")
+    print(f"[done] scores:  {score_csv}")
 
 
 if __name__ == "__main__":

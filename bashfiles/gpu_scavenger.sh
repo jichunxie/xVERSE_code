@@ -22,11 +22,13 @@ FIG2_BRAIN_DIR="/hpc/group/xielab/xj58/xVerse_results/fig2/brain"
 FIG2_GENE_IDS="/hpc/group/xielab/xj58/xVerseAtlas/npz_tissue_dataset_donor/ensg_keys_high_quality.txt"
 FIG2_OLD_EVAL_DIR="/hpc/group/xielab/xj58/xVerse_results/fig2/evaluation"
 
+DATASET_ARGS=()
+
 run_one_model () {
   MODEL_TAG="$1"
   RESULT_DIR="$2"
   MODEL_FAMILY="${3:-auto}"
-  CKPT_PATH="${RESULT_DIR}/best_model.pth"
+  CKPT_PATH="${RESULT_DIR}/last_model.pth"
   FIG2_OUT_DIR="/hpc/group/xielab/xj58/xVerse_results/fig2_gmmvae_${MODEL_TAG}"
   FIG2_EVAL_DIR="${FIG2_OUT_DIR}/evaluation_scib_full"
 
@@ -37,6 +39,7 @@ run_one_model () {
       --gene-ids-path "${FIG2_GENE_IDS}" \
       --liver-dir "${FIG2_LIVER_DIR}" \
       --brain-dir "${FIG2_BRAIN_DIR}" \
+      "${DATASET_ARGS[@]}" \
       --output-dir "${FIG2_OUT_DIR}" \
       --embedding-key xVerse_gmmvae_mixmu
 
@@ -46,8 +49,10 @@ run_one_model () {
       --brain-dir "${FIG2_BRAIN_DIR}" \
       --output-dir "${FIG2_EVAL_DIR}" \
       --old-eval-dir "${FIG2_OLD_EVAL_DIR}" \
+      "${DATASET_ARGS[@]}" \
       --gmm-key xVerse_gmmvae_mixmu \
-      --max-cells 20000
+      --max-cells 20000 \
+      --skip-official-metrics-all
 
   echo ">>> [${MODEL_TAG}] Plot UMAP"
   python reproduce_manuscript/fig2_biology_signal_gmmvae_current/04_plot_umap.py \
@@ -59,7 +64,8 @@ run_one_model () {
       --max-cells 20000
 }
 
-run_one_model "mfa_rank4" "/hpc/group/xielab/xj58/pretrain_model_celltype/mfa_all_tissue0513_rank4" "main_mfa"
+run_one_model "base" "/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_all_tissue0513_base" "main_energy"
+# run_one_model "mfa_rank4" "/hpc/group/xielab/xj58/pretrain_model_celltype/mfa_all_tissue0513_rank4" "main_mfa"
 # run_one_model "nb" "/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_all_tissue0512" "main_energy"
 # run_one_model "poisson" "/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_all_tissue_poisson"
 

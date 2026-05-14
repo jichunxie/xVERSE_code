@@ -1,0 +1,4 @@
+dataset,path,batch_key,label_key,tissue,gene_id_col,count_layer,notes
+pancreas_scib,/path/to/pancreas_scib.h5ad,batch,cell_type,pancreas,gene_ids,counts,"classic multi-study pancreas integration benchmark"
+lung_scib,/path/to/lung_scib.h5ad,batch,cell_type,lung,gene_ids,counts,"scIB lung atlas integration benchmark"
+pbmc_multibatch,/path/to/pbmc_multibatch.h5ad,batch,cell_type,immune system,gene_ids,counts,"multi-batch PBMC/immune benchmark"

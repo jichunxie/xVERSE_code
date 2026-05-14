@@ -178,6 +178,16 @@ def parse_args():
                         help="Length scale for prior mean spread regularization (smaller => stronger local repulsion).")
     parser.add_argument("--lambda-post-c-balance", type=float, default=0.0,
                         help="Weight for batch-level posterior component usage balance KL(q_mean(c)||uniform).")
+    parser.add_argument("--prior-refresh-every", type=int, default=0,
+                        help="If >0, refresh GMM prior mu/pi from training embeddings every N epochs.")
+    parser.add_argument("--prior-refresh-start-epoch", type=int, default=1,
+                        help="First epoch where prior refresh is allowed.")
+    parser.add_argument("--prior-refresh-samples", type=int, default=50000,
+                        help="Maximum training cells used for each prior refresh.")
+    parser.add_argument("--prior-refresh-kmeans-iters", type=int, default=10,
+                        help="KMeans iterations used by prior refresh.")
+    parser.add_argument("--prior-refresh-ema", type=float, default=0.2,
+                        help="EMA update strength for prior refresh. 1.0 fully replaces current prior mu/pi.")
     parser.add_argument("--lambda-contrast", type=float, default=1.0,
                         help="Weight of contrastive loss between real-mask and fake-mask views.")
     parser.add_argument("--lambda-real-recon", type=float, default=0.1,
@@ -338,6 +348,145 @@ def _kmeans_torch(x: torch.Tensor, k: int, iters: int, seed: int):
             new_centers[~non_empty] = refill
         centers = new_centers
     return centers, assign
+
+
+def _match_centers_to_prior(old_mu: torch.Tensor, new_centers: torch.Tensor) -> torch.Tensor:
+    """Return indices that align new centers to existing component order."""
+    cost = torch.cdist(old_mu.float(), new_centers.float(), p=2)
+    pairs = torch.argsort(cost.flatten())
+    k_old, k_new = cost.shape
+    assigned_old = torch.zeros(k_old, dtype=torch.bool, device=cost.device)
+    assigned_new = torch.zeros(k_new, dtype=torch.bool, device=cost.device)
+    match = torch.full((k_old,), -1, dtype=torch.long, device=cost.device)
+    for flat_idx in pairs:
+        old_idx = torch.div(flat_idx, k_new, rounding_mode="floor")
+        new_idx = flat_idx % k_new
+        if (not bool(assigned_old[old_idx])) and (not bool(assigned_new[new_idx])):
+            match[old_idx] = new_idx
+            assigned_old[old_idx] = True
+            assigned_new[new_idx] = True
+            if bool(assigned_old.all()):
+                break
+    if (match < 0).any():
+        unused = torch.nonzero(~assigned_new, as_tuple=False).flatten()
+        missing = torch.nonzero(match < 0, as_tuple=False).flatten()
+        match[missing] = unused[: missing.numel()]
+    return match
+
+
+def refresh_gmm_prior_from_loader(
+    model,
+    optimizer,
+    train_loader,
+    device,
+    *,
+    epoch_id: int,
+    rank: int,
+    samples: int,
+    kmeans_iters: int,
+    ema: float,
+    seed: int,
+    log,
+):
+    base_model = _unwrap_model(model)
+    if getattr(base_model, "prior_type", None) != "gmm" or not hasattr(base_model, "prior"):
+        return
+    prior = base_model.prior
+    if not hasattr(prior, "prior_mu") or prior.prior_mu is None:
+        return
+
+    should_collect = is_main_process(rank)
+    old_mode = base_model.training
+    if should_collect:
+        base_model.eval()
+        chunks = []
+        seen = 0
+        with torch.no_grad():
+            for sample_id, tissue_id, _celltype_id, x_count, x_mask, _x_mask_encoder in train_loader:
+                x_count = x_count.to(device, non_blocking=True)
+                x_mask = x_mask.to(device, non_blocking=True)
+                sample_id = sample_id.to(device, non_blocking=True)
+                tissue_id = tissue_id.to(device, non_blocking=True)
+                out = base_model(
+                    x_count=x_count,
+                    x_mask=x_mask,
+                    tissue_id=tissue_id,
+                    sample_id=sample_id,
+                    use_batch_condition=False,
+                )
+                z_mu = out["mu"].detach().float()
+                need = int(samples) - seen
+                if need <= 0:
+                    break
+                if z_mu.size(0) > need:
+                    z_mu = z_mu[:need]
+                chunks.append(z_mu.cpu())
+                seen += z_mu.size(0)
+                if seen >= int(samples):
+                    break
+
+        if old_mode:
+            base_model.train()
+
+        if chunks:
+            z = torch.cat(chunks, dim=0).to(device=device, dtype=prior.prior_mu.dtype)
+        else:
+            z = torch.empty((0, prior.prior_mu.size(1)), device=device, dtype=prior.prior_mu.dtype)
+
+        k = int(prior.prior_mu.size(0))
+        if z.size(0) < k:
+            log(f"[PriorRefresh][Skip] epoch={epoch_id}, samples={z.size(0)} < K={k}")
+        else:
+            centers, _ = _kmeans_torch(z, k=k, iters=int(kmeans_iters), seed=int(seed) + int(epoch_id))
+            assign = torch.argmin(torch.cdist(z.float(), centers.float(), p=2), dim=1)
+            counts = torch.bincount(assign, minlength=k).float()
+
+            old_mu = prior.prior_mu.detach().float()
+            match = _match_centers_to_prior(old_mu, centers.detach().float())
+            centers = centers[match]
+            counts = counts[match]
+
+            rho = min(max(float(ema), 0.0), 1.0)
+            old_pi = torch.softmax(prior.pi_logits.detach().float(), dim=0)
+            new_pi = torch.clamp(counts / counts.sum().clamp_min(1.0), min=1e-6)
+            new_pi = new_pi / new_pi.sum()
+            pi_ema = (1.0 - rho) * old_pi + rho * new_pi.to(old_pi.device)
+            pi_ema = torch.clamp(pi_ema, min=1e-6)
+            pi_ema = pi_ema / pi_ema.sum()
+
+            with torch.no_grad():
+                before = prior.prior_mu.detach().float().clone()
+                prior.prior_mu.mul_(1.0 - rho).add_(centers.to(prior.prior_mu.device, dtype=prior.prior_mu.dtype), alpha=rho)
+                logits = torch.log(pi_ema.to(prior.pi_logits.device, dtype=prior.pi_logits.dtype))
+                logits = logits - logits.mean()
+                prior.pi_logits.copy_(logits)
+                if getattr(prior, "pi_logits_t", None) is not None:
+                    prior.pi_logits_t.copy_(logits.view(1, -1).expand_as(prior.pi_logits_t))
+                shift = (prior.prior_mu.detach().float() - before).norm(dim=1).mean().item()
+
+            eff = float(torch.exp(-(pi_ema * torch.log(pi_ema.clamp_min(1e-12))).sum()).item())
+            active = int((pi_ema > 1e-3).sum().item())
+            log(
+                f"[PriorRefresh] epoch={epoch_id}, samples={z.size(0)}, ema={rho:.3f}, "
+                f"kmEff={eff:.2f}, kmActive={active}, piMin={pi_ema.min().item():.4f}, "
+                f"piMax={pi_ema.max().item():.4f}, meanMuShift={shift:.4f}"
+            )
+
+    refreshed_params = [prior.prior_mu, prior.pi_logits, getattr(prior, "pi_logits_t", None)]
+    for param in refreshed_params:
+        if param is None:
+            continue
+        state = optimizer.state.get(param) if optimizer is not None else None
+        if state:
+            for value in state.values():
+                if torch.is_tensor(value):
+                    value.zero_()
+
+    if dist.is_available() and dist.is_initialized():
+        for param in refreshed_params:
+            if param is not None:
+                dist.broadcast(param.data, src=0)
+        dist.barrier()
 
 
 def main():
@@ -753,6 +902,25 @@ def main():
         if args.lambda_batchless_recon > 0:
             train_msg += f", BatchlessRecon={loss_batchless_recon:.4f}"
         log(train_msg)
+
+        if (
+            int(args.prior_refresh_every) > 0
+            and epoch_id >= int(args.prior_refresh_start_epoch)
+            and ((epoch_id - int(args.prior_refresh_start_epoch)) % int(args.prior_refresh_every) == 0)
+        ):
+            refresh_gmm_prior_from_loader(
+                model=model,
+                optimizer=optimizer,
+                train_loader=train_loader,
+                device=device,
+                epoch_id=epoch_id,
+                rank=rank,
+                samples=args.prior_refresh_samples,
+                kmeans_iters=args.prior_refresh_kmeans_iters,
+                ema=args.prior_refresh_ema,
+                seed=args.seed,
+                log=log,
+            )
 
         do_val = (
             (int(args.val_every) <= 1)
