@@ -394,6 +394,7 @@ class MaskFiLMGMMVAE(nn.Module):
         num_tissues: int = 0,
         num_batches: int = 0,
         batch_emb_dim: int = 0,
+        tissue_emb_dim: int = 0,
         batch_cond_drop_prob: float = 0.0,
         recon_loss_type: str = "poisson",
     ):
@@ -418,17 +419,29 @@ class MaskFiLMGMMVAE(nn.Module):
         )
         self.num_batches = max(0, int(num_batches))
         self.batch_emb_dim = max(0, int(batch_emb_dim))
+        self.num_tissues = max(0, int(num_tissues))
+        self.tissue_emb_dim = max(0, int(tissue_emb_dim))
         self.batch_cond_drop_prob = max(0.0, min(1.0, float(batch_cond_drop_prob)))
         if self.num_batches > 0 and self.batch_emb_dim > 0:
             self.batch_embedding = nn.Embedding(self.num_batches, self.batch_emb_dim)
         else:
             self.batch_embedding = None
+        if self.num_tissues > 0 and self.tissue_emb_dim > 0:
+            self.tissue_embedding = nn.Embedding(self.num_tissues, self.tissue_emb_dim)
+        else:
+            self.tissue_embedding = None
+        decoder_cond_dim = 0
+        if self.batch_embedding is not None:
+            decoder_cond_dim += self.batch_emb_dim
+        if self.tissue_embedding is not None:
+            decoder_cond_dim += self.tissue_emb_dim
+        self.decoder_cond_dim = decoder_cond_dim
         self.decoder = PoissonDecoder(
             latent_dim=latent_dim,
             num_genes=num_genes,
             hidden_dim=dec_hidden_dim,
             dropout=dropout,
-            cond_dim=self.batch_emb_dim if self.batch_embedding is not None else 0,
+            cond_dim=decoder_cond_dim,
         )
         self.nb_log_theta = nn.Parameter(torch.zeros(num_genes))
         self.num_components = int(num_components)
@@ -498,6 +511,7 @@ class MaskFiLMGMMVAE(nn.Module):
         x_expr: torch.Tensor = None,
         force_base_posterior: bool = False,
         use_batch_condition: bool = True,
+        use_tissue_condition: bool = True,
     ) -> Dict[str, torch.Tensor]:
         if x_expr is None:
             x_expr = torch.log1p(x_count.float())
@@ -543,8 +557,13 @@ class MaskFiLMGMMVAE(nn.Module):
             logvar_comp = None
             z_comp = None
             factor_comp = None
-        batch_cond = self._batch_condition(sample_id=sample_id, use_batch_condition=use_batch_condition)
-        gene_logits = self.decoder(z, cond=batch_cond)
+        decoder_cond = self._decoder_condition(
+            sample_id=sample_id,
+            tissue_id=tissue_id,
+            use_batch_condition=use_batch_condition,
+            use_tissue_condition=use_tissue_condition,
+        )
+        gene_logits = self.decoder(z, cond=decoder_cond)
         library_size = F.softplus(self.library_head(z)) + 1e-8
         gene_probs = F.softmax(gene_logits, dim=-1)
         rate = gene_probs * library_size
@@ -575,17 +594,47 @@ class MaskFiLMGMMVAE(nn.Module):
             )
         return out
 
-    def _batch_condition(self, sample_id: torch.Tensor = None, use_batch_condition: bool = True) -> Optional[torch.Tensor]:
-        if self.batch_embedding is None or sample_id is None or not bool(use_batch_condition):
+    def _decoder_condition(
+        self,
+        sample_id: torch.Tensor = None,
+        tissue_id: torch.Tensor = None,
+        use_batch_condition: bool = True,
+        use_tissue_condition: bool = True,
+    ) -> Optional[torch.Tensor]:
+        if self.decoder_cond_dim <= 0:
             return None
-        sid = sample_id.long().to(self.batch_embedding.weight.device)
-        sid = torch.where(sid < 0, torch.zeros_like(sid), sid)
-        sid = torch.where(sid >= self.num_batches, torch.zeros_like(sid), sid)
-        emb = self.batch_embedding(sid)
-        if self.training and self.batch_cond_drop_prob > 0:
-            keep = (torch.rand((emb.size(0), 1), device=emb.device) >= self.batch_cond_drop_prob).to(emb.dtype)
-            emb = emb * keep
-        return emb
+        ref = sample_id if sample_id is not None else tissue_id
+        if ref is None:
+            return None
+        bsz = int(ref.view(-1).size(0))
+        if self.batch_embedding is not None:
+            device = self.batch_embedding.weight.device
+            dtype = self.batch_embedding.weight.dtype
+        else:
+            device = self.tissue_embedding.weight.device
+            dtype = self.tissue_embedding.weight.dtype
+        conds = []
+        if self.batch_embedding is not None and sample_id is not None and bool(use_batch_condition):
+            sid = sample_id.long().to(self.batch_embedding.weight.device)
+            sid = torch.where(sid < 0, torch.zeros_like(sid), sid)
+            sid = torch.where(sid >= self.num_batches, torch.zeros_like(sid), sid)
+            batch_emb = self.batch_embedding(sid)
+            if self.training and self.batch_cond_drop_prob > 0:
+                keep = (torch.rand((batch_emb.size(0), 1), device=batch_emb.device) >= self.batch_cond_drop_prob).to(batch_emb.dtype)
+                batch_emb = batch_emb * keep
+            conds.append(batch_emb)
+        elif self.batch_embedding is not None:
+            conds.append(torch.zeros((bsz, self.batch_emb_dim), device=device, dtype=dtype))
+        if self.tissue_embedding is not None and tissue_id is not None and bool(use_tissue_condition):
+            tid = tissue_id.long().to(self.tissue_embedding.weight.device)
+            tid = torch.where(tid < 0, torch.zeros_like(tid), tid)
+            tid = torch.where(tid >= self.num_tissues, torch.zeros_like(tid), tid)
+            conds.append(self.tissue_embedding(tid))
+        elif self.tissue_embedding is not None:
+            conds.append(torch.zeros((bsz, self.tissue_emb_dim), device=device, dtype=dtype))
+        if not conds:
+            return None
+        return torch.cat(conds, dim=-1) if len(conds) > 1 else conds[0]
 
     def loss(
         self,
@@ -598,6 +647,7 @@ class MaskFiLMGMMVAE(nn.Module):
         beta: float = 1.0,
         encoder_mask: torch.Tensor = None,
         use_batch_condition: bool = True,
+        use_tissue_condition: bool = True,
         recon_mask: torch.Tensor = None,
         lambda_score: float = 0.0,
         score_noise_std: float = 0.1,
@@ -646,6 +696,7 @@ class MaskFiLMGMMVAE(nn.Module):
             sample_id=sample_id,
             force_base_posterior=force_base_posterior,
             use_batch_condition=use_batch_condition,
+            use_tissue_condition=use_tissue_condition,
         )
 
         mu = out["mu"]
@@ -1531,6 +1582,7 @@ def train_gmm_vae_one_epoch(
     recon_cell_weight_clusters=32,
     recon_cell_weight_kmeans_iters=2,
     lambda_batchless_recon=0.0,
+    lambda_tissueless_recon=0.0,
     lambda_rank_recon=0.0,
     rank_recon_gene_pairs=256,
     rank_recon_cell_pairs=256,
@@ -1542,6 +1594,7 @@ def train_gmm_vae_one_epoch(
     total_loss = total_recon = total_kl = total_score = total_contrast = total_cov = total_prior_pi_balance = total_celltype_cls = 0.0
     total_celltype_contrast = 0.0
     total_batchless_recon = 0.0
+    total_tissueless_recon = 0.0
     total_rank_recon = total_rank_gene = total_rank_cell = 0.0
     n_cells = 0
     is_rank0 = (not dist.is_available()) or (not dist.is_initialized()) or (dist.get_rank() == 0)
@@ -1704,6 +1757,55 @@ def train_gmm_vae_one_epoch(
                     recon_cell_weight_kmeans_iters=recon_cell_weight_kmeans_iters,
                 )
                 batchless_recon = out_batchless["recon_loss"]
+            tissueless_recon = torch.zeros((), device=x_count.device, dtype=out_fake["z"].dtype)
+            if float(lambda_tissueless_recon) != 0.0:
+                out_tissueless = loss_fn(
+                    x_count=x_count,
+                    x_mask=x_mask,
+                    tissue_id=tissue_id,
+                    sample_id=sample_id,
+                    celltype_id=celltype_id,
+                    force_base_posterior=force_base_posterior,
+                    beta=0.0,
+                    encoder_mask=x_mask_encoder,
+                    use_tissue_condition=False,
+                    recon_mask=x_mask if recon_observed_only else None,
+                    lambda_score=0.0,
+                    score_noise_std=score_noise_std,
+                    score_detach_z=score_detach_z,
+                    lambda_cov=0.0,
+                    cov_use_mu=cov_use_mu,
+                    lambda_resp_balance=0.0,
+                    lambda_resp_confidence=0.0,
+                    lambda_resp_anchor=0.0,
+                    resp_temperature=resp_temperature,
+                    resp_topk=0,
+                    prior_logvar_min=prior_logvar_min,
+                    prior_logvar_max=prior_logvar_max,
+                    lambda_prior_mu_l2=0.0,
+                    lambda_prior_factor_l2=0.0,
+                    lambda_prior_pi_balance=0.0,
+                    lambda_prior_mu_spread=0.0,
+                    prior_mu_spread_tau=prior_mu_spread_tau,
+                    lambda_post_c_balance=0.0,
+                    lambda_celltype_cls=0.0,
+                    lambda_prior_logvar_l2=0.0,
+                    prior_logvar_target=prior_logvar_target,
+                    recon_gene_weight_mode=recon_gene_weight_mode,
+                    recon_gene_weight_alpha=recon_gene_weight_alpha,
+                    recon_gene_weight_ema_momentum=recon_gene_weight_ema_momentum,
+                    recon_gene_weight_min=recon_gene_weight_min,
+                    recon_gene_weight_max=recon_gene_weight_max,
+                    recon_gene_weight_eps=recon_gene_weight_eps,
+                    recon_cell_weight_mode=recon_cell_weight_mode,
+                    recon_cell_weight_alpha=recon_cell_weight_alpha,
+                    recon_cell_weight_min=recon_cell_weight_min,
+                    recon_cell_weight_max=recon_cell_weight_max,
+                    recon_cell_weight_eps=recon_cell_weight_eps,
+                    recon_cell_weight_clusters=recon_cell_weight_clusters,
+                    recon_cell_weight_kmeans_iters=recon_cell_weight_kmeans_iters,
+                )
+                tissueless_recon = out_tissueless["recon_loss"]
             if lambda_contrast > 0:
                 contrast = bidirectional_contrastive_loss(
                     z_real=deterministic_contrast_embedding(out_real, mode=contrast_embedding),
@@ -1730,6 +1832,8 @@ def train_gmm_vae_one_epoch(
                 loss = loss + float(lambda_real_recon) * real_recon
             if float(lambda_batchless_recon) != 0.0:
                 loss = loss + float(lambda_batchless_recon) * batchless_recon
+            if float(lambda_tissueless_recon) != 0.0:
+                loss = loss + float(lambda_tissueless_recon) * tissueless_recon
             recon = out_fake["recon_loss"]
             kl = out_fake["kl_loss"]
             score = out_fake["score_loss"]
@@ -1768,6 +1872,7 @@ def train_gmm_vae_one_epoch(
         total_prior_pi_balance += prior_pi_balance.item() * bsz
         total_celltype_cls += celltype_cls.item() * bsz
         total_batchless_recon += batchless_recon.item() * bsz
+        total_tissueless_recon += tissueless_recon.item() * bsz
         total_rank_recon += rank_recon.item() * bsz
         total_rank_gene += rank_gene.item() * bsz
         total_rank_cell += rank_cell.item() * bsz
@@ -1785,6 +1890,8 @@ def train_gmm_vae_one_epoch(
                 msg += f", RealRecon={real_recon.item():.4f}"
             if lambda_batchless_recon > 0:
                 msg += f", BatchlessRecon={batchless_recon.item():.4f}"
+            if lambda_tissueless_recon > 0:
+                msg += f", TissuelessRecon={tissueless_recon.item():.4f}"
             if lambda_rank_recon > 0:
                 msg += f", RankRecon={rank_recon.item():.4f}, RankGene={rank_gene.item():.4f}, RankCell={rank_cell.item():.4f}"
             if lambda_post_c_balance > 0:
@@ -1828,12 +1935,12 @@ def train_gmm_vae_one_epoch(
 
     if dist.is_available() and dist.is_initialized():
         stats = torch.tensor(
-            [total_loss, total_recon, total_kl, total_score, total_contrast, total_cov, total_prior_pi_balance, total_celltype_cls, total_batchless_recon, total_rank_recon, total_rank_gene, total_rank_cell, total_celltype_contrast, float(n_cells)],
+            [total_loss, total_recon, total_kl, total_score, total_contrast, total_cov, total_prior_pi_balance, total_celltype_cls, total_batchless_recon, total_tissueless_recon, total_rank_recon, total_rank_gene, total_rank_cell, total_celltype_contrast, float(n_cells)],
             device=device,
             dtype=torch.float64,
         )
         dist.all_reduce(stats, op=dist.ReduceOp.SUM)
-        total_loss, total_recon, total_kl, total_score, total_contrast, total_cov, total_prior_pi_balance, total_celltype_cls, total_batchless_recon, total_rank_recon, total_rank_gene, total_rank_cell, total_celltype_contrast, n_cells = stats.tolist()
+        total_loss, total_recon, total_kl, total_score, total_contrast, total_cov, total_prior_pi_balance, total_celltype_cls, total_batchless_recon, total_tissueless_recon, total_rank_recon, total_rank_gene, total_rank_cell, total_celltype_contrast, n_cells = stats.tolist()
         n_cells = max(float(n_cells), 1.0)
 
     return (
@@ -1846,6 +1953,7 @@ def train_gmm_vae_one_epoch(
         total_prior_pi_balance / n_cells,
         total_celltype_cls / n_cells,
         total_batchless_recon / n_cells,
+        total_tissueless_recon / n_cells,
         total_rank_recon / n_cells,
         total_rank_gene / n_cells,
         total_rank_cell / n_cells,
@@ -1904,6 +2012,7 @@ def evaluate_gmm_vae_one_epoch(
     recon_cell_weight_clusters=32,
     recon_cell_weight_kmeans_iters=2,
     lambda_batchless_recon=0.0,
+    lambda_tissueless_recon=0.0,
     lambda_rank_recon=0.0,
     rank_recon_gene_pairs=256,
     rank_recon_cell_pairs=256,
@@ -1915,6 +2024,7 @@ def evaluate_gmm_vae_one_epoch(
     total_loss = total_recon = total_kl = total_score = total_contrast = total_cov = total_prior_pi_balance = total_celltype_cls = 0.0
     total_celltype_contrast = 0.0
     total_batchless_recon = 0.0
+    total_tissueless_recon = 0.0
     total_rank_recon = total_rank_gene = total_rank_cell = 0.0
     n_cells = 0
     is_rank0 = (not dist.is_available()) or (not dist.is_initialized()) or (dist.get_rank() == 0)
@@ -2090,6 +2200,55 @@ def evaluate_gmm_vae_one_epoch(
                     recon_cell_weight_kmeans_iters=recon_cell_weight_kmeans_iters,
                 )
                 batchless_recon = out_batchless["recon_loss"]
+            tissueless_recon = torch.zeros((), device=x_count.device, dtype=out_fake["z"].dtype)
+            if float(lambda_tissueless_recon) != 0.0:
+                out_tissueless = loss_fn(
+                    x_count=x_count,
+                    x_mask=x_mask,
+                    tissue_id=tissue_id,
+                    sample_id=sample_id,
+                    celltype_id=celltype_id,
+                    force_base_posterior=force_base_posterior,
+                    beta=0.0,
+                    encoder_mask=x_mask,
+                    use_tissue_condition=False,
+                    recon_mask=x_mask if recon_observed_only else None,
+                    lambda_score=0.0,
+                    score_noise_std=score_noise_std,
+                    score_detach_z=score_detach_z,
+                    lambda_cov=0.0,
+                    cov_use_mu=cov_use_mu,
+                    lambda_resp_balance=0.0,
+                    lambda_resp_confidence=0.0,
+                    lambda_resp_anchor=0.0,
+                    resp_temperature=resp_temperature,
+                    resp_topk=0,
+                    prior_logvar_min=prior_logvar_min,
+                    prior_logvar_max=prior_logvar_max,
+                    lambda_prior_mu_l2=0.0,
+                    lambda_prior_factor_l2=0.0,
+                    lambda_prior_pi_balance=0.0,
+                    lambda_prior_mu_spread=0.0,
+                    prior_mu_spread_tau=prior_mu_spread_tau,
+                    lambda_post_c_balance=0.0,
+                    lambda_celltype_cls=0.0,
+                    lambda_prior_logvar_l2=0.0,
+                    prior_logvar_target=prior_logvar_target,
+                    recon_gene_weight_mode=recon_gene_weight_mode,
+                    recon_gene_weight_alpha=recon_gene_weight_alpha,
+                    recon_gene_weight_ema_momentum=recon_gene_weight_ema_momentum,
+                    recon_gene_weight_min=recon_gene_weight_min,
+                    recon_gene_weight_max=recon_gene_weight_max,
+                    recon_gene_weight_eps=recon_gene_weight_eps,
+                    recon_cell_weight_mode=recon_cell_weight_mode,
+                    recon_cell_weight_alpha=recon_cell_weight_alpha,
+                    recon_cell_weight_min=recon_cell_weight_min,
+                    recon_cell_weight_max=recon_cell_weight_max,
+                    recon_cell_weight_eps=recon_cell_weight_eps,
+                    recon_cell_weight_clusters=recon_cell_weight_clusters,
+                    recon_cell_weight_kmeans_iters=recon_cell_weight_kmeans_iters,
+                )
+                tissueless_recon = out_tissueless["recon_loss"]
             if lambda_contrast > 0:
                 contrast = bidirectional_contrastive_loss(
                     z_real=deterministic_contrast_embedding(out_real, mode=contrast_embedding),
@@ -2115,6 +2274,8 @@ def evaluate_gmm_vae_one_epoch(
                 loss = loss + float(lambda_real_recon) * real_recon
             if float(lambda_batchless_recon) != 0.0:
                 loss = loss + float(lambda_batchless_recon) * batchless_recon
+            if float(lambda_tissueless_recon) != 0.0:
+                loss = loss + float(lambda_tissueless_recon) * tissueless_recon
 
             total_loss += loss.item() * bsz
             total_recon += out_fake["recon_loss"].item() * bsz
@@ -2126,6 +2287,7 @@ def evaluate_gmm_vae_one_epoch(
             total_prior_pi_balance += out_fake.get("prior_pi_balance_loss", torch.zeros_like(out_fake["cov_loss"])).item() * bsz
             total_celltype_cls += out_fake.get("celltype_cls_loss", torch.zeros_like(out_fake["cov_loss"])).item() * bsz
             total_batchless_recon += batchless_recon.item() * bsz
+            total_tissueless_recon += tissueless_recon.item() * bsz
             total_rank_recon += out_fake.get("rank_recon_loss", torch.zeros_like(out_fake["cov_loss"])).item() * bsz
             total_rank_gene += out_fake.get("rank_gene_loss", torch.zeros_like(out_fake["cov_loss"])).item() * bsz
             total_rank_cell += out_fake.get("rank_cell_loss", torch.zeros_like(out_fake["cov_loss"])).item() * bsz
@@ -2139,6 +2301,8 @@ def evaluate_gmm_vae_one_epoch(
                 )
                 if lambda_batchless_recon > 0:
                     msg += f", BatchlessRecon={batchless_recon.item():.4f}"
+                if lambda_tissueless_recon > 0:
+                    msg += f", TissuelessRecon={tissueless_recon.item():.4f}"
                 if lambda_celltype_contrast > 0:
                     msg += f", CtContrast={celltype_contrast.item():.4f}"
                 if lambda_rank_recon > 0:
@@ -2158,12 +2322,12 @@ def evaluate_gmm_vae_one_epoch(
 
     if dist.is_available() and dist.is_initialized():
         stats = torch.tensor(
-            [total_loss, total_recon, total_kl, total_score, total_contrast, total_cov, total_prior_pi_balance, total_celltype_cls, total_batchless_recon, total_rank_recon, total_rank_gene, total_rank_cell, total_celltype_contrast, float(n_cells)],
+            [total_loss, total_recon, total_kl, total_score, total_contrast, total_cov, total_prior_pi_balance, total_celltype_cls, total_batchless_recon, total_tissueless_recon, total_rank_recon, total_rank_gene, total_rank_cell, total_celltype_contrast, float(n_cells)],
             device=device,
             dtype=torch.float64,
         )
         dist.all_reduce(stats, op=dist.ReduceOp.SUM)
-        total_loss, total_recon, total_kl, total_score, total_contrast, total_cov, total_prior_pi_balance, total_celltype_cls, total_batchless_recon, total_rank_recon, total_rank_gene, total_rank_cell, total_celltype_contrast, n_cells = stats.tolist()
+        total_loss, total_recon, total_kl, total_score, total_contrast, total_cov, total_prior_pi_balance, total_celltype_cls, total_batchless_recon, total_tissueless_recon, total_rank_recon, total_rank_gene, total_rank_cell, total_celltype_contrast, n_cells = stats.tolist()
         n_cells = max(float(n_cells), 1.0)
 
     return (
@@ -2176,6 +2340,7 @@ def evaluate_gmm_vae_one_epoch(
         total_prior_pi_balance / n_cells,
         total_celltype_cls / n_cells,
         total_batchless_recon / n_cells,
+        total_tissueless_recon / n_cells,
         total_rank_recon / n_cells,
         total_rank_gene / n_cells,
         total_rank_cell / n_cells,

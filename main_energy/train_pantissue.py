@@ -166,10 +166,14 @@ def parse_args():
                         help="Number of sample/batch ids for decoder conditioning. <=0 means auto infer from dataset.")
     parser.add_argument("--batch-emb-dim", type=int, default=0,
                         help="Sample/batch embedding dim for decoder FiLM conditioning. 0 disables batch conditioning.")
+    parser.add_argument("--tissue-emb-dim", type=int, default=0,
+                        help="Tissue embedding dim for decoder FiLM conditioning. 0 disables tissue decoder conditioning.")
     parser.add_argument("--batch-cond-drop-prob", type=float, default=0.0,
                         help="Probability of dropping decoder batch condition during training.")
     parser.add_argument("--lambda-batchless-recon", type=float, default=0.0,
                         help="Weight of reconstruction loss with decoder batch condition disabled.")
+    parser.add_argument("--lambda-tissueless-recon", type=float, default=0.0,
+                        help="Weight of reconstruction loss with decoder tissue condition disabled.")
     parser.add_argument("--conditional-prior-on-tissue", action="store_true",
                         help="Use tissue-conditional GMM prior p(z|tissue).")
     parser.add_argument("--lambda-celltype-cls", type=float, default=0.0,
@@ -667,7 +671,9 @@ def main():
         num_batches = int(inferred_num_batches)
     log(
         f"[BatchCond] num_batches={num_batches}, batch_emb_dim={args.batch_emb_dim}, "
-        f"drop_prob={args.batch_cond_drop_prob}, lambda_batchless_recon={args.lambda_batchless_recon}"
+        f"tissue_emb_dim={args.tissue_emb_dim}, drop_prob={args.batch_cond_drop_prob}, "
+        f"lambda_batchless_recon={args.lambda_batchless_recon}, "
+        f"lambda_tissueless_recon={args.lambda_tissueless_recon}"
     )
 
     loader_kwargs = dict(num_workers=args.num_workers, pin_memory=True)
@@ -757,6 +763,7 @@ def main():
         num_tissues=num_tissues,
         num_batches=num_batches,
         batch_emb_dim=args.batch_emb_dim,
+        tissue_emb_dim=args.tissue_emb_dim,
         batch_cond_drop_prob=args.batch_cond_drop_prob,
         recon_loss_type=args.recon_loss,
     ).to(device)
@@ -852,7 +859,7 @@ def main():
         train_sampler.set_epoch(epoch_id)
         if val_sampler is not None:
             val_sampler.set_epoch(epoch_id)
-        loss_full, loss_recon, loss_kl, loss_score, loss_contrast, loss_cov, loss_prior_pi_balance, loss_celltype_cls, loss_batchless_recon, loss_rank_recon, loss_rank_gene, loss_rank_cell, loss_celltype_contrast = train_gmm_vae_one_epoch(
+        loss_full, loss_recon, loss_kl, loss_score, loss_contrast, loss_cov, loss_prior_pi_balance, loss_celltype_cls, loss_batchless_recon, loss_tissueless_recon, loss_rank_recon, loss_rank_gene, loss_rank_cell, loss_celltype_contrast = train_gmm_vae_one_epoch(
             model=model,
             optimizer=optimizer,
             scaler=scaler,
@@ -905,6 +912,7 @@ def main():
             recon_cell_weight_clusters=args.recon_cell_weight_clusters,
             recon_cell_weight_kmeans_iters=args.recon_cell_weight_kmeans_iters,
             lambda_batchless_recon=args.lambda_batchless_recon,
+            lambda_tissueless_recon=args.lambda_tissueless_recon,
             lambda_rank_recon=args.lambda_rank_recon,
             rank_recon_gene_pairs=args.rank_recon_gene_pairs,
             rank_recon_cell_pairs=args.rank_recon_cell_pairs,
@@ -921,6 +929,8 @@ def main():
             train_msg += f", CtContrast={loss_celltype_contrast:.4f}"
         if args.lambda_batchless_recon > 0:
             train_msg += f", BatchlessRecon={loss_batchless_recon:.4f}"
+        if args.lambda_tissueless_recon > 0:
+            train_msg += f", TissuelessRecon={loss_tissueless_recon:.4f}"
         if args.lambda_rank_recon > 0:
             train_msg += f", RankRecon={loss_rank_recon:.4f}, RankGene={loss_rank_gene:.4f}, RankCell={loss_rank_cell:.4f}"
         log(train_msg)
@@ -950,7 +960,7 @@ def main():
             or (epoch_id == args.num_epochs)
         )
         if do_val:
-            val_loss_full, val_loss_recon, val_loss_kl, val_loss_score, val_loss_contrast, val_loss_cov, val_loss_prior_pi_balance, val_loss_celltype_cls, val_loss_batchless_recon, val_loss_rank_recon, val_loss_rank_gene, val_loss_rank_cell, val_loss_celltype_contrast = evaluate_gmm_vae_one_epoch(
+            val_loss_full, val_loss_recon, val_loss_kl, val_loss_score, val_loss_contrast, val_loss_cov, val_loss_prior_pi_balance, val_loss_celltype_cls, val_loss_batchless_recon, val_loss_tissueless_recon, val_loss_rank_recon, val_loss_rank_gene, val_loss_rank_cell, val_loss_celltype_contrast = evaluate_gmm_vae_one_epoch(
                 model=model,
                 val_loader=val_loader,
                 device=device,
@@ -997,6 +1007,7 @@ def main():
                 recon_cell_weight_clusters=args.recon_cell_weight_clusters,
                 recon_cell_weight_kmeans_iters=args.recon_cell_weight_kmeans_iters,
                 lambda_batchless_recon=args.lambda_batchless_recon,
+                lambda_tissueless_recon=args.lambda_tissueless_recon,
                 lambda_rank_recon=args.lambda_rank_recon,
                 rank_recon_gene_pairs=args.rank_recon_gene_pairs,
                 rank_recon_cell_pairs=args.rank_recon_cell_pairs,
@@ -1017,6 +1028,8 @@ def main():
                 val_msg += f", CtContrast={val_loss_celltype_contrast:.4f}"
             if args.lambda_batchless_recon > 0:
                 val_msg += f", BatchlessRecon={val_loss_batchless_recon:.4f}"
+            if args.lambda_tissueless_recon > 0:
+                val_msg += f", TissuelessRecon={val_loss_tissueless_recon:.4f}"
             if args.lambda_rank_recon > 0:
                 val_msg += f", RankRecon={val_loss_rank_recon:.4f}, RankGene={val_loss_rank_gene:.4f}, RankCell={val_loss_rank_cell:.4f}"
             log(val_msg)

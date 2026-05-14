@@ -5,7 +5,7 @@
 #SBATCH -c 10
 #SBATCH --mem=100G
 #SBATCH -t 20:00:00
-#SBATCH -J bios
+#SBATCH -J bios_tissue
 #SBATCH --output=/hpc/group/xielab/xj58/sbatch_output/%x_output_%j.txt
 #SBATCH --error=/hpc/group/xielab/xj58/sbatch_output/%x_error_%j.txt
 #SBATCH --mail-user=xj58@duke.edu
@@ -19,7 +19,7 @@ export PYTHONUNBUFFERED=1
 
 COMPILED_ROOT="/hpc/group/xielab/xj58/xVerseAtlas/compiled_train_v1_all"
 CELLTYPE_CSV="/hpc/group/xielab/xj58/sparest_code/standard_type/cellxgene_cell_type_mapped.csv"
-RESULT_DIR="/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_all_tissue0514_ct"
+RESULT_DIR="/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_all_tissue0514_tissue_cond"
 
 NPROC_PER_NODE=$(python - <<'PY'
 import torch

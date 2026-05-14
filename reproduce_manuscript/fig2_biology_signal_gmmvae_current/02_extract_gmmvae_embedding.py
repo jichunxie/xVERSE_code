@@ -127,6 +127,7 @@ def build_model_from_ckpt(ckpt_path: str, device: torch.device):
         num_tissues=int(saved_args.get("num_tissues", 0)),
         num_batches=num_batches,
         batch_emb_dim=int(saved_args.get("batch_emb_dim", 0)),
+        tissue_emb_dim=int(saved_args.get("tissue_emb_dim", 0)),
         batch_cond_drop_prob=0.0,
         recon_loss_type=str(saved_args.get("recon_loss", saved_args.get("recon_loss_type", "poisson"))),
     ).to(device)
