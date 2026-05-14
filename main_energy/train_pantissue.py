@@ -150,12 +150,6 @@ def parse_args():
                         help="Per-cell gene pairs sampled for rank reconstruction.")
     parser.add_argument("--rank-recon-cell-pairs", type=int, default=256,
                         help="Cross-cell pairs sampled per batch for same-gene rank reconstruction.")
-    parser.add_argument("--lambda-celltype-batch-mmd", type=float, default=0.0,
-                        help="Weak MMD alignment across sample/batch distributions within each labeled cell type.")
-    parser.add_argument("--celltype-batch-mmd-min-cells", type=int, default=4,
-                        help="Minimum cells required for one celltype-sample group in celltype batch MMD.")
-    parser.add_argument("--celltype-batch-mmd-max-cells", type=int, default=128,
-                        help="Maximum cells sampled per group/pooled set for celltype batch MMD.")
     parser.add_argument("--mask-aug-prob", type=float, default=1.0,
                         help="For gmm_vae training, probability of applying random observed->unobserved masking per cell.")
     parser.add_argument("--mask-aug-policy", choices=["xverse", "simple"], default="xverse",
@@ -180,6 +174,10 @@ def parse_args():
                         help="Use tissue-conditional GMM prior p(z|tissue).")
     parser.add_argument("--lambda-celltype-cls", type=float, default=0.0,
                         help="Weight for auxiliary celltype cross-entropy loss (ignore label -1).")
+    parser.add_argument("--lambda-celltype-contrast", type=float, default=0.0,
+                        help="Weight for supervised cell-type contrastive loss on the selected contrast embedding.")
+    parser.add_argument("--celltype-contrast-temp", type=float, default=0.2,
+                        help="Temperature for supervised cell-type contrastive loss.")
     parser.add_argument("--prior-logvar-max", type=float, default=4.0,
                         help="Upper clamp bound for GMM prior log-variance.")
     parser.add_argument("--lambda-prior-pi-balance", type=float, default=0.0,
@@ -206,6 +204,8 @@ def parse_args():
                         help="Weight of real-mask reconstruction loss term.")
     parser.add_argument("--contrast-temp", type=float, default=0.1,
                         help="Temperature for bidirectional InfoNCE contrastive loss.")
+    parser.add_argument("--contrast-embedding", choices=["mixmu", "encoder_hidden", "mu_base", "z"], default="encoder_hidden",
+                        help="Embedding used by view contrast and cell-type contrast.")
     parser.add_argument("--ddp", action="store_true", default=True,
                         help="Use torch DistributedDataParallel when launched with torchrun.")
     parser.add_argument("--no-ddp", dest="ddp", action="store_false",
@@ -852,7 +852,7 @@ def main():
         train_sampler.set_epoch(epoch_id)
         if val_sampler is not None:
             val_sampler.set_epoch(epoch_id)
-        loss_full, loss_recon, loss_kl, loss_score, loss_contrast, loss_cov, loss_prior_pi_balance, loss_celltype_cls, loss_batchless_recon, loss_rank_recon, loss_rank_gene, loss_rank_cell, loss_ct_batch_mmd = train_gmm_vae_one_epoch(
+        loss_full, loss_recon, loss_kl, loss_score, loss_contrast, loss_cov, loss_prior_pi_balance, loss_celltype_cls, loss_batchless_recon, loss_rank_recon, loss_rank_gene, loss_rank_cell, loss_celltype_contrast = train_gmm_vae_one_epoch(
             model=model,
             optimizer=optimizer,
             scaler=scaler,
@@ -866,6 +866,9 @@ def main():
             mask_aug_max_frac=args.mask_aug_max_frac,
             lambda_contrast=args.lambda_contrast,
             contrast_temp=args.contrast_temp,
+            contrast_embedding=args.contrast_embedding,
+            lambda_celltype_contrast=args.lambda_celltype_contrast,
+            celltype_contrast_temp=args.celltype_contrast_temp,
             lambda_real_recon=args.lambda_real_recon,
             lambda_resp_anchor=lambda_resp_anchor_t,
             lambda_score=0.0,
@@ -905,9 +908,6 @@ def main():
             lambda_rank_recon=args.lambda_rank_recon,
             rank_recon_gene_pairs=args.rank_recon_gene_pairs,
             rank_recon_cell_pairs=args.rank_recon_cell_pairs,
-            lambda_celltype_batch_mmd=args.lambda_celltype_batch_mmd,
-            celltype_batch_mmd_min_cells=args.celltype_batch_mmd_min_cells,
-            celltype_batch_mmd_max_cells=args.celltype_batch_mmd_max_cells,
             force_base_posterior=force_base_posterior,
         )
         train_msg = (
@@ -917,12 +917,12 @@ def main():
         )
         if args.lambda_contrast > 0:
             train_msg += f", Contrast={loss_contrast:.4f}"
+        if args.lambda_celltype_contrast > 0:
+            train_msg += f", CtContrast={loss_celltype_contrast:.4f}"
         if args.lambda_batchless_recon > 0:
             train_msg += f", BatchlessRecon={loss_batchless_recon:.4f}"
         if args.lambda_rank_recon > 0:
             train_msg += f", RankRecon={loss_rank_recon:.4f}, RankGene={loss_rank_gene:.4f}, RankCell={loss_rank_cell:.4f}"
-        if args.lambda_celltype_batch_mmd > 0:
-            train_msg += f", CtBatchMMD={loss_ct_batch_mmd:.4f}"
         log(train_msg)
 
         if (
@@ -950,7 +950,7 @@ def main():
             or (epoch_id == args.num_epochs)
         )
         if do_val:
-            val_loss_full, val_loss_recon, val_loss_kl, val_loss_score, val_loss_contrast, val_loss_cov, val_loss_prior_pi_balance, val_loss_celltype_cls, val_loss_batchless_recon, val_loss_rank_recon, val_loss_rank_gene, val_loss_rank_cell, val_loss_ct_batch_mmd = evaluate_gmm_vae_one_epoch(
+            val_loss_full, val_loss_recon, val_loss_kl, val_loss_score, val_loss_contrast, val_loss_cov, val_loss_prior_pi_balance, val_loss_celltype_cls, val_loss_batchless_recon, val_loss_rank_recon, val_loss_rank_gene, val_loss_rank_cell, val_loss_celltype_contrast = evaluate_gmm_vae_one_epoch(
                 model=model,
                 val_loader=val_loader,
                 device=device,
@@ -961,6 +961,9 @@ def main():
                 score_detach_z=True,
                 lambda_contrast=args.lambda_contrast,
                 contrast_temp=args.contrast_temp,
+                contrast_embedding=args.contrast_embedding,
+                lambda_celltype_contrast=args.lambda_celltype_contrast,
+                celltype_contrast_temp=args.celltype_contrast_temp,
                 lambda_real_recon=args.lambda_real_recon,
                 lambda_cov=0.0,
                 cov_use_mu=True,
@@ -997,9 +1000,6 @@ def main():
                 lambda_rank_recon=args.lambda_rank_recon,
                 rank_recon_gene_pairs=args.rank_recon_gene_pairs,
                 rank_recon_cell_pairs=args.rank_recon_cell_pairs,
-                lambda_celltype_batch_mmd=args.lambda_celltype_batch_mmd,
-                celltype_batch_mmd_min_cells=args.celltype_batch_mmd_min_cells,
-                celltype_batch_mmd_max_cells=args.celltype_batch_mmd_max_cells,
                 mask_aug_prob=args.mask_aug_prob,
                 mask_aug_policy=args.mask_aug_policy,
                 mask_aug_min_frac=args.mask_aug_min_frac,
@@ -1013,12 +1013,12 @@ def main():
             )
             if args.lambda_contrast > 0:
                 val_msg += f", Contrast={val_loss_contrast:.4f}"
+            if args.lambda_celltype_contrast > 0:
+                val_msg += f", CtContrast={val_loss_celltype_contrast:.4f}"
             if args.lambda_batchless_recon > 0:
                 val_msg += f", BatchlessRecon={val_loss_batchless_recon:.4f}"
             if args.lambda_rank_recon > 0:
                 val_msg += f", RankRecon={val_loss_rank_recon:.4f}, RankGene={val_loss_rank_gene:.4f}, RankCell={val_loss_rank_cell:.4f}"
-            if args.lambda_celltype_batch_mmd > 0:
-                val_msg += f", CtBatchMMD={val_loss_ct_batch_mmd:.4f}"
             log(val_msg)
             val_metric = val_loss_full
 

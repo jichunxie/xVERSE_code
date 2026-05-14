@@ -84,7 +84,10 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --mask-aug-min-frac 0.1 \
   --mask-aug-max-frac 0.5 \
   --lambda-celltype-cls 1 \
-  --lambda-contrast 0.1 \
+  --lambda-contrast 0.5 \
+  --contrast-embedding encoder_hidden \
+  --lambda-celltype-contrast 0.03 \
+  --celltype-contrast-temp 0.2 \
   --lambda-real-recon 0.01 \
   --lambda-prior-pi-balance 0 \
   --lambda-prior-mu-spread 0 \
@@ -94,7 +97,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --recon-gene-weight-mode inv_log1p_mean_ema \
   --recon-gene-weight-alpha 0.5 \
   --recon-gene-weight-min 0.2 \
-  --recon-gene-weight-max 5.0 \
+  --recon-gene-weight-max 3.0 \
   --recon-cell-weight-mode batch_kmeans \
   --recon-cell-weight-alpha 0.5 \
   --recon-cell-weight-clusters 32 \
@@ -102,7 +105,4 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --lambda-rank-recon 0.05 \
   --rank-recon-gene-pairs 256 \
   --rank-recon-cell-pairs 256 \
-  --lambda-celltype-batch-mmd 0.05 \
-  --celltype-batch-mmd-min-cells 4 \
-  --celltype-batch-mmd-max-cells 128 \
   --contrast-temp 0.1
