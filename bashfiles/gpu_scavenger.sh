@@ -28,6 +28,8 @@ run_one_model () {
   MODEL_TAG="$1"
   RESULT_DIR="$2"
   MODEL_FAMILY="${3:-auto}"
+  EMBEDDING_MODE="${4:-mixmu}"
+  EMBEDDING_KEY="xVerse_gmmvae_${EMBEDDING_MODE}"
   CKPT_PATH="${RESULT_DIR}/last_model.pth"
   FIG2_OUT_DIR="/hpc/group/xielab/xj58/xVerse_results/fig2_gmmvae_${MODEL_TAG}"
   FIG2_EVAL_DIR="${FIG2_OUT_DIR}/evaluation_scib_full"
@@ -41,7 +43,8 @@ run_one_model () {
       --brain-dir "${FIG2_BRAIN_DIR}" \
       "${DATASET_ARGS[@]}" \
       --output-dir "${FIG2_OUT_DIR}" \
-      --embedding-key xVerse_gmmvae_mixmu
+      --embedding-key "${EMBEDDING_KEY}" \
+      --embedding-mode "${EMBEDDING_MODE}"
 
   echo ">>> [${MODEL_TAG}] Evaluate FMs + GMVAE (scIB full)"
   python reproduce_manuscript/fig2_biology_signal_gmmvae_current/03_evaluate_scib_full.py \
@@ -50,7 +53,7 @@ run_one_model () {
       --output-dir "${FIG2_EVAL_DIR}" \
       --old-eval-dir "${FIG2_OLD_EVAL_DIR}" \
       "${DATASET_ARGS[@]}" \
-      --gmm-key xVerse_gmmvae_mixmu \
+      --gmm-key "${EMBEDDING_KEY}" \
       --max-cells 20000 \
       --skip-official-metrics-all
 
@@ -59,12 +62,12 @@ run_one_model () {
       --liver-dir "${FIG2_LIVER_DIR}" \
       --brain-dir "${FIG2_BRAIN_DIR}" \
       --output-dir "${FIG2_OUT_DIR}/umap" \
-      --embedding-key xVerse_gmmvae_mixmu \
+      --embedding-key "${EMBEDDING_KEY}" \
       --gene-set all \
       --max-cells 20000
 }
 
-run_one_model "gene_theta" "/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_all_tissue0513_gene_theta" "main_energy"
+run_one_model "gene_theta_encoder_hidden" "/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_all_tissue0513_gene_theta" "main_energy" "encoder_hidden"
 # run_one_model "mfa_rank4" "/hpc/group/xielab/xj58/pretrain_model_celltype/mfa_all_tissue0513_rank4" "main_mfa"
 # run_one_model "nb" "/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_all_tissue0512" "main_energy"
 # run_one_model "poisson" "/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_all_tissue_poisson"

@@ -102,4 +102,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --lambda-rank-recon 0.05 \
   --rank-recon-gene-pairs 256 \
   --rank-recon-cell-pairs 256 \
+  --lambda-celltype-batch-mmd 0.01 \
+  --celltype-batch-mmd-min-cells 4 \
+  --celltype-batch-mmd-max-cells 128 \
   --contrast-temp 0.1

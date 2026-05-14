@@ -57,6 +57,15 @@ def parse_args():
     ap.add_argument("--output-dir", default="/hpc/group/xielab/xj58/xVerse_results/fig2_gmmvae_current")
     ap.add_argument("--embedding-key", default="xVerse_gmmvae_mixmu")
     ap.add_argument(
+        "--embedding-mode",
+        default="mixmu",
+        choices=["mixmu", "encoder_hidden", "z", "mu_base"],
+        help=(
+            "Which representation to write. mixmu uses sum_k q(c|x) posterior_mu_k; "
+            "encoder_hidden uses the encoder hidden state before posterior heads."
+        ),
+    )
+    ap.add_argument(
         "--model-family",
         default="auto",
         choices=["auto", "main_energy", "main_mfa"],
@@ -127,6 +136,25 @@ def build_model_from_ckpt(ckpt_path: str, device: torch.device):
     return model, ret
 
 
+def _extract_model_embedding(model, x_count, x_mask, embedding_mode: str):
+    mode = str(embedding_mode).lower()
+    if mode == "encoder_hidden":
+        x_expr = torch.log1p(x_count.float())
+        _, _, h = model.encoder(x_expr=x_expr, x_mask=x_mask.float(), return_hidden=True)
+        return h
+
+    out = model(x_count=x_count, x_mask=x_mask, use_batch_condition=False)
+    if mode == "mixmu":
+        if ("q_c" in out) and ("mu_comp" in out):
+            return torch.sum(out["q_c"].unsqueeze(-1) * out["mu_comp"], dim=1)
+        return out["mu"]
+    if mode == "mu_base":
+        return out.get("mu_base", out.get("mu", out["z"]))
+    if mode == "z":
+        return out["z"]
+    raise ValueError(f"Unsupported embedding_mode: {embedding_mode}")
+
+
 def extract_embedding_for_file(
     model,
     h5ad_path: Path,
@@ -136,6 +164,7 @@ def extract_embedding_for_file(
     device: torch.device,
     batch_size: int,
     num_workers: int,
+    embedding_mode: str,
 ):
     dataset = XVerseFineTuneDataset(
         {str(h5ad_path): None},
@@ -160,16 +189,8 @@ def extract_embedding_for_file(
             x_count = torch.clamp(x_count, min=0.0)
 
             with torch.amp.autocast(device.type, enabled=(device.type == "cuda")):
-                out = model(x_count=x_count, x_mask=x_mask, use_batch_condition=False)
-
-            # Deterministic mixture embedding:
-            # main_energy: sum_k q(c=k|x) * posterior mu_k(x)
-            # main_mfa:    sum_k q(c=k|x) * E[z|x,c=k]
-            if ("q_c" in out) and ("mu_comp" in out):
-                z_mixmu = torch.sum(out["q_c"].unsqueeze(-1) * out["mu_comp"], dim=1)
-                z_list.append(z_mixmu.detach().cpu().numpy())
-            else:
-                z_list.append(out["z"].detach().cpu().numpy())
+                emb = _extract_model_embedding(model, x_count=x_count, x_mask=x_mask, embedding_mode=embedding_mode)
+            z_list.append(emb.detach().cpu().numpy())
 
     return np.concatenate(z_list, axis=0)
 
@@ -191,6 +212,7 @@ def extract_embedding_from_adata(
     count_layer: str,
     device: torch.device,
     batch_size: int,
+    embedding_mode: str,
 ):
     source_gene_ids = _gene_ids_from_adata(adata, gene_id_col)
     gene_to_idx = {g: i for i, g in enumerate(source_gene_ids)}
@@ -225,11 +247,7 @@ def extract_embedding_from_adata(
             x_count = torch.where(x_mask > 0, values, torch.zeros_like(values))
             x_count = torch.clamp(x_count, min=0.0)
             with torch.amp.autocast(device.type, enabled=(device.type == "cuda")):
-                out = model(x_count=x_count, x_mask=x_mask, use_batch_condition=False)
-            if ("q_c" in out) and ("mu_comp" in out):
-                emb = torch.sum(out["q_c"].unsqueeze(-1) * out["mu_comp"], dim=1)
-            else:
-                emb = out["z"]
+                emb = _extract_model_embedding(model, x_count=x_count, x_mask=x_mask, embedding_mode=embedding_mode)
             z_list.append(emb.detach().cpu().numpy())
     return np.concatenate(z_list, axis=0)
 
@@ -260,6 +278,7 @@ def process_dataset_manifest(args, model, gene_ids, device: torch.device, timing
             count_layer=count_layer,
             device=device,
             batch_size=args.batch_size,
+            embedding_mode=args.embedding_mode,
         )
         cost = time.time() - start
         adata.obsm[args.embedding_key] = emb
@@ -302,6 +321,7 @@ def process_tissue_dir(args, model, gene_ids, tissue_name: str, tissue_dir: Path
             device=choose_device(args.device),
             batch_size=args.batch_size,
             num_workers=args.num_workers,
+            embedding_mode=args.embedding_mode,
         )
         cost = time.time() - start
         adata.obsm[args.embedding_key] = emb
