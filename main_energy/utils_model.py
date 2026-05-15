@@ -452,6 +452,7 @@ class MaskFiLMGMMVAE(nn.Module):
             raise ValueError(f"Unsupported recon_loss_type: {self.recon_loss_type}")
         # EMA mean for optional gene-wise reconstruction reweighting.
         self.register_buffer("recon_gene_mean_ema", torch.zeros(num_genes), persistent=True)
+        self.register_buffer("recon_gene_sq_mean_ema", torch.zeros(num_genes), persistent=True)
         if self.prior_type == "gmm":
             post_hidden = max(64, int(expr_hidden_dim) // 2)
             self.post_c_logits = MLP(
@@ -952,7 +953,7 @@ class MaskFiLMGMMVAE(nn.Module):
         alpha = float(alpha)
         if mode == "none" or alpha <= 0.0:
             return None
-        if mode != "inv_log1p_mean_ema":
+        if mode not in ("inv_log1p_mean_ema", "cv_ema"):
             return None
 
         with torch.no_grad():
@@ -960,11 +961,19 @@ class MaskFiLMGMMVAE(nn.Module):
             cnt = torch.clamp(x_count.float(), min=0.0)
             obs_sum = obs.sum(dim=0)
             mean_g = (cnt * obs).sum(dim=0) / torch.clamp(obs_sum, min=1.0)
+            sq_mean_g = (cnt.square() * obs).sum(dim=0) / torch.clamp(obs_sum, min=1.0)
             if self.training:
                 m = max(0.0, min(0.9999, float(ema_momentum)))
                 self.recon_gene_mean_ema.mul_(m).add_((1.0 - m) * mean_g.detach())
+                self.recon_gene_sq_mean_ema.mul_(m).add_((1.0 - m) * sq_mean_g.detach())
             base = self.recon_gene_mean_ema if torch.any(self.recon_gene_mean_ema > 0) else mean_g
-            w = 1.0 / torch.log1p(torch.clamp(base, min=float(eps)) + float(eps))
+            if mode == "cv_ema":
+                sq_base = self.recon_gene_sq_mean_ema if torch.any(self.recon_gene_sq_mean_ema > 0) else sq_mean_g
+                var = torch.clamp(sq_base - base.square(), min=0.0)
+                cv = torch.sqrt(var + float(eps)) / (base + float(eps))
+                w = 1.0 + torch.log1p(cv)
+            else:
+                w = 1.0 / torch.log1p(torch.clamp(base, min=float(eps)) + float(eps))
             w = w / torch.clamp(w.mean(), min=float(eps))
             w = torch.clamp(w, min=float(w_min), max=float(w_max))
             w = (1.0 - alpha) + alpha * w
@@ -1387,6 +1396,7 @@ def batch_kmeans_usage_diagnostics(
 
 def recon_gene_weight_diagnostics(
     model,
+    mode: str,
     alpha: float,
     w_min: float,
     w_max: float,
@@ -1397,8 +1407,18 @@ def recon_gene_weight_diagnostics(
     if mean_ema is None or mean_ema.numel() == 0 or not torch.any(mean_ema > 0):
         return {}
     with torch.no_grad():
+        mode = str(mode).lower()
         mean_g = mean_ema.detach().float()
-        w = 1.0 / torch.log1p(torch.clamp(mean_g, min=float(eps)) + float(eps))
+        if mode == "cv_ema":
+            sq_ema = getattr(base_model, "recon_gene_sq_mean_ema", None)
+            if sq_ema is None or sq_ema.numel() == 0 or not torch.any(sq_ema > 0):
+                return {}
+            sq_g = sq_ema.detach().float()
+            var_g = torch.clamp(sq_g - mean_g.square(), min=0.0)
+            cv_g = torch.sqrt(var_g + float(eps)) / (mean_g + float(eps))
+            w = 1.0 + torch.log1p(cv_g)
+        else:
+            w = 1.0 / torch.log1p(torch.clamp(mean_g, min=float(eps)) + float(eps))
         w = w / torch.clamp(w.mean(), min=float(eps))
         w = torch.clamp(w, min=float(w_min), max=float(w_max))
         w = (1.0 - float(alpha)) + float(alpha) * w
@@ -1406,7 +1426,7 @@ def recon_gene_weight_diagnostics(
         mean_q = torch.quantile(mean_g, torch.tensor([0.10, 0.90], device=mean_g.device))
         low_expr = mean_g <= mean_q[0]
         high_expr = mean_g >= mean_q[1]
-        return {
+        out = {
             "gw_min": float(w.min().item()),
             "gw_p01": float(q[0].item()),
             "gw_p10": float(q[1].item()),
@@ -1419,6 +1439,16 @@ def recon_gene_weight_diagnostics(
             "gw_lowExprCountMean": float(mean_g[low_expr].mean().item()) if bool(low_expr.any()) else 0.0,
             "gw_highExprCountMean": float(mean_g[high_expr].mean().item()) if bool(high_expr.any()) else 0.0,
         }
+        if mode == "cv_ema":
+            cv_q = torch.quantile(cv_g, torch.tensor([0.10, 0.50, 0.90], device=cv_g.device))
+            out.update(
+                {
+                    "gw_cv_p10": float(cv_q[0].item()),
+                    "gw_cv_p50": float(cv_q[1].item()),
+                    "gw_cv_p90": float(cv_q[2].item()),
+                }
+            )
+        return out
 
 
 # =========================
@@ -1909,6 +1939,7 @@ def train_gmm_vae_one_epoch(
             if str(recon_gene_weight_mode).lower() != "none" and float(recon_gene_weight_alpha) > 0:
                 gw = recon_gene_weight_diagnostics(
                     model=model,
+                    mode=recon_gene_weight_mode,
                     alpha=recon_gene_weight_alpha,
                     w_min=recon_gene_weight_min,
                     w_max=recon_gene_weight_max,
@@ -1921,6 +1952,8 @@ def train_gmm_vae_one_epoch(
                         f"lowExprW={gw['gw_lowExprMean']:.2f}, highExprW={gw['gw_highExprMean']:.2f}, "
                         f"low/highMean={gw['gw_lowExprCountMean']:.3g}/{gw['gw_highExprCountMean']:.3g}"
                     )
+                    if "gw_cv_p50" in gw:
+                        msg += f", cv[p10/p50/p90]={gw['gw_cv_p10']:.2f}/{gw['gw_cv_p50']:.2f}/{gw['gw_cv_p90']:.2f}"
             msg += (
                 f", respH={out_fake['resp_entropy'].item():.4f}"
             )

@@ -96,7 +96,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --prior-mu-spread-tau 1.0 \
   --lambda-post-c-balance 0 \
   --prior-refresh-every 0 \
-  --recon-gene-weight-mode inv_log1p_mean_ema \
+  --recon-gene-weight-mode cv_ema \
   --recon-gene-weight-alpha 0.5 \
   --recon-gene-weight-min 0.2 \
   --recon-gene-weight-max 3.0 \
