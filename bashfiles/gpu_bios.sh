@@ -77,7 +77,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --batch-cond-drop-prob 0.0 \
   --lambda-batchless-recon 0.01 \
   --lambda-tissueless-recon 0 \
-  --prior-logvar-max 2 \
+  --prior-logvar-max 0 \
   --expr-hidden-dim 512 \
   --mask-hidden-dim 512 \
   --dec-hidden-dim 512 \
@@ -94,8 +94,8 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --celltype-contrast-temp 0.1 \
   --lambda-real-recon 0.01 \
   --lambda-prior-pi-balance 0 \
-  --lambda-prior-mu-spread 0 \
-  --prior-mu-spread-tau 1.0 \
+  --lambda-prior-mu-spread 0.01 \
+  --prior-mu-spread-tau 0.5 \
   --lambda-post-c-balance 0 \
   --prior-refresh-every 0 \
   --recon-gene-weight-mode cv_ema \
