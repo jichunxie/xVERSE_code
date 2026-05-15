@@ -98,7 +98,9 @@ def parse_args():
     parser.add_argument("--scheduler-min-lr", type=float, default=1e-6, help="LR scheduler minimum LR.")
     parser.add_argument("--seed", type=int, default=42, help="Random seed.")
     parser.add_argument("--last-ckpt-name", default="last_model.pth", help="Filename for last checkpoint.")
-    parser.add_argument("--best-ckpt-name", default="best_model.pth", help="Filename for best checkpoint.")
+    parser.add_argument("--best-recon-ckpt-name", default="best_recon_model.pth", help="Filename for best validation reconstruction checkpoint.")
+    parser.add_argument("--best-cls-ckpt-name", default="best_cls_model.pth", help="Filename for best validation cell-type classification checkpoint.")
+    parser.add_argument("--best-contrast-ckpt-name", default="best_contrast_model.pth", help="Filename for best validation contrast checkpoint.")
     parser.add_argument("--beta-kl", type=float, default=0.01, help="KL weight.")
     parser.add_argument("--prior-type", choices=["gmm", "gaussian"], default="gmm",
                         help="Latent prior type. 'gaussian' uses N(0,I) with closed-form KL.")
@@ -164,6 +166,14 @@ def parse_args():
                         help="Number of tissue ids for conditional prior. <=0 means auto infer from dataset.")
     parser.add_argument("--num-batches", type=int, default=0,
                         help="Number of sample/batch ids for decoder conditioning. <=0 means auto infer from dataset.")
+    parser.add_argument("--use-batch-condition", dest="use_batch_condition", action="store_true", default=True,
+                        help="Enable sample/batch decoder FiLM conditioning.")
+    parser.add_argument("--no-use-batch-condition", dest="use_batch_condition", action="store_false",
+                        help="Disable sample/batch decoder FiLM conditioning.")
+    parser.add_argument("--use-tissue-condition", dest="use_tissue_condition", action="store_true", default=False,
+                        help="Enable tissue decoder FiLM conditioning.")
+    parser.add_argument("--no-use-tissue-condition", dest="use_tissue_condition", action="store_false",
+                        help="Disable tissue decoder FiLM conditioning.")
     parser.add_argument("--batch-emb-dim", type=int, default=0,
                         help="Sample/batch embedding dim for decoder FiLM conditioning. 0 disables batch conditioning.")
     parser.add_argument("--tissue-emb-dim", type=int, default=0,
@@ -527,7 +537,9 @@ def main():
     os.makedirs(args.result_dir, exist_ok=True)
     _write_args_csv(args.result_dir, args, rank)
     ckpt_path = os.path.join(args.result_dir, args.last_ckpt_name)
-    best_ckpt_path = os.path.join(args.result_dir, args.best_ckpt_name)
+    best_recon_ckpt_path = os.path.join(args.result_dir, args.best_recon_ckpt_name)
+    best_cls_ckpt_path = os.path.join(args.result_dir, args.best_cls_ckpt_name)
+    best_contrast_ckpt_path = os.path.join(args.result_dir, args.best_contrast_ckpt_name)
 
     if args.compiled_dataset_root:
         ignored = ["--data-root"]
@@ -669,9 +681,13 @@ def main():
         num_batches = int(args.num_batches)
     else:
         num_batches = int(inferred_num_batches)
+    effective_batch_emb_dim = int(args.batch_emb_dim) if bool(args.use_batch_condition) else 0
+    effective_tissue_emb_dim = int(args.tissue_emb_dim) if bool(args.use_tissue_condition) else 0
     log(
-        f"[BatchCond] num_batches={num_batches}, batch_emb_dim={args.batch_emb_dim}, "
-        f"tissue_emb_dim={args.tissue_emb_dim}, drop_prob={args.batch_cond_drop_prob}, "
+        f"[BatchCond] use_batch_condition={args.use_batch_condition}, num_batches={num_batches}, "
+        f"batch_emb_dim={effective_batch_emb_dim} (arg={args.batch_emb_dim}), "
+        f"use_tissue_condition={args.use_tissue_condition}, tissue_emb_dim={effective_tissue_emb_dim} (arg={args.tissue_emb_dim}), "
+        f"drop_prob={args.batch_cond_drop_prob}, "
         f"lambda_batchless_recon={args.lambda_batchless_recon}, "
         f"lambda_tissueless_recon={args.lambda_tissueless_recon}"
     )
@@ -762,8 +778,8 @@ def main():
         conditional_prior_on_tissue=args.conditional_prior_on_tissue,
         num_tissues=num_tissues,
         num_batches=num_batches,
-        batch_emb_dim=args.batch_emb_dim,
-        tissue_emb_dim=args.tissue_emb_dim,
+        batch_emb_dim=effective_batch_emb_dim,
+        tissue_emb_dim=effective_tissue_emb_dim,
         batch_cond_drop_prob=args.batch_cond_drop_prob,
         recon_loss_type=args.recon_loss,
     ).to(device)
@@ -795,6 +811,9 @@ def main():
 
     start_round = 1
     best_val_metric = float("inf")
+    best_recon_metric = float("inf")
+    best_cls_metric = float("inf")
+    best_contrast_metric = float("inf")
 
     if os.path.exists(ckpt_path):
         map_location = device
@@ -825,10 +844,15 @@ def main():
                     "Skip scheduler resume and continue with freshly initialized scheduler."
                 )
         best_val_metric = float(ckpt.get("best_val_metric", best_val_metric))
+        best_recon_metric = float(ckpt.get("best_recon_metric", best_recon_metric))
+        best_cls_metric = float(ckpt.get("best_cls_metric", best_cls_metric))
+        best_contrast_metric = float(ckpt.get("best_contrast_metric", best_contrast_metric))
         last_epoch = int(ckpt.get("epoch", 0))
         start_round = last_epoch + 1
         log(
-            f"[Resume] Loaded {ckpt_path} (epoch={last_epoch}, best_val_metric={best_val_metric:.6f}). "
+            f"[Resume] Loaded {ckpt_path} (epoch={last_epoch}, best_val_metric={best_val_metric:.6f}, "
+            f"best_recon={best_recon_metric:.6f}, best_cls={best_cls_metric:.6f}, "
+            f"best_contrast={best_contrast_metric:.6f}). "
             f"Continue from epoch {start_round}."
         )
         if getattr(load_ret, "missing_keys", None):
@@ -1062,17 +1086,35 @@ def main():
             current_lr = optimizer.param_groups[0]['lr']
             log(f"[Epoch {epoch_id}] Current Learning Rate: {current_lr:.6f}")
 
-            if val_metric < best_val_metric and is_main_process(rank):
-                best_val_metric = val_metric
+            best_val_metric = min(best_val_metric, val_metric)
+
+            def save_best_checkpoint(path: str, metric_name: str, metric_value: float):
                 torch.save({
                     "epoch": epoch_id,
                     "model_state_dict": model.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
                     "scheduler_state_dict": scheduler.state_dict(),
                     "best_val_metric": best_val_metric,
+                    "best_recon_metric": best_recon_metric,
+                    "best_cls_metric": best_cls_metric,
+                    "best_contrast_metric": best_contrast_metric,
+                    "selected_metric_name": metric_name,
+                    "selected_metric_value": metric_value,
                     "args": vars(args),
-                }, best_ckpt_path)
-                log(f"[Best Model] Updated at epoch {epoch_id} with metric={val_metric:.4f}")
+                }, path)
+
+            if val_loss_recon < best_recon_metric and is_main_process(rank):
+                best_recon_metric = val_loss_recon
+                save_best_checkpoint(best_recon_ckpt_path, "val_recon", val_loss_recon)
+                log(f"[Best Recon] Updated at epoch {epoch_id} with recon={val_loss_recon:.4f}")
+            if val_loss_celltype_cls < best_cls_metric and is_main_process(rank):
+                best_cls_metric = val_loss_celltype_cls
+                save_best_checkpoint(best_cls_ckpt_path, "val_celltype_cls", val_loss_celltype_cls)
+                log(f"[Best Cls] Updated at epoch {epoch_id} with cls={val_loss_celltype_cls:.4f}")
+            if val_loss_contrast < best_contrast_metric and is_main_process(rank):
+                best_contrast_metric = val_loss_contrast
+                save_best_checkpoint(best_contrast_ckpt_path, "val_contrast", val_loss_contrast)
+                log(f"[Best Contrast] Updated at epoch {epoch_id} with contrast={val_loss_contrast:.4f}")
         else:
             log(f"[Epoch {epoch_id}] Skip validation (val_every={args.val_every}).")
             current_lr = optimizer.param_groups[0]['lr']
@@ -1085,6 +1127,9 @@ def main():
                 "optimizer_state_dict": optimizer.state_dict(),
                 "scheduler_state_dict": scheduler.state_dict(),
                 "best_val_metric": best_val_metric,
+                "best_recon_metric": best_recon_metric,
+                "best_cls_metric": best_cls_metric,
+                "best_contrast_metric": best_contrast_metric,
                 "args": vars(args),
             }, ckpt_path)
             log(f"[Checkpoint] Saved as {args.last_ckpt_name} at epoch {epoch_id}")

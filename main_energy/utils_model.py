@@ -2357,6 +2357,8 @@ def evaluate_gmm_vae_one_epoch(
                     msg += f", BatchlessRecon={batchless_recon.item():.4f}"
                 if lambda_tissueless_recon > 0:
                     msg += f", TissuelessRecon={tissueless_recon.item():.4f}"
+                if lambda_contrast > 0:
+                    msg += f", Contrast={contrast.item():.4f}"
                 if lambda_celltype_contrast > 0:
                     msg += f", CtContrast={celltype_contrast.item():.4f}"
                 if lambda_rank_recon > 0:

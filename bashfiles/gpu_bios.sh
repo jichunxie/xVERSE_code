@@ -4,7 +4,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH -c 10
 #SBATCH --mem=100G
-#SBATCH -t 20:00:00
+#SBATCH -t 40:00:00
 #SBATCH -J bios
 #SBATCH --output=/hpc/group/xielab/xj58/sbatch_output/%x_output_%j.txt
 #SBATCH --error=/hpc/group/xielab/xj58/sbatch_output/%x_error_%j.txt
@@ -19,7 +19,7 @@ export PYTHONUNBUFFERED=1
 
 COMPILED_ROOT="/hpc/group/xielab/xj58/xVerseAtlas/compiled_train_v1_all"
 CELLTYPE_CSV="/hpc/group/xielab/xj58/sparest_code/standard_type/cellxgene_cell_type_mapped.csv"
-RESULT_DIR="/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_all_tissue0514_tissue_cond_largec"
+RESULT_DIR="/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_all_tissue0515"
 
 NPROC_PER_NODE=$(python - <<'PY'
 import torch
@@ -54,8 +54,8 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --sampler-shard-reorder-window 4096 \
   --cell-type-csv "${CELLTYPE_CSV}" \
   --result-dir "${RESULT_DIR}" \
-  --num-epochs 100 \
-  --val-every 5 \
+  --num-epochs 200 \
+  --val-every 8 \
   --batch-size 256 \
   --val-batch-size 1024 \
   --num-workers 8 \
@@ -71,11 +71,13 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --prior-cov-rank 0 \
   --posterior-cov-rank 0 \
   --batch-emb-dim 32 \
-  --tissue-emb-dim 32 \
+  --use-batch-condition \
+  --no-use-tissue-condition \
+  --tissue-emb-dim 0 \
   --batch-cond-drop-prob 0.0 \
   --lambda-batchless-recon 0.01 \
-  --lambda-tissueless-recon 0.01 \
-  --prior-logvar-max 1 \
+  --lambda-tissueless-recon 0 \
+  --prior-logvar-max 2 \
   --expr-hidden-dim 512 \
   --mask-hidden-dim 512 \
   --dec-hidden-dim 512 \
@@ -86,7 +88,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --mask-aug-min-frac 0.1 \
   --mask-aug-max-frac 0.5 \
   --lambda-celltype-cls 1 \
-  --lambda-contrast 100 \
+  --lambda-contrast 50 \
   --contrast-embedding encoder_hidden \
   --lambda-celltype-contrast 0 \
   --celltype-contrast-temp 0.1 \
@@ -104,7 +106,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --recon-cell-weight-alpha 0.5 \
   --recon-cell-weight-clusters 32 \
   --recon-cell-weight-kmeans-iters 5 \
-  --lambda-rank-recon 0.05 \
+  --lambda-rank-recon 0 \
   --rank-recon-gene-pairs 256 \
   --rank-recon-cell-pairs 256 \
   --contrast-temp 0.1
