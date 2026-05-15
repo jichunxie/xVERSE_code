@@ -200,33 +200,7 @@ multiplied by \(w_g\) at observed gene entries. We also optionally upweight cell
 under-represented local structures by running a lightweight within-batch clustering
 procedure and assigning larger reconstruction weights to cells in smaller clusters.
 
-\subsection{Regularization of the mixture prior}
-
-To avoid degenerate mixture solutions, we optionally apply weak regularization to the
-prior. A repulsive center penalty discourages overlapping component centers:
-\begin{equation}
-    \mathcal{L}_{\mu}
-    =
-    \frac{1}{K(K-1)}
-    \sum_{i\neq j}
-    \exp\left(
-        -\frac{\|\mu_i-\mu_j\|_2^2}{\eta}
-    \right),
-\end{equation}
-where \(\eta\) controls the range of the repulsion. We also allow a weak log-variance
-penalty,
-\begin{equation}
-    \mathcal{L}_{\sigma}
-    =
-    \left\|
-        \log \sigma^2 - a
-    \right\|_2^2,
-\end{equation}
-which softly encourages component variances to remain near a target value \(a\).
-These terms are assigned small weights and are used only to prevent pathological
-overlap or overly broad components.
-
-\subsection{Full training objective and model selection}
+\subsection{Full training objective}
 
 The full objective is
 \begin{equation}
@@ -238,15 +212,7 @@ The full objective is
     +
     \lambda_{\mathrm{ct}}\mathcal{L}_{\mathrm{ct}}
     +
-    \lambda_{\mathrm{batchless}}\mathcal{L}_{\mathrm{batchless}}
-    +
-    \lambda_{\mu}\mathcal{L}_{\mu}
-    +
-    \lambda_{\sigma}\mathcal{L}_{\sigma}.
+    \lambda_{\mathrm{batchless}}\mathcal{L}_{\mathrm{batchless}}.
 \end{equation}
-Different downstream tasks prefer different checkpoints. We therefore save separate
-models selected by validation reconstruction loss, validation cell-type loss, and
-validation contrastive loss. Embedding analyses use the checkpoint with the best
-contrastive loss, as this criterion most directly measures panel-invariant
-representation learning. Generative or imputation analyses can instead use the
-checkpoint selected by reconstruction likelihood.
+The relative weights control the balance between generative modeling, panel-invariant
+representation learning and weak biological supervision.
