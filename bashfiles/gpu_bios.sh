@@ -65,7 +65,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --lr 1e-3 \
   --weight-decay 1e-5 \
   --prior-type gmm \
-  --recon-loss poisson \
+  --recon-loss nb \
   --latent-dim 256 \
   --num-components 64 \
   --prior-cov-rank 0 \
@@ -88,7 +88,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --mask-aug-min-frac 0.1 \
   --mask-aug-max-frac 0.5 \
   --lambda-celltype-cls 1 \
-  --lambda-contrast 10 \
+  --lambda-contrast 50 \
   --contrast-embedding encoder_hidden \
   --lambda-celltype-contrast 0 \
   --celltype-contrast-temp 0.1 \
