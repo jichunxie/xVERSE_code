@@ -1353,10 +1353,18 @@ def gmm_collapse_diagnostics(
         if mu.size(0) > 1:
             dmat = torch.cdist(mu, mu, p=2)
             diag_mask = torch.eye(dmat.size(0), device=dmat.device, dtype=torch.bool)
-            dmat = dmat.masked_fill(diag_mask, float("inf"))
-            min_mu_dist = float(torch.min(dmat).item())
+            off_dmat = dmat.masked_fill(diag_mask, float("nan"))
+            finite_dists = off_dmat[~torch.isnan(off_dmat)]
+            min_mu_dist = float(finite_dists.min().item()) if finite_dists.numel() > 0 else 0.0
+            mean_mu_dist = float(finite_dists.mean().item()) if finite_dists.numel() > 0 else 0.0
         else:
             min_mu_dist = 0.0
+            mean_mu_dist = 0.0
+        logvar = prior._expanded_logvar().float()
+        var = torch.exp(logvar)
+        mean_prior_var = float(var.mean().item())
+        max_prior_var = float(var.max().item())
+        mean_prior_std = float(torch.sqrt(var).mean().item())
 
     return {
         "pi_entropy": pi_entropy,
@@ -1371,6 +1379,10 @@ def gmm_collapse_diagnostics(
         "usage_min_nonzero": usage_min_nonzero,
         "resp_top1": resp_top1,
         "min_mu_dist": min_mu_dist,
+        "mean_mu_dist": mean_mu_dist,
+        "mean_prior_var": mean_prior_var,
+        "max_prior_var": max_prior_var,
+        "mean_prior_std": mean_prior_std,
     }
 
 
@@ -1981,7 +1993,9 @@ def train_gmm_vae_one_epoch(
                     f"activeK={diag['active_comp']}, respTop1={diag['resp_top1']:.3f}, "
                     f"hardK={diag['hard_active']}, active@1e-2/1e-3/1e-4={diag['active_1e2']}/{diag['active_1e3']}/{diag['active_1e4']}, "
                     f"usageTop5={diag['usage_top5']:.3f}, usageMax={diag['usage_max']:.3f}, "
-                    f"usageMinNZ={diag['usage_min_nonzero']:.2e}, minMuDist={diag['min_mu_dist']:.3f}"
+                    f"usageMinNZ={diag['usage_min_nonzero']:.2e}, minMuDist={diag['min_mu_dist']:.3f}, "
+                    f"meanMuDist={diag['mean_mu_dist']:.3f}, meanVar={diag['mean_prior_var']:.3f}, "
+                    f"maxVar={diag['max_prior_var']:.3f}, meanStd={diag['mean_prior_std']:.3f}"
                 )
             print(msg)
 
@@ -2374,7 +2388,9 @@ def evaluate_gmm_vae_one_epoch(
                         f"activeK={diag['active_comp']}, respTop1={diag['resp_top1']:.3f}, "
                         f"hardK={diag['hard_active']}, active@1e-2/1e-3/1e-4={diag['active_1e2']}/{diag['active_1e3']}/{diag['active_1e4']}, "
                         f"usageTop5={diag['usage_top5']:.3f}, usageMax={diag['usage_max']:.3f}, "
-                        f"usageMinNZ={diag['usage_min_nonzero']:.2e}, minMuDist={diag['min_mu_dist']:.3f}"
+                        f"usageMinNZ={diag['usage_min_nonzero']:.2e}, minMuDist={diag['min_mu_dist']:.3f}, "
+                        f"meanMuDist={diag['mean_mu_dist']:.3f}, meanVar={diag['mean_prior_var']:.3f}, "
+                        f"maxVar={diag['max_prior_var']:.3f}, meanStd={diag['mean_prior_std']:.3f}"
                     )
                 print(msg)
 
