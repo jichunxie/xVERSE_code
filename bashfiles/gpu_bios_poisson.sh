@@ -67,7 +67,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --prior-type gmm \
   --recon-loss poisson \
   --latent-dim 256 \
-  --num-components 64 \
+  --num-components 32 \
   --prior-cov-rank 0 \
   --posterior-cov-rank 0 \
   --batch-emb-dim 32 \
