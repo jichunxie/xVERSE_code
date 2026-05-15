@@ -97,7 +97,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --lambda-prior-mu-spread 1e-3 \
   --prior-mu-spread-tau 0.5 \
   --lambda-prior-logvar-l2 1e-3 \
-  --prior-logvar-target -0.5 \
+  --prior-logvar-target -1 \
   --lambda-post-c-balance 0 \
   --prior-refresh-every 0 \
   --recon-gene-weight-mode cv_ema \
