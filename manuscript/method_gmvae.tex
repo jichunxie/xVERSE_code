@@ -1,0 +1,252 @@
+\section{Panel-aware generative representation learning}
+
+We developed a panel-aware generative model to learn cell embeddings from single-cell
+expression profiles measured over heterogeneous gene panels. Each cell is represented
+by a count vector \(x_i \in \mathbb{N}^{G}\) and a binary observation mask
+\(m_i \in \{0,1\}^{G}\), where \(m_{ig}=1\) indicates that gene \(g\) was measured in
+cell \(i\). Counts for unobserved genes are not treated as zeros in the likelihood.
+Instead, the mask is explicitly provided to the encoder and reconstruction losses are
+computed only on observed entries unless otherwise specified.
+
+\subsection{Mask-conditioned encoder}
+
+The encoder receives log-transformed counts and the corresponding observation mask.
+Specifically, we encode \(\log(1+x_i)\) with an expression branch and \(m_i\) with a
+mask branch. The two branches are fused by a feature-wise affine modulation:
+\begin{align}
+    h^{\mathrm{expr}}_i &= f_{\mathrm{expr}}(\log(1+x_i)), \\
+    h^{\mathrm{mask}}_i &= f_{\mathrm{mask}}(m_i), \\
+    h_i &= \gamma(h^{\mathrm{mask}}_i) \odot h^{\mathrm{expr}}_i
+           + \beta(h^{\mathrm{mask}}_i),
+\end{align}
+where \(h_i\) is a deterministic hidden representation, and
+\(\gamma(\cdot)\) and \(\beta(\cdot)\) are learned modulation functions. This design
+allows the encoder to distinguish true zeros from unmeasured genes and to adapt the
+representation to the available panel.
+
+\subsection{Gaussian-mixture latent prior}
+
+To represent multiple cellular states in a generative latent space, we use a Gaussian
+mixture prior over the latent variable \(z_i \in \mathbb{R}^{D}\):
+\begin{equation}
+    p(z_i) = \sum_{k=1}^{K} \pi_k
+    \mathcal{N}\left(z_i \mid \mu_k, \Sigma_k\right),
+\end{equation}
+where \(K\) is the number of mixture components, \(\pi_k\) are learned mixture
+weights, \(\mu_k \in \mathbb{R}^{D}\) are component centers, and \(\Sigma_k\) are
+component-specific covariance matrices. In the main experiments described here,
+\(\Sigma_k\) is diagonal unless otherwise stated. Thus, for \(K=64\) and
+\(D=256\), the prior contains 64 prototype centers in a 256-dimensional latent
+space. The mixture components are shared across tissues by default; optional
+conditioning can be enabled for selected decoder covariates, as described below.
+
+\subsection{Mixture posterior}
+
+The posterior is parameterized as a Gaussian-mixture variational posterior with a
+discrete component variable \(c_i\):
+\begin{equation}
+    q_{\phi}(z_i,c_i \mid x_i,m_i)
+    = q_{\phi}(c_i \mid h_i)\,
+      q_{\phi}(z_i \mid h_i,c_i).
+\end{equation}
+The encoder hidden state \(h_i\) is used to predict a categorical distribution over
+components,
+\begin{equation}
+    q_{\phi}(c_i=k \mid h_i)
+    = \mathrm{softmax}_k(a_{\phi}(h_i)),
+\end{equation}
+and component-specific posterior parameters:
+\begin{equation}
+    q_{\phi}(z_i \mid h_i,c_i=k)
+    =
+    \mathcal{N}\left(
+        z_i \mid \mu_{\phi k}(h_i), \mathrm{diag}(\sigma^2_{\phi k}(h_i))
+    \right).
+\end{equation}
+During training, the component assignment is relaxed with a differentiable soft
+selection, and during evaluation the most likely component can be used for sampling.
+For deterministic embedding extraction, we use either the encoder hidden state
+\(h_i\), the base posterior mean, or the mixture-averaged posterior mean
+\(\sum_k q_{\phi}(c_i=k \mid h_i)\mu_{\phi k}(h_i)\), depending on the analysis.
+
+\subsection{Count decoder}
+
+The decoder maps \(z_i\) back to a full-gene expression distribution. It predicts gene
+logits and a cell-level library size:
+\begin{align}
+    r_i &= f_{\theta}(z_i, b_i), \\
+    \ell_i &= \mathrm{softplus}(g_{\theta}(z_i)), \\
+    \rho_{ig} &= \mathrm{softmax}(r_i)_g, \\
+    \lambda_{ig} &= \ell_i \rho_{ig}.
+\end{align}
+Here \(b_i\) denotes an optional batch condition. In the experiments using batch
+conditioning, \(b_i\) is provided to the decoder through FiLM-style modulation, while
+tissue conditioning is disabled unless explicitly stated. This allows the decoder to
+explain donor- or batch-specific expression shifts while preserving an unconditioned
+latent representation. To prevent the decoder from relying exclusively on batch
+metadata, an additional batchless reconstruction loss can be computed with the batch
+condition set to zero.
+
+For count likelihoods, we use either a Poisson model,
+\begin{equation}
+    x_{ig} \sim \mathrm{Poisson}(\lambda_{ig}),
+\end{equation}
+or a negative binomial model,
+\begin{equation}
+    x_{ig} \sim \mathrm{NB}(\lambda_{ig}, \theta_g),
+\end{equation}
+where \(\theta_g\) is a learned gene-level dispersion parameter. Unless otherwise
+specified, the likelihood is evaluated only for observed genes:
+\begin{equation}
+    \mathcal{L}_{\mathrm{rec}}
+    =
+    - \frac{1}{\sum_g m_{ig}}
+      \sum_{g=1}^{G} m_{ig}
+      \log p_{\theta}(x_{ig} \mid z_i).
+\end{equation}
+
+\subsection{Variational objective}
+
+The core variational objective combines observed-gene reconstruction with the
+Gaussian-mixture KL divergence:
+\begin{equation}
+    \mathcal{L}_{\mathrm{VAE}}
+    =
+    \mathcal{L}_{\mathrm{rec}}
+    +
+    \beta\,
+    \mathrm{KL}\left[
+        q_{\phi}(z_i,c_i \mid x_i,m_i)
+        \,\|\, p_{\theta}(z_i,c_i)
+    \right].
+\end{equation}
+The KL term decomposes into a continuous component and a discrete component:
+\begin{align}
+    \mathrm{KL}
+    &=
+    \sum_{k=1}^{K} q_{\phi}(c_i=k \mid h_i)
+    \mathrm{KL}\left[
+        q_{\phi}(z_i \mid h_i,c_i=k)
+        \,\|\, p_{\theta}(z_i \mid c_i=k)
+    \right] \nonumber \\
+    &\quad+
+    \mathrm{KL}\left[
+        q_{\phi}(c_i \mid h_i)
+        \,\|\, p_{\theta}(c_i)
+    \right].
+\end{align}
+The KL weight \(\beta\) is kept small in our main experiments to preserve biological
+variation in the embedding while maintaining a usable generative prior.
+
+\subsection{Panel-view contrastive learning}
+
+Because the same biological cell may be observed through different gene panels, we
+introduce a panel-view contrastive objective. For each training cell, we construct two
+views: a real view using the original observed mask and a masked view generated by
+randomly hiding a subset of already observed genes. The two views share the same count
+vector but differ in encoder-visible masks. Let \(u_i\) and \(v_i\) denote the
+deterministic embeddings of the real and masked views, respectively. In the main
+configuration, these embeddings are the encoder hidden states \(h_i\). We use a
+symmetric InfoNCE loss:
+\begin{equation}
+    \mathcal{L}_{\mathrm{con}}
+    =
+    \frac{1}{2}
+    \left[
+    \mathrm{CE}
+    \left(
+        \frac{UV^{\top}}{\tau}, \mathrm{diag}
+    \right)
+    +
+    \mathrm{CE}
+    \left(
+        \frac{VU^{\top}}{\tau}, \mathrm{diag}
+    \right)
+    \right],
+\end{equation}
+where rows of \(U\) and \(V\) are normalized embeddings from the two views, and
+\(\tau\) is the contrastive temperature. This objective directly encodes the desired
+panel invariance: two partial observations of the same cell should map to nearby
+representations.
+
+\subsection{Auxiliary biological supervision}
+
+When cell-type annotations are available, we add an auxiliary classification head on
+the latent representation:
+\begin{equation}
+    \mathcal{L}_{\mathrm{ct}}
+    =
+    \mathrm{CE}\left(s_{\theta}(z_i), y_i\right),
+\end{equation}
+where labels with missing annotation are ignored. This term is used as a weak semantic
+anchor rather than as the primary training objective.
+
+\subsection{Reweighting rare gene and cell signals}
+
+To reduce domination by highly expressed genes, reconstruction losses can be
+gene-weighted. We maintain exponential moving averages of observed-gene means and
+second moments and compute a coefficient-of-variation statistic,
+\begin{equation}
+    \mathrm{CV}_g =
+    \frac{\sqrt{\mathbb{E}[x_g^2] - \mathbb{E}[x_g]^2}}
+         {\mathbb{E}[x_g] + \epsilon}.
+\end{equation}
+Gene weights are then formed as
+\begin{equation}
+    w_g = 1 + \log(1+\mathrm{CV}_g),
+\end{equation}
+normalized, clipped, and mixed with a uniform weight. The final reconstruction term is
+multiplied by \(w_g\) at observed gene entries. We also optionally upweight cells in
+under-represented local structures by running a lightweight within-batch clustering
+procedure and assigning larger reconstruction weights to cells in smaller clusters.
+
+\subsection{Regularization of the mixture prior}
+
+To avoid degenerate mixture solutions, we optionally apply weak regularization to the
+prior. A repulsive center penalty discourages overlapping component centers:
+\begin{equation}
+    \mathcal{L}_{\mu}
+    =
+    \frac{1}{K(K-1)}
+    \sum_{i\neq j}
+    \exp\left(
+        -\frac{\|\mu_i-\mu_j\|_2^2}{\eta}
+    \right),
+\end{equation}
+where \(\eta\) controls the range of the repulsion. We also allow a weak log-variance
+penalty,
+\begin{equation}
+    \mathcal{L}_{\sigma}
+    =
+    \left\|
+        \log \sigma^2 - a
+    \right\|_2^2,
+\end{equation}
+which softly encourages component variances to remain near a target value \(a\).
+These terms are assigned small weights and are used only to prevent pathological
+overlap or overly broad components.
+
+\subsection{Full training objective and model selection}
+
+The full objective is
+\begin{equation}
+    \mathcal{L}
+    =
+    \mathcal{L}_{\mathrm{VAE}}
+    +
+    \lambda_{\mathrm{con}}\mathcal{L}_{\mathrm{con}}
+    +
+    \lambda_{\mathrm{ct}}\mathcal{L}_{\mathrm{ct}}
+    +
+    \lambda_{\mathrm{batchless}}\mathcal{L}_{\mathrm{batchless}}
+    +
+    \lambda_{\mu}\mathcal{L}_{\mu}
+    +
+    \lambda_{\sigma}\mathcal{L}_{\sigma}.
+\end{equation}
+Different downstream tasks prefer different checkpoints. We therefore save separate
+models selected by validation reconstruction loss, validation cell-type loss, and
+validation contrastive loss. Embedding analyses use the checkpoint with the best
+contrastive loss, as this criterion most directly measures panel-invariant
+representation learning. Generative or imputation analyses can instead use the
+checkpoint selected by reconstruction likelihood.
