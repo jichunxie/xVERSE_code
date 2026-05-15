@@ -842,11 +842,11 @@ class MaskFiLMGMMVAE(nn.Module):
             ).to(z.dtype)
         if self.prior_type == "gmm" and lambda_prior_mu_spread > 0:
             if getattr(self.prior, "conditional_on_tissue", False) and getattr(self.prior, "prior_mu_t", None) is not None:
-                mu = self.prior.prior_mu_t.float().reshape(-1, self.prior.prior_mu_t.size(-1))
+                prior_mu_for_spread = self.prior.prior_mu_t.float().reshape(-1, self.prior.prior_mu_t.size(-1))
             else:
-                mu = self.prior.prior_mu.float()
-            if mu.size(0) > 1:
-                d2 = torch.cdist(mu, mu, p=2).pow(2)
+                prior_mu_for_spread = self.prior.prior_mu.float()
+            if prior_mu_for_spread.size(0) > 1:
+                d2 = torch.cdist(prior_mu_for_spread, prior_mu_for_spread, p=2).pow(2)
                 eye = torch.eye(d2.size(0), device=d2.device, dtype=torch.bool)
                 off = d2.masked_fill(eye, float("inf"))
                 tau = max(float(prior_mu_spread_tau), 1e-6)
