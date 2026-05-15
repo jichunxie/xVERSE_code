@@ -960,7 +960,7 @@ def main():
             or (epoch_id == args.num_epochs)
         )
         if do_val:
-            val_loss_full, val_loss_recon, val_loss_kl, val_loss_score, val_loss_contrast, val_loss_cov, val_loss_prior_pi_balance, val_loss_celltype_cls, val_loss_batchless_recon, val_loss_tissueless_recon, val_loss_rank_recon, val_loss_rank_gene, val_loss_rank_cell, val_loss_celltype_contrast = evaluate_gmm_vae_one_epoch(
+            val_loss_full, val_loss_recon, val_loss_kl, val_loss_score, val_loss_contrast, val_loss_cov, val_loss_prior_pi_balance, val_loss_celltype_cls, val_loss_real_recon, val_loss_batchless_recon, val_loss_tissueless_recon, val_loss_rank_recon, val_loss_rank_gene, val_loss_rank_cell, val_loss_celltype_contrast = evaluate_gmm_vae_one_epoch(
                 model=model,
                 val_loader=val_loader,
                 device=device,
@@ -1026,12 +1026,35 @@ def main():
                 val_msg += f", Contrast={val_loss_contrast:.4f}"
             if args.lambda_celltype_contrast > 0:
                 val_msg += f", CtContrast={val_loss_celltype_contrast:.4f}"
+            if args.lambda_real_recon > 0:
+                val_msg += f", RealRecon={val_loss_real_recon:.4f}"
             if args.lambda_batchless_recon > 0:
                 val_msg += f", BatchlessRecon={val_loss_batchless_recon:.4f}"
             if args.lambda_tissueless_recon > 0:
                 val_msg += f", TissuelessRecon={val_loss_tissueless_recon:.4f}"
             if args.lambda_rank_recon > 0:
                 val_msg += f", RankRecon={val_loss_rank_recon:.4f}, RankGene={val_loss_rank_gene:.4f}, RankCell={val_loss_rank_cell:.4f}"
+            weighted_terms = [
+                f"Recon={val_loss_recon:.4f}",
+                f"KL={float(beta_t) * val_loss_kl:.4f}",
+            ]
+            if args.lambda_celltype_cls != 0:
+                weighted_terms.append(f"cls={float(args.lambda_celltype_cls) * val_loss_celltype_cls:.4f}")
+            if args.lambda_contrast != 0:
+                weighted_terms.append(f"Contrast={float(args.lambda_contrast) * val_loss_contrast:.4f}")
+            if args.lambda_celltype_contrast != 0:
+                weighted_terms.append(f"CtContrast={float(args.lambda_celltype_contrast) * val_loss_celltype_contrast:.4f}")
+            if args.lambda_real_recon != 0:
+                weighted_terms.append(f"RealRecon={float(args.lambda_real_recon) * val_loss_real_recon:.4f}")
+            if args.lambda_batchless_recon != 0:
+                weighted_terms.append(f"BatchlessRecon={float(args.lambda_batchless_recon) * val_loss_batchless_recon:.4f}")
+            if args.lambda_tissueless_recon != 0:
+                weighted_terms.append(f"TissuelessRecon={float(args.lambda_tissueless_recon) * val_loss_tissueless_recon:.4f}")
+            if args.lambda_rank_recon != 0:
+                weighted_terms.append(f"RankRecon={float(args.lambda_rank_recon) * val_loss_rank_recon:.4f}")
+            if args.lambda_prior_pi_balance != 0:
+                weighted_terms.append(f"priorPiBal={float(args.lambda_prior_pi_balance) * val_loss_prior_pi_balance:.4f}")
+            val_msg += ", weighted[" + ", ".join(weighted_terms) + "]"
             log(val_msg)
             val_metric = val_loss_full
 

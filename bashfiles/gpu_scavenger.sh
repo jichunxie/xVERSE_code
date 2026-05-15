@@ -30,7 +30,7 @@ run_one_model () {
   MODEL_FAMILY="${3:-auto}"
   EMBEDDING_MODE="${4:-mixmu}"
   EMBEDDING_KEY="xVerse_gmmvae_${EMBEDDING_MODE}"
-  CKPT_PATH="${RESULT_DIR}/best_model.pth"
+  CKPT_PATH="${RESULT_DIR}/last_model.pth"
   FIG2_OUT_DIR="/hpc/group/xielab/xj58/xVerse_results/fig2_gmmvae_${MODEL_TAG}"
   FIG2_EVAL_DIR="${FIG2_OUT_DIR}/evaluation_scib_full"
 

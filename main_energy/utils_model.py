@@ -1338,6 +1338,15 @@ def gmm_collapse_diagnostics(
         resp = torch.softmax(log_w + log_comp, dim=1)  # (B, K)
         usage = resp.mean(dim=0)  # (K,)
         active_comp = int((usage > float(active_thresh)).sum().item())
+        active_1e2 = int((usage > 1e-2).sum().item())
+        active_1e3 = int((usage > 1e-3).sum().item())
+        active_1e4 = int((usage > 1e-4).sum().item())
+        hard_active = int(torch.unique(resp.argmax(dim=1)).numel())
+        usage_sorted = torch.sort(usage, descending=True).values
+        usage_top5 = float(usage_sorted[: min(5, usage_sorted.numel())].sum().item())
+        usage_max = float(usage.max().item())
+        nonzero_usage = usage[usage > 0]
+        usage_min_nonzero = float(nonzero_usage.min().item()) if nonzero_usage.numel() > 0 else 0.0
         resp_top1 = float(resp.max(dim=1).values.mean().item())
 
         mu = prior.prior_mu.float()  # (K, D)
@@ -1353,6 +1362,13 @@ def gmm_collapse_diagnostics(
         "pi_entropy": pi_entropy,
         "k_eff": k_eff,
         "active_comp": active_comp,
+        "active_1e2": active_1e2,
+        "active_1e3": active_1e3,
+        "active_1e4": active_1e4,
+        "hard_active": hard_active,
+        "usage_top5": usage_top5,
+        "usage_max": usage_max,
+        "usage_min_nonzero": usage_min_nonzero,
         "resp_top1": resp_top1,
         "min_mu_dist": min_mu_dist,
     }
@@ -1623,6 +1639,7 @@ def train_gmm_vae_one_epoch(
     prior_ref = model.module.prior if hasattr(model, "module") else model.prior
     total_loss = total_recon = total_kl = total_score = total_contrast = total_cov = total_prior_pi_balance = total_celltype_cls = 0.0
     total_celltype_contrast = 0.0
+    total_real_recon = 0.0
     total_batchless_recon = 0.0
     total_tissueless_recon = 0.0
     total_rank_recon = total_rank_gene = total_rank_cell = 0.0
@@ -1962,7 +1979,9 @@ def train_gmm_vae_one_epoch(
                 msg += (
                     f", piH={diag['pi_entropy']:.3f}, K_eff={diag['k_eff']:.2f}, "
                     f"activeK={diag['active_comp']}, respTop1={diag['resp_top1']:.3f}, "
-                    f"minMuDist={diag['min_mu_dist']:.3f}"
+                    f"hardK={diag['hard_active']}, active@1e-2/1e-3/1e-4={diag['active_1e2']}/{diag['active_1e3']}/{diag['active_1e4']}, "
+                    f"usageTop5={diag['usage_top5']:.3f}, usageMax={diag['usage_max']:.3f}, "
+                    f"usageMinNZ={diag['usage_min_nonzero']:.2e}, minMuDist={diag['min_mu_dist']:.3f}"
                 )
             print(msg)
 
@@ -2056,6 +2075,7 @@ def evaluate_gmm_vae_one_epoch(
     prior_ref = model.module.prior if hasattr(model, "module") else model.prior
     total_loss = total_recon = total_kl = total_score = total_contrast = total_cov = total_prior_pi_balance = total_celltype_cls = 0.0
     total_celltype_contrast = 0.0
+    total_real_recon = 0.0
     total_batchless_recon = 0.0
     total_tissueless_recon = 0.0
     total_rank_recon = total_rank_gene = total_rank_cell = 0.0
@@ -2319,6 +2339,7 @@ def evaluate_gmm_vae_one_epoch(
             total_cov += out_fake["cov_loss"].item() * bsz
             total_prior_pi_balance += out_fake.get("prior_pi_balance_loss", torch.zeros_like(out_fake["cov_loss"])).item() * bsz
             total_celltype_cls += out_fake.get("celltype_cls_loss", torch.zeros_like(out_fake["cov_loss"])).item() * bsz
+            total_real_recon += real_recon.item() * bsz
             total_batchless_recon += batchless_recon.item() * bsz
             total_tissueless_recon += tissueless_recon.item() * bsz
             total_rank_recon += out_fake.get("rank_recon_loss", torch.zeros_like(out_fake["cov_loss"])).item() * bsz
@@ -2349,18 +2370,20 @@ def evaluate_gmm_vae_one_epoch(
                     msg += (
                         f", piH={diag['pi_entropy']:.3f}, K_eff={diag['k_eff']:.2f}, "
                         f"activeK={diag['active_comp']}, respTop1={diag['resp_top1']:.3f}, "
-                        f"minMuDist={diag['min_mu_dist']:.3f}"
+                        f"hardK={diag['hard_active']}, active@1e-2/1e-3/1e-4={diag['active_1e2']}/{diag['active_1e3']}/{diag['active_1e4']}, "
+                        f"usageTop5={diag['usage_top5']:.3f}, usageMax={diag['usage_max']:.3f}, "
+                        f"usageMinNZ={diag['usage_min_nonzero']:.2e}, minMuDist={diag['min_mu_dist']:.3f}"
                     )
                 print(msg)
 
     if dist.is_available() and dist.is_initialized():
         stats = torch.tensor(
-            [total_loss, total_recon, total_kl, total_score, total_contrast, total_cov, total_prior_pi_balance, total_celltype_cls, total_batchless_recon, total_tissueless_recon, total_rank_recon, total_rank_gene, total_rank_cell, total_celltype_contrast, float(n_cells)],
+            [total_loss, total_recon, total_kl, total_score, total_contrast, total_cov, total_prior_pi_balance, total_celltype_cls, total_real_recon, total_batchless_recon, total_tissueless_recon, total_rank_recon, total_rank_gene, total_rank_cell, total_celltype_contrast, float(n_cells)],
             device=device,
             dtype=torch.float64,
         )
         dist.all_reduce(stats, op=dist.ReduceOp.SUM)
-        total_loss, total_recon, total_kl, total_score, total_contrast, total_cov, total_prior_pi_balance, total_celltype_cls, total_batchless_recon, total_tissueless_recon, total_rank_recon, total_rank_gene, total_rank_cell, total_celltype_contrast, n_cells = stats.tolist()
+        total_loss, total_recon, total_kl, total_score, total_contrast, total_cov, total_prior_pi_balance, total_celltype_cls, total_real_recon, total_batchless_recon, total_tissueless_recon, total_rank_recon, total_rank_gene, total_rank_cell, total_celltype_contrast, n_cells = stats.tolist()
         n_cells = max(float(n_cells), 1.0)
 
     return (
@@ -2372,6 +2395,7 @@ def evaluate_gmm_vae_one_epoch(
         total_cov / n_cells,
         total_prior_pi_balance / n_cells,
         total_celltype_cls / n_cells,
+        total_real_recon / n_cells,
         total_batchless_recon / n_cells,
         total_tissueless_recon / n_cells,
         total_rank_recon / n_cells,
