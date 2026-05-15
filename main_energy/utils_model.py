@@ -1268,6 +1268,21 @@ def bidirectional_contrastive_loss(z_real: torch.Tensor, z_fake: torch.Tensor, t
     - z_real[i] <-> z_fake[i] is a positive pair
     - other samples in batch are negatives
     """
+    if z_real.dim() != 2 or z_fake.dim() != 2:
+        raise ValueError(
+            "bidirectional_contrastive_loss expects 2D embeddings [B, D], "
+            f"got z_real={tuple(z_real.shape)}, z_fake={tuple(z_fake.shape)}"
+        )
+    if z_real.size(0) != z_fake.size(0):
+        raise ValueError(
+            "bidirectional_contrastive_loss requires paired views with the same batch size, "
+            f"got z_real={tuple(z_real.shape)}, z_fake={tuple(z_fake.shape)}"
+        )
+    if z_real.size(1) != z_fake.size(1):
+        raise ValueError(
+            "bidirectional_contrastive_loss requires same embedding dim, "
+            f"got z_real={tuple(z_real.shape)}, z_fake={tuple(z_fake.shape)}"
+        )
     if z_real.size(0) <= 1:
         return torch.zeros((), device=z_real.device, dtype=z_real.dtype)
     z1 = F.normalize(z_real, dim=-1)
@@ -1282,14 +1297,18 @@ def bidirectional_contrastive_loss(z_real: torch.Tensor, z_fake: torch.Tensor, t
 def deterministic_contrast_embedding(out: Dict[str, torch.Tensor], mode: str = "mixmu") -> torch.Tensor:
     mode = str(mode).lower()
     if mode in ("encoder_hidden", "hidden", "h") and "encoder_hidden" in out:
-        return out["encoder_hidden"]
-    if mode in ("mu_base", "base_mu") and "mu_base" in out:
-        return out["mu_base"]
-    if mode == "z":
-        return out["z"]
-    if ("q_c" in out) and ("mu_comp" in out):
-        return torch.sum(out["q_c"].unsqueeze(-1) * out["mu_comp"], dim=1)
-    return out["mu"]
+        emb = out["encoder_hidden"]
+    elif mode in ("mu_base", "base_mu") and "mu_base" in out:
+        emb = out["mu_base"]
+    elif mode == "z":
+        emb = out["z"]
+    elif ("q_c" in out) and ("mu_comp" in out):
+        emb = torch.sum(out["q_c"].unsqueeze(-1) * out["mu_comp"], dim=1)
+    else:
+        emb = out["mu"]
+    if emb.dim() != 2:
+        raise ValueError(f"Contrast embedding mode={mode} must return [B, D], got {tuple(emb.shape)}")
+    return emb
 
 
 def supervised_celltype_contrastive_loss(
@@ -1338,51 +1357,23 @@ def gmm_collapse_diagnostics(
         resp = torch.softmax(log_w + log_comp, dim=1)  # (B, K)
         usage = resp.mean(dim=0)  # (K,)
         active_comp = int((usage > float(active_thresh)).sum().item())
-        active_1e2 = int((usage > 1e-2).sum().item())
-        active_1e3 = int((usage > 1e-3).sum().item())
-        active_1e4 = int((usage > 1e-4).sum().item())
-        hard_active = int(torch.unique(resp.argmax(dim=1)).numel())
-        usage_sorted = torch.sort(usage, descending=True).values
-        usage_top5 = float(usage_sorted[: min(5, usage_sorted.numel())].sum().item())
-        usage_max = float(usage.max().item())
-        nonzero_usage = usage[usage > 0]
-        usage_min_nonzero = float(nonzero_usage.min().item()) if nonzero_usage.numel() > 0 else 0.0
         resp_top1 = float(resp.max(dim=1).values.mean().item())
 
         mu = prior.prior_mu.float()  # (K, D)
         if mu.size(0) > 1:
             dmat = torch.cdist(mu, mu, p=2)
             diag_mask = torch.eye(dmat.size(0), device=dmat.device, dtype=torch.bool)
-            off_dmat = dmat.masked_fill(diag_mask, float("nan"))
-            finite_dists = off_dmat[~torch.isnan(off_dmat)]
-            min_mu_dist = float(finite_dists.min().item()) if finite_dists.numel() > 0 else 0.0
-            mean_mu_dist = float(finite_dists.mean().item()) if finite_dists.numel() > 0 else 0.0
+            dmat = dmat.masked_fill(diag_mask, float("inf"))
+            min_mu_dist = float(torch.min(dmat).item())
         else:
             min_mu_dist = 0.0
-            mean_mu_dist = 0.0
-        logvar = prior._expanded_logvar().float()
-        var = torch.exp(logvar)
-        mean_prior_var = float(var.mean().item())
-        max_prior_var = float(var.max().item())
-        mean_prior_std = float(torch.sqrt(var).mean().item())
 
     return {
         "pi_entropy": pi_entropy,
         "k_eff": k_eff,
         "active_comp": active_comp,
-        "active_1e2": active_1e2,
-        "active_1e3": active_1e3,
-        "active_1e4": active_1e4,
-        "hard_active": hard_active,
-        "usage_top5": usage_top5,
-        "usage_max": usage_max,
-        "usage_min_nonzero": usage_min_nonzero,
         "resp_top1": resp_top1,
         "min_mu_dist": min_mu_dist,
-        "mean_mu_dist": mean_mu_dist,
-        "mean_prior_var": mean_prior_var,
-        "max_prior_var": max_prior_var,
-        "mean_prior_std": mean_prior_std,
     }
 
 
@@ -1991,11 +1982,7 @@ def train_gmm_vae_one_epoch(
                 msg += (
                     f", piH={diag['pi_entropy']:.3f}, K_eff={diag['k_eff']:.2f}, "
                     f"activeK={diag['active_comp']}, respTop1={diag['resp_top1']:.3f}, "
-                    f"hardK={diag['hard_active']}, active@1e-2/1e-3/1e-4={diag['active_1e2']}/{diag['active_1e3']}/{diag['active_1e4']}, "
-                    f"usageTop5={diag['usage_top5']:.3f}, usageMax={diag['usage_max']:.3f}, "
-                    f"usageMinNZ={diag['usage_min_nonzero']:.2e}, minMuDist={diag['min_mu_dist']:.3f}, "
-                    f"meanMuDist={diag['mean_mu_dist']:.3f}, meanVar={diag['mean_prior_var']:.3f}, "
-                    f"maxVar={diag['max_prior_var']:.3f}, meanStd={diag['mean_prior_std']:.3f}"
+                    f"minMuDist={diag['min_mu_dist']:.3f}"
                 )
             print(msg)
 
@@ -2386,11 +2373,7 @@ def evaluate_gmm_vae_one_epoch(
                     msg += (
                         f", piH={diag['pi_entropy']:.3f}, K_eff={diag['k_eff']:.2f}, "
                         f"activeK={diag['active_comp']}, respTop1={diag['resp_top1']:.3f}, "
-                        f"hardK={diag['hard_active']}, active@1e-2/1e-3/1e-4={diag['active_1e2']}/{diag['active_1e3']}/{diag['active_1e4']}, "
-                        f"usageTop5={diag['usage_top5']:.3f}, usageMax={diag['usage_max']:.3f}, "
-                        f"usageMinNZ={diag['usage_min_nonzero']:.2e}, minMuDist={diag['min_mu_dist']:.3f}, "
-                        f"meanMuDist={diag['mean_mu_dist']:.3f}, meanVar={diag['mean_prior_var']:.3f}, "
-                        f"maxVar={diag['max_prior_var']:.3f}, meanStd={diag['mean_prior_std']:.3f}"
+                        f"minMuDist={diag['min_mu_dist']:.3f}"
                     )
                 print(msg)
 
