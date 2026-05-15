@@ -94,8 +94,10 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --celltype-contrast-temp 0.1 \
   --lambda-real-recon 0.01 \
   --lambda-prior-pi-balance 0 \
-  --lambda-prior-mu-spread 0.01 \
+  --lambda-prior-mu-spread 1e-3 \
   --prior-mu-spread-tau 0.5 \
+  --lambda-prior-logvar-l2 1e-3 \
+  --prior-logvar-target -0.5 \
   --lambda-post-c-balance 0 \
   --prior-refresh-every 0 \
   --recon-gene-weight-mode cv_ema \

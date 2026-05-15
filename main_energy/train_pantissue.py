@@ -152,6 +152,10 @@ def parse_args():
                         help="Per-cell gene pairs sampled for rank reconstruction.")
     parser.add_argument("--rank-recon-cell-pairs", type=int, default=256,
                         help="Cross-cell pairs sampled per batch for same-gene rank reconstruction.")
+    parser.add_argument("--lambda-prior-logvar-l2", type=float, default=0.0,
+                        help="Weak L2 penalty pulling GMM prior log-variance toward --prior-logvar-target.")
+    parser.add_argument("--prior-logvar-target", type=float, default=-0.5,
+                        help="Target log-variance for --lambda-prior-logvar-l2.")
     parser.add_argument("--mask-aug-prob", type=float, default=1.0,
                         help="For gmm_vae training, probability of applying random observed->unobserved masking per cell.")
     parser.add_argument("--mask-aug-policy", choices=["xverse", "simple"], default="xverse",
@@ -920,8 +924,8 @@ def main():
             prior_mu_spread_tau=args.prior_mu_spread_tau,
             lambda_post_c_balance=args.lambda_post_c_balance,
             lambda_celltype_cls=args.lambda_celltype_cls,
-            lambda_prior_logvar_l2=0.0,
-            prior_logvar_target=0.0,
+            lambda_prior_logvar_l2=args.lambda_prior_logvar_l2,
+            prior_logvar_target=args.prior_logvar_target,
             recon_gene_weight_mode=args.recon_gene_weight_mode,
             recon_gene_weight_alpha=args.recon_gene_weight_alpha,
             recon_gene_weight_ema_momentum=args.recon_gene_weight_ema_momentum,
@@ -1015,8 +1019,8 @@ def main():
                 prior_mu_spread_tau=args.prior_mu_spread_tau,
                 lambda_post_c_balance=args.lambda_post_c_balance,
                 lambda_celltype_cls=args.lambda_celltype_cls,
-                lambda_prior_logvar_l2=0.0,
-                prior_logvar_target=0.0,
+                lambda_prior_logvar_l2=args.lambda_prior_logvar_l2,
+                prior_logvar_target=args.prior_logvar_target,
                 recon_gene_weight_mode=args.recon_gene_weight_mode,
                 recon_gene_weight_alpha=args.recon_gene_weight_alpha,
                 recon_gene_weight_ema_momentum=args.recon_gene_weight_ema_momentum,
