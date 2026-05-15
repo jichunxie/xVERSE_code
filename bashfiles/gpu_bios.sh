@@ -62,7 +62,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --val-num-workers 5 \
   --prefetch-factor 8 \
   --samples-per-id 500 \
-  --lr 1e-4 \
+  --lr 1e-3 \
   --weight-decay 1e-5 \
   --prior-type gmm \
   --recon-loss poisson \
