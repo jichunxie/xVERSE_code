@@ -178,6 +178,8 @@ def parse_args():
                         help="Weight for repulsive regularization between prior component means.")
     parser.add_argument("--prior-mu-spread-tau", type=float, default=1.0,
                         help="Length scale for prior mean spread regularization (smaller => stronger local repulsion).")
+    parser.add_argument("--lambda-prior-factor-l2", type=float, default=0.0,
+                        help="Weak L2 penalty on MFA prior factor loadings to prevent direction variance blow-up.")
     parser.add_argument("--lambda-post-c-balance", type=float, default=0.0,
                         help="Weight for batch-level posterior component usage balance KL(q_mean(c)||uniform).")
     parser.add_argument("--lambda-contrast", type=float, default=1.0,
@@ -724,7 +726,7 @@ def main():
             prior_logvar_min=None,
             prior_logvar_max=args.prior_logvar_max,
             lambda_prior_mu_l2=0.0,
-            lambda_prior_factor_l2=0.0,
+            lambda_prior_factor_l2=args.lambda_prior_factor_l2,
             lambda_prior_pi_balance=args.lambda_prior_pi_balance,
             lambda_prior_mu_spread=args.lambda_prior_mu_spread,
             prior_mu_spread_tau=args.prior_mu_spread_tau,
@@ -787,7 +789,7 @@ def main():
                 prior_logvar_min=None,
                 prior_logvar_max=args.prior_logvar_max,
                 lambda_prior_mu_l2=0.0,
-                lambda_prior_factor_l2=0.0,
+                lambda_prior_factor_l2=args.lambda_prior_factor_l2,
                 lambda_prior_pi_balance=args.lambda_prior_pi_balance,
                 lambda_prior_mu_spread=args.lambda_prior_mu_spread,
                 prior_mu_spread_tau=args.prior_mu_spread_tau,

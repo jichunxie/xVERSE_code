@@ -73,7 +73,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --batch-emb-dim 32 \
   --batch-cond-drop-prob 0.0 \
   --lambda-batchless-recon 0.1 \
-  --prior-logvar-max 0 \
+  --prior-logvar-max 4 \
   --expr-hidden-dim 512 \
   --mask-hidden-dim 512 \
   --dec-hidden-dim 512 \
