@@ -488,6 +488,66 @@ def copy_existing_timing_csv(old_eval_dir: str, out_dir: str):
         print(f"[skip] timing csv not found: {src}")
 
 
+def load_cached_metric_rows(cache_path: str, tissue_name: str, gene_set: str) -> pd.DataFrame:
+    candidates = [cache_path]
+    dfs = []
+    for fp in candidates:
+        if not os.path.exists(fp):
+            continue
+        try:
+            df = pd.read_csv(fp)
+        except Exception as e:
+            print(f"[cache skip] cannot read {fp}: {e}")
+            continue
+        required = {"tissue", "gene_set", "model", "key"}
+        if not required.issubset(df.columns):
+            continue
+        sub = df[
+            (df["tissue"].astype(str) == str(tissue_name))
+            & (df["gene_set"].astype(str) == str(gene_set))
+        ].copy()
+        if not sub.empty:
+            dfs.append(sub)
+    if not dfs:
+        return pd.DataFrame()
+    cached = pd.concat(dfs, ignore_index=True)
+    cached = cached.drop_duplicates(subset=["tissue", "gene_set", "model", "key"], keep="first")
+    return cached
+
+
+def cached_row_for(cached: pd.DataFrame, tissue_name: str, gene_set: str, model_name: str, key: str):
+    if cached.empty:
+        return None
+    sub = cached[
+        (cached["tissue"].astype(str) == str(tissue_name))
+        & (cached["gene_set"].astype(str) == str(gene_set))
+        & (cached["model"].astype(str) == str(model_name))
+        & (cached["key"].astype(str) == str(key))
+    ]
+    if sub.empty:
+        return None
+    return sub.iloc[0].to_dict()
+
+
+def update_metric_cache(cache_path: str, rows: list):
+    if not rows:
+        return
+    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+    new_df = pd.DataFrame(rows)
+    if os.path.exists(cache_path):
+        try:
+            old_df = pd.read_csv(cache_path)
+            df = pd.concat([old_df, new_df], ignore_index=True)
+        except Exception as e:
+            print(f"[cache warn] cannot read existing cache {cache_path}: {e}")
+            df = new_df
+    else:
+        df = new_df
+    df = df.drop_duplicates(subset=["tissue", "gene_set", "model", "key"], keep="last")
+    df.to_csv(cache_path, index=False)
+    print(f"[cache save] {cache_path}")
+
+
 def main():
     args = parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
@@ -513,6 +573,7 @@ def main():
                     "adata": load_merged_manifest_dataset(manifest, dataset_name),
                     "batch_col": str(sub.iloc[0]["batch_key"]),
                     "celltype_col": str(sub.iloc[0]["label_key"]),
+                    "cache_path": str(Path(str(sub.iloc[0]["path"])).parent / "scib_metric_cache_gold.csv"),
                 }
             )
     else:
@@ -525,6 +586,7 @@ def main():
                     "adata": load_merged_tissue(tissue_dir, tissue_name, "all"),
                     "batch_col": "donor_id",
                     "celltype_col": None,
+                    "cache_path": str(Path(tissue_dir) / "scib_metric_cache_all.csv"),
                 }
             )
 
@@ -535,6 +597,9 @@ def main():
             adata = job["adata"]
             adata = maybe_subsample(adata, args.max_cells, args.seed)
             ensure_unintegrated_pca(adata, key="X_pca")
+            cache_path = job["cache_path"]
+            cached_metrics = load_cached_metric_rows(cache_path, tissue_name, gene_set)
+            new_cache_rows = []
 
             celltype_col = job["celltype_col"] or pick_celltype_col(adata.obs)
             if celltype_col is None:
@@ -546,6 +611,11 @@ def main():
                 continue
 
             for model_name, key in model_pairs:
+                cached = None if model_name == "GMVAE" else cached_row_for(cached_metrics, tissue_name, gene_set, model_name, key)
+                if cached is not None:
+                    print(f"[cache] {model_name} key={key}")
+                    all_rows.append(cached)
+                    continue
                 if key not in adata.obsm:
                     print(f"[skip] {model_name} key={key} missing")
                     continue
@@ -575,6 +645,7 @@ def main():
                 }
                 row.update(metrics)
                 all_rows.append(row)
+                new_cache_rows.append(row)
 
                 erow = {
                     "tissue": tissue_name,
@@ -593,6 +664,7 @@ def main():
                 score_csv = os.path.join(args.output_dir, f"{tissue_name}_{gene_set}_scib_score_table.csv")
                 write_score_table(df_tg, score_csv)
                 print(f"[save] {score_csv}")
+                update_metric_cache(cache_path, new_cache_rows)
 
     df_all = pd.DataFrame(all_rows)
     df_err = pd.DataFrame(all_err_rows)
