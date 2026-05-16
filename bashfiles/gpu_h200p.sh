@@ -18,9 +18,9 @@ conda activate SpaRest
 cd /hpc/group/xielab/xj58/xVERSE_code
 export PYTHONUNBUFFERED=1
 
-COMPILED_ROOT="/hpc/group/xielab/xj58/xVerseAtlas/compiled_train_v1_all"
+COMPILED_ROOT="/hpc/group/xielab/xj58/xVerseAtlas/compiled_train_v1"
 CELLTYPE_CSV="/hpc/group/xielab/xj58/sparest_code/standard_type/cellxgene_cell_type_mapped.csv"
-RESULT_DIR="/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_all_tissue0515_nb"
+RESULT_DIR="/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_hierarchy0515_free"
 
 NPROC_PER_NODE=$(python - <<'PY'
 import torch
@@ -43,10 +43,10 @@ echo ">>> RESULT_DIR=${RESULT_DIR}"
 
 if [ "${NPROC_PER_NODE}" -le 1 ]; then
   echo ">>> Single GPU mode: use python -m (no torchrun)"
-  RUN_CMD=(python -u -m main_energy.train_pantissue)
+  RUN_CMD=(python -u -m main_hierarchy.train_pantissue)
 else
   echo ">>> Multi-GPU mode: use torchrun"
-  RUN_CMD=(torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" -m main_energy.train_pantissue)
+  RUN_CMD=(torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" -m main_hierarchy.train_pantissue)
 fi
 
 stdbuf -oL -eL "${RUN_CMD[@]}" \
@@ -68,8 +68,10 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --prior-type gmm \
   --recon-loss nb \
   --latent-dim 256 \
+  --gmm-latent-dim 224 \
   --num-components 64 \
-  --prior-cov-rank 0 \
+  --num-prior-groups 1 \
+  --prior-cov-rank 2 \
   --posterior-cov-rank 0 \
   --batch-emb-dim 32 \
   --use-batch-condition \
@@ -82,7 +84,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --expr-hidden-dim 512 \
   --mask-hidden-dim 512 \
   --dec-hidden-dim 512 \
-  --beta-kl 0.001 \
+  --beta-kl 0.01 \
   --recon-observed-only \
   --mask-aug-prob 1.0 \
   --mask-aug-policy simple \

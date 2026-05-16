@@ -17,7 +17,7 @@ conda activate SpaRest
 cd /hpc/group/xielab/xj58/xVERSE_code
 export PYTHONUNBUFFERED=1
 
-COMPILED_ROOT="/hpc/group/xielab/xj58/xVerseAtlas/compiled_train_v1 d_all"
+COMPILED_ROOT="/hpc/group/xielab/xj58/xVerseAtlas/compiled_train_v1"
 CELLTYPE_CSV="/hpc/group/xielab/xj58/sparest_code/standard_type/cellxgene_cell_type_mapped.csv"
 RESULT_DIR="/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_hierarchy0515_free"
 
@@ -70,7 +70,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --gmm-latent-dim 224 \
   --num-components 64 \
   --num-prior-groups 1 \
-  --prior-cov-rank 4 \
+  --prior-cov-rank 2 \
   --posterior-cov-rank 0 \
   --batch-emb-dim 32 \
   --use-batch-condition \
