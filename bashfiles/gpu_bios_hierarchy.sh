@@ -17,7 +17,7 @@ conda activate SpaRest
 cd /hpc/group/xielab/xj58/xVERSE_code
 export PYTHONUNBUFFERED=1
 
-COMPILED_ROOT="/hpc/group/xielab/xj58/xVerseAtlas/compiled_train_v1"
+COMPILED_ROOT="/hpc/group/xielab/xj58/xVerseAtlas/compiled_train_v1_all"
 CELLTYPE_CSV="/hpc/group/xielab/xj58/sparest_code/standard_type/cellxgene_cell_type_mapped.csv"
 RESULT_DIR="/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_hierarchy0515_free"
 
