@@ -1249,13 +1249,40 @@ def gmm_collapse_diagnostics(
         resp_top1 = float(resp.max(dim=1).values.mean().item())
 
         mu = prior.prior_mu.float()  # (K, D)
+        mean_prior_mu_norm = float(mu.norm(dim=1).mean().item())
         if mu.size(0) > 1:
             dmat = torch.cdist(mu, mu, p=2)
             diag_mask = torch.eye(dmat.size(0), device=dmat.device, dtype=torch.bool)
-            dmat = dmat.masked_fill(diag_mask, float("inf"))
-            min_mu_dist = float(torch.min(dmat).item())
+            off_dmat = dmat.masked_fill(diag_mask, float("nan"))
+            finite_dists = off_dmat[~torch.isnan(off_dmat)]
+            min_mu_dist = float(finite_dists.min().item()) if finite_dists.numel() > 0 else 0.0
+            mean_mu_dist = float(finite_dists.mean().item()) if finite_dists.numel() > 0 else 0.0
         else:
             min_mu_dist = 0.0
+            mean_mu_dist = 0.0
+        prior_logvar = prior._expanded_logvar().float()
+        prior_var = torch.exp(prior_logvar)
+        mean_prior_var = float(prior_var.mean().item())
+        max_prior_var = float(prior_var.max().item())
+        mean_prior_std = float(torch.sqrt(prior_var).mean().item())
+        factor = prior._expanded_factor()
+        if factor is not None:
+            factor = factor.float()
+            factor_var_diag = torch.sum(factor * factor, dim=-1)  # diag(A A^T), (K, D)
+            mean_factor_var = float(factor_var_diag.mean().item())
+            max_factor_var = float(factor_var_diag.max().item())
+            mean_factor_norm = float(factor.norm(dim=(1, 2)).mean().item())
+            total_var = prior_var + factor_var_diag
+            mean_total_var = float(total_var.mean().item())
+            max_total_var = float(total_var.max().item())
+            mean_total_std = float(torch.sqrt(total_var).mean().item())
+        else:
+            mean_factor_var = 0.0
+            max_factor_var = 0.0
+            mean_factor_norm = 0.0
+            mean_total_var = mean_prior_var
+            max_total_var = max_prior_var
+            mean_total_std = mean_prior_std
 
     return {
         "pi_entropy": pi_entropy,
@@ -1263,6 +1290,17 @@ def gmm_collapse_diagnostics(
         "active_comp": active_comp,
         "resp_top1": resp_top1,
         "min_mu_dist": min_mu_dist,
+        "mean_mu_dist": mean_mu_dist,
+        "mean_prior_mu_norm": mean_prior_mu_norm,
+        "mean_prior_var": mean_prior_var,
+        "max_prior_var": max_prior_var,
+        "mean_prior_std": mean_prior_std,
+        "mean_factor_var": mean_factor_var,
+        "max_factor_var": max_factor_var,
+        "mean_factor_norm": mean_factor_norm,
+        "mean_total_var": mean_total_var,
+        "max_total_var": max_total_var,
+        "mean_total_std": mean_total_std,
     }
 
 
@@ -1705,9 +1743,14 @@ def train_gmm_vae_one_epoch(
             if getattr(model.module if hasattr(model, "module") else model, "prior_type", None) == "gmm":
                 diag = gmm_collapse_diagnostics(prior=prior_ref, z=out_fake["z"], tissue_id=tissue_id)
                 msg += (
-                    f", piH={diag['pi_entropy']:.3f}, K_eff={diag['k_eff']:.2f}, "
-                    f"activeK={diag['active_comp']}, respTop1={diag['resp_top1']:.3f}, "
-                    f"minMuDist={diag['min_mu_dist']:.3f}"
+                    f", K_eff={diag['k_eff']:.2f}, activeK={diag['active_comp']}, "
+                    f"respTop1={diag['resp_top1']:.3f}, "
+                    f"minMuDist={diag['min_mu_dist']:.3f}, meanMuDist={diag['mean_mu_dist']:.3f}, "
+                    f"meanPriorMuNorm={diag['mean_prior_mu_norm']:.3f}, meanVar={diag['mean_prior_var']:.3f}, "
+                    f"maxVar={diag['max_prior_var']:.3f}, meanStd={diag['mean_prior_std']:.3f}, "
+                    f"factorVar={diag['mean_factor_var']:.3f}, maxFactorVar={diag['max_factor_var']:.3f}, "
+                    f"factorNorm={diag['mean_factor_norm']:.3f}, totalVar={diag['mean_total_var']:.3f}, "
+                    f"maxTotalVar={diag['max_total_var']:.3f}, totalStd={diag['mean_total_std']:.3f}"
                 )
             print(msg)
 
@@ -1949,9 +1992,14 @@ def evaluate_gmm_vae_one_epoch(
                 if getattr(model.module if hasattr(model, "module") else model, "prior_type", None) == "gmm":
                     diag = gmm_collapse_diagnostics(prior=prior_ref, z=out_real["z"], tissue_id=tissue_id)
                     msg += (
-                        f", piH={diag['pi_entropy']:.3f}, K_eff={diag['k_eff']:.2f}, "
-                        f"activeK={diag['active_comp']}, respTop1={diag['resp_top1']:.3f}, "
-                        f"minMuDist={diag['min_mu_dist']:.3f}"
+                        f", K_eff={diag['k_eff']:.2f}, activeK={diag['active_comp']}, "
+                        f"respTop1={diag['resp_top1']:.3f}, "
+                        f"minMuDist={diag['min_mu_dist']:.3f}, meanMuDist={diag['mean_mu_dist']:.3f}, "
+                        f"meanPriorMuNorm={diag['mean_prior_mu_norm']:.3f}, meanVar={diag['mean_prior_var']:.3f}, "
+                        f"maxVar={diag['max_prior_var']:.3f}, meanStd={diag['mean_prior_std']:.3f}, "
+                        f"factorVar={diag['mean_factor_var']:.3f}, maxFactorVar={diag['max_factor_var']:.3f}, "
+                        f"factorNorm={diag['mean_factor_norm']:.3f}, totalVar={diag['mean_total_var']:.3f}, "
+                        f"maxTotalVar={diag['max_total_var']:.3f}, totalStd={diag['mean_total_std']:.3f}"
                     )
                 print(msg)
 
