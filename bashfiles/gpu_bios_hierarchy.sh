@@ -67,10 +67,10 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --prior-type gmm \
   --recon-loss nb \
   --latent-dim 256 \
-  --gmm-latent-dim 224 \
+  --gmm-latent-dim 248 \
   --num-components 64 \
   --num-prior-groups 1 \
-  --prior-cov-rank 2 \
+  --prior-cov-rank 4 \
   --posterior-cov-rank 0 \
   --batch-emb-dim 32 \
   --use-batch-condition \
