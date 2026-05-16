@@ -89,6 +89,8 @@ def parse_args():
                         help="Keep DataLoader workers alive across epochs.")
     parser.add_argument("--no-persistent-workers", dest="persistent_workers", action="store_false",
                         help="Disable persistent DataLoader workers.")
+    parser.add_argument("--val-persistent-workers", action="store_true", default=False,
+                        help="Keep validation DataLoader workers alive across validation calls.")
     parser.add_argument("--samples-per-id", type=int, default=1000, help="Samples drawn per id in sampler.")
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate.")
     parser.add_argument("--weight-decay", type=float, default=1e-5, help="Weight decay.")
@@ -522,8 +524,7 @@ def main():
     val_loader_kwargs = dict(num_workers=val_num_workers, pin_memory=True)
     if val_num_workers > 0:
         val_loader_kwargs["prefetch_factor"] = args.prefetch_factor
-        # Keep val workers non-persistent to avoid train/val worker resource contention.
-        val_loader_kwargs["persistent_workers"] = False
+        val_loader_kwargs["persistent_workers"] = bool(args.val_persistent_workers)
     log(
         f"[Loader] train_workers={args.num_workers}, train_persistent={args.persistent_workers}, "
         f"val_workers={val_num_workers}, val_persistent={val_loader_kwargs.get('persistent_workers', False)}"

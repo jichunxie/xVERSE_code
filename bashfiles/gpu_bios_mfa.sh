@@ -2,7 +2,7 @@
 #SBATCH -p biostat-gpu
 #SBATCH -A biostat
 #SBATCH --gres=gpu:1
-#SBATCH -c 10
+#SBATCH -c 20
 #SBATCH --mem=100G
 #SBATCH -t 20:00:00
 #SBATCH -J bios_mfa
@@ -60,6 +60,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --val-batch-size 1024 \
   --num-workers 8 \
   --val-num-workers 5 \
+  --val-persistent-workers \
   --prefetch-factor 8 \
   --samples-per-id 500 \
   --lr 1e-3 \
