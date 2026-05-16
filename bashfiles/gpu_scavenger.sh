@@ -29,8 +29,9 @@ run_one_model () {
   RESULT_DIR="$2"
   MODEL_FAMILY="${3:-auto}"
   EMBEDDING_MODE="${4:-mixmu}"
+  CKPT_NAME="${5:-best_contrast_model.pth}"
   EMBEDDING_KEY="xVerse_gmmvae_${EMBEDDING_MODE}"
-  CKPT_PATH="${RESULT_DIR}/best_contrast_model.pth"
+  CKPT_PATH="${RESULT_DIR}/${CKPT_NAME}"
   FIG2_OUT_DIR="/hpc/group/xielab/xj58/xVerse_results/fig2_gmmvae_${MODEL_TAG}"
   FIG2_EVAL_DIR="${FIG2_OUT_DIR}/evaluation_scib_full"
 
@@ -67,7 +68,8 @@ run_one_model () {
       --max-cells 20000
 }
 
-run_one_model "gene_theta_encoder_0515" "/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_all_tissue0515_2" "main_energy" "encoder_hidden"
+run_one_model "mfa_rank6_last" "/hpc/group/xielab/xj58/pretrain_model_celltype/mfa_all_tissue0513_rank6" "main_mfa" "mixmu" "last_model.pth"
+# run_one_model "gene_theta_encoder_0515" "/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_all_tissue0515_2" "main_energy" "encoder_hidden"
 # run_one_model "mfa_rank4" "/hpc/group/xielab/xj58/pretrain_model_celltype/mfa_all_tissue0513_rank4" "main_mfa"
 # run_one_model "nb" "/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_all_tissue0512" "main_energy"
 # run_one_model "poisson" "/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_all_tissue_poisson"
