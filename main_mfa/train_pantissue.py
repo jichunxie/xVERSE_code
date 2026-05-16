@@ -118,7 +118,7 @@ def parse_args():
                         help="For gmm_vae, compute Poisson NLL only on observed genes.")
     parser.add_argument("--recon-loss", choices=["poisson", "nb"], default="poisson",
                         help="Reconstruction loss type for count model.")
-    parser.add_argument("--recon-gene-weight-mode", choices=["none", "inv_log1p_mean_ema"], default="none",
+    parser.add_argument("--recon-gene-weight-mode", choices=["none", "inv_log1p_mean_ema", "cv_ema"], default="none",
                         help="Optional gene-wise reconstruction reweighting mode.")
     parser.add_argument("--recon-gene-weight-alpha", type=float, default=0.0,
                         help="Mixing strength for gene-wise recon weighting. 0 disables weighting.")

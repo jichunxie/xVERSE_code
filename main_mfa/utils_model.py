@@ -449,6 +449,7 @@ class MaskFiLMGMMVAE(nn.Module):
             raise ValueError(f"Unsupported recon_loss_type: {self.recon_loss_type}")
         # EMA mean for optional gene-wise reconstruction reweighting.
         self.register_buffer("recon_gene_mean_ema", torch.zeros(num_genes), persistent=True)
+        self.register_buffer("recon_gene_sq_mean_ema", torch.zeros(num_genes), persistent=True)
         if self.prior_type == "gmm":
             post_hidden = max(64, int(expr_hidden_dim) // 2)
             self.mfa_factor_dim = int(self.prior.R)
@@ -948,7 +949,7 @@ class MaskFiLMGMMVAE(nn.Module):
         alpha = float(alpha)
         if mode == "none" or alpha <= 0.0:
             return None
-        if mode != "inv_log1p_mean_ema":
+        if mode not in ("inv_log1p_mean_ema", "cv_ema"):
             return None
 
         with torch.no_grad():
@@ -956,11 +957,19 @@ class MaskFiLMGMMVAE(nn.Module):
             cnt = torch.clamp(x_count.float(), min=0.0)
             obs_sum = obs.sum(dim=0)
             mean_g = (cnt * obs).sum(dim=0) / torch.clamp(obs_sum, min=1.0)
+            sq_mean_g = (cnt.square() * obs).sum(dim=0) / torch.clamp(obs_sum, min=1.0)
             if self.training:
                 m = max(0.0, min(0.9999, float(ema_momentum)))
                 self.recon_gene_mean_ema.mul_(m).add_((1.0 - m) * mean_g.detach())
+                self.recon_gene_sq_mean_ema.mul_(m).add_((1.0 - m) * sq_mean_g.detach())
             base = self.recon_gene_mean_ema if torch.any(self.recon_gene_mean_ema > 0) else mean_g
-            w = 1.0 / torch.log1p(torch.clamp(base, min=float(eps)) + float(eps))
+            if mode == "cv_ema":
+                sq_base = self.recon_gene_sq_mean_ema if torch.any(self.recon_gene_sq_mean_ema > 0) else sq_mean_g
+                var = torch.clamp(sq_base - base.square(), min=0.0)
+                cv = torch.sqrt(var + float(eps)) / (base + float(eps))
+                w = 1.0 + torch.log1p(cv)
+            else:
+                w = 1.0 / torch.log1p(torch.clamp(base, min=float(eps)) + float(eps))
             w = w / torch.clamp(w.mean(), min=float(eps))
             w = torch.clamp(w, min=float(w_min), max=float(w_max))
             w = (1.0 - alpha) + alpha * w
