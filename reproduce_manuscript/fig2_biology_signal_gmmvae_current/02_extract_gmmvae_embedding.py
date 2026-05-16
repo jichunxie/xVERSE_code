@@ -131,7 +131,7 @@ def build_model_from_ckpt(ckpt_path: str, device: torch.device):
     ModelCls = MFAMaskFiLMGMMVAE if model_family == "main_mfa" else EnergyMaskFiLMGMMVAE
     print(f"[Load] model_family={model_family}")
 
-    model = ModelCls(
+    common_kwargs = dict(
         num_genes=int(saved_args.get("total_gene", 17999)),
         latent_dim=int(saved_args.get("latent_dim", 128)),
         num_components=int(saved_args.get("num_components", 16)),
@@ -148,10 +148,13 @@ def build_model_from_ckpt(ckpt_path: str, device: torch.device):
         num_tissues=num_tissues,
         num_batches=num_batches,
         batch_emb_dim=batch_emb_dim,
-        tissue_emb_dim=tissue_emb_dim,
         batch_cond_drop_prob=0.0,
         recon_loss_type=str(saved_args.get("recon_loss", saved_args.get("recon_loss_type", "poisson"))),
-    ).to(device)
+    )
+    if model_family == "main_mfa":
+        model = ModelCls(**common_kwargs).to(device)
+    else:
+        model = ModelCls(**common_kwargs, tissue_emb_dim=tissue_emb_dim).to(device)
 
     ret = model.load_state_dict(state, strict=False)
     model.eval()
@@ -165,14 +168,16 @@ def _extract_model_embedding(model, x_count, x_mask, embedding_mode: str, tissue
         _, _, h = model.encoder(x_expr=x_expr, x_mask=x_mask.float(), return_hidden=True)
         return h
 
-    out = model(
+    forward_kwargs = dict(
         x_count=x_count,
         x_mask=x_mask,
         tissue_id=tissue_id,
         sample_id=None,
         use_batch_condition=False,
-        use_tissue_condition=True,
     )
+    if model.__class__.__module__.startswith("main_energy"):
+        forward_kwargs["use_tissue_condition"] = True
+    out = model(**forward_kwargs)
     if mode == "mixmu":
         if ("q_c" in out) and ("mu_comp" in out):
             return torch.sum(out["q_c"].unsqueeze(-1) * out["mu_comp"], dim=1)
