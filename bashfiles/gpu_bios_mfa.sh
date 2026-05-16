@@ -59,7 +59,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --batch-size 256 \
   --val-batch-size 1024 \
   --num-workers 8 \
-  --val-num-workers 5 \
+  --val-num-workers 8 \
   --val-persistent-workers \
   --prefetch-factor 8 \
   --samples-per-id 500 \
