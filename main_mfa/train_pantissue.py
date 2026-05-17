@@ -170,8 +170,10 @@ def parse_args():
                         help="Use tissue-conditional MFA prior p(z|tissue).")
     parser.add_argument("--lambda-celltype-cls", type=float, default=0.0,
                         help="Weight for auxiliary celltype cross-entropy loss (ignore label -1).")
+    parser.add_argument("--prior-logvar-min", type=float, default=-4.0,
+                        help="Lower clamp bound for MFA prior log-variance used in KL. Prevents tiny prior variance from exploding KL.")
     parser.add_argument("--prior-logvar-max", type=float, default=4.0,
-                        help="Upper clamp bound for MFA prior log-variance.")
+                        help="Upper clamp bound for MFA prior log-variance used in KL.")
     parser.add_argument("--lambda-prior-pi-balance", type=float, default=0.0,
                         help="Weight for balancing global mixture weights toward uniform.")
     parser.add_argument("--lambda-prior-mu-spread", type=float, default=0.0,
@@ -727,7 +729,7 @@ def main():
             lambda_resp_confidence=0.0,
             resp_temperature=1.0,
             resp_topk=0,
-            prior_logvar_min=None,
+            prior_logvar_min=args.prior_logvar_min,
             prior_logvar_max=args.prior_logvar_max,
             lambda_prior_mu_l2=0.0,
             lambda_prior_factor_l2=args.lambda_prior_factor_l2,
@@ -790,7 +792,7 @@ def main():
                 lambda_resp_anchor=lambda_resp_anchor_t,
                 resp_temperature=1.0,
                 resp_topk=0,
-                prior_logvar_min=None,
+                prior_logvar_min=args.prior_logvar_min,
                 prior_logvar_max=args.prior_logvar_max,
                 lambda_prior_mu_l2=0.0,
                 lambda_prior_factor_l2=args.lambda_prior_factor_l2,

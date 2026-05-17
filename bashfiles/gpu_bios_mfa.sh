@@ -69,10 +69,11 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --recon-loss nb \
   --latent-dim 128 \
   --num-components 64 \
-  --prior-cov-rank 8 \
+  --prior-cov-rank 4 \
   --batch-emb-dim 32 \
   --batch-cond-drop-prob 0.0 \
   --lambda-batchless-recon 0.1 \
+  --prior-logvar-min -4 \
   --prior-logvar-max 4 \
   --expr-hidden-dim 512 \
   --mask-hidden-dim 512 \
@@ -86,12 +87,12 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --lambda-celltype-cls 1 \
   --lambda-contrast 2.0 \
   --lambda-real-recon 0.1 \
-  --lambda-prior-pi-balance 0.1 \
+  --lambda-prior-pi-balance 1e-3 \
   --lambda-prior-mu-spread 0 \
   --prior-mu-spread-tau 0.5 \
-  --lambda-prior-logvar-l2 0 \
+  --lambda-prior-logvar-l2 1e-4 \
   --prior-logvar-target -0.5 \
-  --lambda-post-c-balance 0 \
+  --lambda-post-c-balance 1e-4 \
   --recon-gene-weight-mode cv_ema \
   --recon-gene-weight-alpha 0.5 \
   --recon-cell-weight-mode batch_kmeans \
