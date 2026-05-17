@@ -93,7 +93,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --lambda-prior-logvar-l2 0 \
   --lambda-prior-factor-l2 1e-4\
   --prior-logvar-target -0.5 \
-  --prior-init-epoch 3 \
+  --prior-init-epoch 0 \
   --prior-init-samples 500000 \
   --prior-init-kmeans-iters 20 \
   --prior-init-logvar-mode shrink \
