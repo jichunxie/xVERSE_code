@@ -19,7 +19,7 @@ export PYTHONUNBUFFERED=1
 
 COMPILED_ROOT="/hpc/group/xielab/xj58/xVerseAtlas/compiled_train_v1_all"
 CELLTYPE_CSV="/hpc/group/xielab/xj58/sparest_code/standard_type/cellxgene_cell_type_mapped.csv"
-RESULT_DIR="/hpc/group/xielab/xj58/pretrain_model_celltype/mfa_all_tissue0516_kl0001_con5_g256"
+RESULT_DIR="/hpc/group/xielab/xj58/pretrain_model_celltype/mfa_all_tissue0516_kl0001_con2_g64_prior"
 
 NPROC_PER_NODE=$(python - <<'PY'
 import torch
@@ -68,7 +68,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --prior-type gmm \
   --recon-loss nb \
   --latent-dim 128 \
-  --num-components 256 \
+  --num-components 64 \
   --prior-cov-rank 8 \
   --batch-emb-dim 32 \
   --batch-cond-drop-prob 0.0 \
@@ -84,10 +84,10 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --mask-aug-min-frac 0.1 \
   --mask-aug-max-frac 0.5 \
   --lambda-celltype-cls 1 \
-  --lambda-contrast 5 \
+  --lambda-contrast 2.0 \
   --lambda-real-recon 0.1 \
-  --lambda-prior-pi-balance 0 \
-  --lambda-prior-mu-spread 0 \
+  --lambda-prior-pi-balance 1e-3 \
+  --lambda-prior-mu-spread 1e-3 \
   --prior-mu-spread-tau 1.0 \
   --lambda-post-c-balance 0 \
   --recon-gene-weight-mode cv_ema \
