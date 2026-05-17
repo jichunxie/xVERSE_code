@@ -19,7 +19,7 @@ export PYTHONUNBUFFERED=1
 
 COMPILED_ROOT="/hpc/group/xielab/xj58/xVerseAtlas/compiled_train_v1_all"
 CELLTYPE_CSV="/hpc/group/xielab/xj58/sparest_code/standard_type/cellxgene_cell_type_mapped.csv"
-RESULT_DIR="/hpc/group/xielab/xj58/pretrain_model_celltype/vae_all_tissue0517_con3_nobatch_kl1e-3"
+RESULT_DIR="/hpc/group/xielab/xj58/pretrain_model_celltype/vae_all_tissue0517_con3_nobatch_kl1e-3_con1"
 
 NPROC_PER_NODE=$(python - <<'PY'
 import torch
@@ -83,7 +83,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --mask-aug-min-frac 0.1 \
   --mask-aug-max-frac 0.5 \
   --lambda-celltype-cls 1 \
-  --lambda-contrast 3.0 \
+  --lambda-contrast 1.0 \
   --lambda-real-recon 0.1 \
   --recon-gene-weight-mode none \
   --recon-gene-weight-alpha 0 \

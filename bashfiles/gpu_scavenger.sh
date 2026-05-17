@@ -30,6 +30,8 @@ run_one_model () {
   MODEL_FAMILY="${3:-auto}"
   EMBEDDING_MODE="${4:-mixmu}"
   CKPT_NAME="${5:-best_contrast_model.pth}"
+  shift 5 || true
+  EXTRACT_EXTRA_ARGS=("$@")
   EMBEDDING_KEY="xVerse_gmmvae_${EMBEDDING_MODE}"
   CKPT_PATH="${RESULT_DIR}/${CKPT_NAME}"
   FIG2_OUT_DIR="/hpc/group/xielab/xj58/xVerse_results/fig2_gmmvae_${MODEL_TAG}"
@@ -43,6 +45,7 @@ run_one_model () {
       --liver-dir "${FIG2_LIVER_DIR}" \
       --brain-dir "${FIG2_BRAIN_DIR}" \
       "${DATASET_ARGS[@]}" \
+      "${EXTRACT_EXTRA_ARGS[@]}" \
       --output-dir "${FIG2_OUT_DIR}" \
       --embedding-key "${EMBEDDING_KEY}" \
       --embedding-mode "${EMBEDDING_MODE}"
@@ -68,7 +71,7 @@ run_one_model () {
       --max-cells 20000
 }
 
-run_one_model "vae" "/hpc/group/xielab/xj58/pretrain_model_celltype/vae_all_tissue0517_con3_nobatch_kl1e-3" "main_mfa" "mu_base" "last_model.pth"
+run_one_model "vae" "/hpc/group/xielab/xj58/pretrain_model_celltype/vae_all_tissue0517_con3_nobatch_kl1e-3" "main_mfa" "mu_base" "last_model.pth" --no-prior-viz
 # run_one_model "mfa" "/hpc/group/xielab/xj58/pretrain_model_celltype/mfa_all_tissue0517_con2_16x4_nobatch_nobalance_randomprior5_trunk" "main_mfa" "encoder_hidden" "last_model.pth"
 # run_one_model "gene_theta_encoder_0515" "/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_all_tissue0515_2" "main_energy" "encoder_hidden"
 # run_one_model "mfa_rank4" "/hpc/group/xielab/xj58/pretrain_model_celltype/mfa_all_tissue0513_rank4" "main_mfa"
