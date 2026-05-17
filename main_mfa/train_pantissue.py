@@ -192,10 +192,12 @@ def parse_args():
                         help="Maximum cells used for delayed prior initialization.")
     parser.add_argument("--prior-init-kmeans-iters", type=int, default=20,
                         help="K-means iterations for delayed prior initialization.")
-    parser.add_argument("--prior-init-logvar-mode", choices=["cluster", "constant"], default="constant",
+    parser.add_argument("--prior-init-logvar-mode", choices=["cluster", "constant", "shrink"], default="constant",
                         help="How to initialize MFA diagonal prior log-variance after delayed k-means init.")
     parser.add_argument("--prior-init-logvar-value", type=float, default=0.0,
-                        help="Constant prior log-variance used when --prior-init-logvar-mode constant.")
+                        help="Baseline prior log-variance used by constant/shrink init modes.")
+    parser.add_argument("--prior-init-logvar-shrink-alpha", type=float, default=0.1,
+                        help="For --prior-init-logvar-mode shrink: mix cluster variance into baseline variance by this weight.")
     parser.add_argument("--prior-init-logvar-min", type=float, default=-4.0,
                         help="Lower clamp for initialized prior log-variance.")
     parser.add_argument("--prior-init-logvar-max", type=float, default=2.0,
@@ -464,6 +466,7 @@ def delayed_init_mfa_prior_from_loader(
     kmeans_iters: int,
     logvar_mode: str,
     logvar_value: float,
+    logvar_shrink_alpha: float,
     logvar_min: float,
     logvar_max: float,
     factor_pca: bool,
@@ -503,6 +506,8 @@ def delayed_init_mfa_prior_from_loader(
             logvar_rows = []
             factor_rows = []
             global_var = torch.var(z, dim=0, unbiased=False).clamp_min(1e-6)
+            base_var = torch.full((d,), float(math.exp(float(logvar_value))), device=device, dtype=z.dtype)
+            shrink_alpha = min(max(float(logvar_shrink_alpha), 0.0), 1.0)
             for kk in range(k):
                 members = z[assign == kk]
                 if str(logvar_mode) == "constant":
@@ -516,6 +521,8 @@ def delayed_init_mfa_prior_from_loader(
                         var = torch.var(members - centers[kk].view(1, -1), dim=0, unbiased=False).clamp_min(1e-6)
                     else:
                         var = global_var
+                    if str(logvar_mode) == "shrink":
+                        var = (1.0 - shrink_alpha) * base_var + shrink_alpha * var
                     logvar_rows.append(torch.log(var).clamp(float(logvar_min), float(logvar_max)))
                 if r > 0:
                     if bool(factor_pca) and members.size(0) >= 2:
@@ -530,6 +537,7 @@ def delayed_init_mfa_prior_from_loader(
                 f"pi_min={pi.min().item():.4f}, pi_max={pi.max().item():.4f}, "
                 f"logvar_min={logvar.min().item():.3f}, logvar_max={logvar.max().item():.3f}, "
                 f"logvar_mode={logvar_mode}, logvar_value={float(logvar_value):.3f}, "
+                f"logvar_shrink_alpha={shrink_alpha:.3f}, "
                 f"factor_pca={bool(factor_pca)}, factor_scale={float(factor_scale):.4f}, "
                 f"factor_std={float(factor_std):.4f}"
             )
@@ -1004,6 +1012,7 @@ def main():
                 kmeans_iters=args.prior_init_kmeans_iters,
                 logvar_mode=args.prior_init_logvar_mode,
                 logvar_value=args.prior_init_logvar_value,
+                logvar_shrink_alpha=args.prior_init_logvar_shrink_alpha,
                 logvar_min=args.prior_init_logvar_min,
                 logvar_max=args.prior_init_logvar_max,
                 factor_pca=args.prior_init_factor_pca,
