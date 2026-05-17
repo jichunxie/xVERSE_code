@@ -72,7 +72,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --prior-cov-rank 16 \
   --batch-emb-dim 32 \
   --batch-cond-drop-prob 0.0 \
-  --lambda-batchless-recon 0.1 \
+  --lambda-batchless-recon 1 \
   --prior-logvar-min -4 \
   --prior-logvar-max 4 \
   --expr-hidden-dim 512 \
