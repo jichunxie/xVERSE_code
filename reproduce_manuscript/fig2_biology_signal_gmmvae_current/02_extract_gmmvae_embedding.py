@@ -75,6 +75,11 @@ def parse_args():
     ap.add_argument("--num-workers", type=int, default=8)
     ap.add_argument("--max-files-per-set", type=int, default=0, help="0 means all files.")
     ap.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
+    ap.add_argument("--no-prior-viz", action="store_true", help="Disable prior visualization before embedding extraction.")
+    ap.add_argument("--prior-viz-dir", default=None, help="Directory for prior visualization outputs. Defaults to output-dir/prior_viz.")
+    ap.add_argument("--prior-viz-max-components", type=int, default=32, help="Max top-pi components for factor-arrow overlay.")
+    ap.add_argument("--prior-viz-factor-scale", type=float, default=1.0, help="Scale for projected MFA factor arrows.")
+    ap.add_argument("--prior-viz-grid", type=int, default=120, help="Grid size for projected prior density surface.")
     return ap.parse_args()
 
 
@@ -159,6 +164,199 @@ def build_model_from_ckpt(ckpt_path: str, device: torch.device):
     ret = model.load_state_dict(state, strict=False)
     model.eval()
     return model, ret
+
+
+def _pca2(x: np.ndarray):
+    x = np.asarray(x, dtype=np.float64)
+    center = x.mean(axis=0, keepdims=True)
+    xc = x - center
+    _, _, vt = np.linalg.svd(xc, full_matrices=False)
+    basis = vt[:2].T
+    coords = xc @ basis
+    return coords, basis, center.reshape(-1)
+
+
+def _gaussian_pdf_2d(points: np.ndarray, mean: np.ndarray, cov: np.ndarray) -> np.ndarray:
+    cov = np.asarray(cov, dtype=np.float64)
+    cov = cov + np.eye(2, dtype=np.float64) * 1e-6
+    inv = np.linalg.inv(cov)
+    det = max(float(np.linalg.det(cov)), 1e-12)
+    delta = points - mean.reshape(1, 2)
+    maha = np.einsum("ni,ij,nj->n", delta, inv, delta)
+    return np.exp(-0.5 * maha) / (2.0 * np.pi * np.sqrt(det))
+
+
+def _ellipse_xy(mean: np.ndarray, cov: np.ndarray, nsig: float = 2.0, n_points: int = 96):
+    cov = np.asarray(cov, dtype=np.float64) + np.eye(2, dtype=np.float64) * 1e-8
+    vals, vecs = np.linalg.eigh(cov)
+    vals = np.clip(vals, 1e-12, None)
+    order = np.argsort(vals)[::-1]
+    vals = vals[order]
+    vecs = vecs[:, order]
+    theta = np.linspace(0.0, 2.0 * np.pi, int(n_points))
+    circle = np.stack([np.cos(theta), np.sin(theta)], axis=0)
+    transform = vecs @ np.diag(nsig * np.sqrt(vals))
+    xy = transform @ circle + mean.reshape(2, 1)
+    return xy[0], xy[1]
+
+
+def visualize_prior(model, output_dir: Path, max_components: int = 32, factor_scale: float = 1.0, grid_size: int = 120):
+    """Save PCA/density/factor visualizations for GMM/MFA prior."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
+
+    prior = getattr(model, "prior", None)
+    if prior is None or not hasattr(prior, "prior_mu"):
+        print("[PriorViz] skipped: model has no mixture prior.")
+        return
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    with torch.no_grad():
+        mu = prior.prior_mu.detach().float().cpu().numpy()
+        pi = torch.softmax(prior.pi_logits.detach().float(), dim=0).cpu().numpy()
+        logvar = prior._expanded_logvar().detach().float().cpu().numpy()
+        factor_t = prior._expanded_factor()
+        factor = None if factor_t is None else factor_t.detach().float().cpu().numpy()
+
+    if mu.ndim != 2 or mu.shape[0] < 2:
+        print("[PriorViz] skipped: not enough prior components.")
+        return
+
+    coords, basis, center = _pca2(mu)
+    diag_var = np.exp(logvar)
+    k, d = mu.shape
+    cov2 = np.zeros((k, 2, 2), dtype=np.float64)
+    factor2 = None
+    for idx in range(k):
+        cov2[idx] = basis.T @ (diag_var[idx][:, None] * basis)
+        if factor is not None:
+            f2 = factor[idx].T @ basis  # (R, 2), one u-std direction in PCA plane.
+            cov2[idx] += f2.T @ f2
+            if factor2 is None:
+                factor2 = np.zeros((k, f2.shape[0], 2), dtype=np.float64)
+            factor2[idx] = f2
+
+    pad_x = max(float(np.ptp(coords[:, 0])) * 0.2, 1e-3)
+    pad_y = max(float(np.ptp(coords[:, 1])) * 0.2, 1e-3)
+    x_grid = np.linspace(coords[:, 0].min() - pad_x, coords[:, 0].max() + pad_x, int(grid_size))
+    y_grid = np.linspace(coords[:, 1].min() - pad_y, coords[:, 1].max() + pad_y, int(grid_size))
+    xx, yy = np.meshgrid(x_grid, y_grid)
+    grid_points = np.column_stack([xx.ravel(), yy.ravel()])
+
+    density_grid = np.zeros(grid_points.shape[0], dtype=np.float64)
+    density_center = np.zeros(k, dtype=np.float64)
+    for idx in range(k):
+        density_grid += pi[idx] * _gaussian_pdf_2d(grid_points, coords[idx], cov2[idx])
+        density_center += pi[idx] * _gaussian_pdf_2d(coords, coords[idx], cov2[idx])
+    zz = density_grid.reshape(xx.shape)
+
+    table = pd.DataFrame(
+        {
+            "component": np.arange(k),
+            "pi": pi,
+            "pc1": coords[:, 0],
+            "pc2": coords[:, 1],
+            "density_2d": density_center,
+            "mu_norm": np.linalg.norm(mu, axis=1),
+            "diag_var_mean": diag_var.mean(axis=1),
+            "total_var_mean": np.trace(cov2, axis1=1, axis2=2) / 2.0,
+        }
+    )
+    table.to_csv(output_dir / "prior_pca_components.csv", index=False)
+
+    fig = plt.figure(figsize=(8, 6), dpi=180)
+    ax = fig.add_subplot(111, projection="3d")
+    ax.plot_surface(xx, yy, zz, cmap="viridis", alpha=0.35, linewidth=0, antialiased=True)
+    sizes = 30.0 + 600.0 * pi / max(float(pi.max()), 1e-12)
+    sca = ax.scatter(coords[:, 0], coords[:, 1], density_center, c=pi, s=sizes, cmap="magma", edgecolor="k", linewidth=0.3)
+    ax.set_xlabel("prior mu PC1")
+    ax.set_ylabel("prior mu PC2")
+    ax.set_zlabel("projected mixture density")
+    ax.set_title("MFA prior centers on PCA density surface")
+    fig.colorbar(sca, ax=ax, shrink=0.65, pad=0.1, label="mixture weight pi")
+    fig.tight_layout()
+    fig.savefig(output_dir / "prior_mu_pca_density_3d.png")
+    plt.close(fig)
+
+    fig, ax = plt.subplots(figsize=(8, 7), dpi=180)
+    sca = ax.scatter(coords[:, 0], coords[:, 1], c=pi, s=sizes, cmap="magma", edgecolor="k", linewidth=0.3, zorder=3)
+    ax.contour(xx, yy, zz, levels=12, cmap="viridis", alpha=0.55, linewidths=0.8)
+    if factor2 is not None:
+        top = np.argsort(-pi)[: max(1, min(int(max_components), k))]
+        colors = plt.get_cmap("tab10")
+        for idx in top:
+            for r in range(factor2.shape[1]):
+                dx, dy = factor2[idx, r] * float(factor_scale)
+                ax.arrow(
+                    coords[idx, 0],
+                    coords[idx, 1],
+                    dx,
+                    dy,
+                    color=colors(r % 10),
+                    alpha=0.28,
+                    width=0.0,
+                    head_width=0.025 * max(np.ptp(coords[:, 0]), np.ptp(coords[:, 1]), 1.0),
+                    length_includes_head=True,
+                    zorder=2,
+                )
+    for idx in range(k):
+        ax.text(coords[idx, 0], coords[idx, 1], str(idx), fontsize=6, ha="center", va="center", zorder=4)
+    ax.set_xlabel("prior mu PC1")
+    ax.set_ylabel("prior mu PC2")
+    ax.set_title("MFA prior centers and projected factor directions")
+    ax.set_aspect("equal", adjustable="datalim")
+    fig.colorbar(sca, ax=ax, label="mixture weight pi")
+    fig.tight_layout()
+    fig.savefig(output_dir / "prior_mu_pca_factor_arrows.png")
+    plt.close(fig)
+
+    fig, ax = plt.subplots(figsize=(8, 7), dpi=180)
+    ax.contour(xx, yy, zz, levels=12, cmap="Greys", alpha=0.45, linewidths=0.8)
+    order = np.argsort(pi)
+    cmap = plt.get_cmap("magma")
+    pi_min = float(pi.min())
+    pi_ptp = max(float(np.ptp(pi)), 1e-12)
+    for idx in order:
+        color = cmap((float(pi[idx]) - pi_min) / pi_ptp)
+        ex, ey = _ellipse_xy(coords[idx], cov2[idx], nsig=2.0)
+        ax.plot(ex, ey, color=color, alpha=0.55, linewidth=1.0)
+    sca = ax.scatter(coords[:, 0], coords[:, 1], c=pi, s=sizes, cmap="magma", edgecolor="k", linewidth=0.3, zorder=3)
+    for idx in range(k):
+        ax.text(coords[idx, 0], coords[idx, 1], str(idx), fontsize=6, ha="center", va="center", zorder=4)
+    ax.set_xlabel("prior mu PC1")
+    ax.set_ylabel("prior mu PC2")
+    ax.set_title("Projected MFA Gaussian ellipses (2 sigma)")
+    ax.set_aspect("equal", adjustable="datalim")
+    fig.colorbar(sca, ax=ax, label="mixture weight pi")
+    fig.tight_layout()
+    fig.savefig(output_dir / "prior_mu_pca_gaussian_ellipses.png")
+    plt.close(fig)
+
+    rng = np.random.default_rng(0)
+    n_sample = 8000
+    comp = rng.choice(k, size=n_sample, replace=True, p=pi / np.clip(pi.sum(), 1e-12, None))
+    sample_pc = np.zeros((n_sample, 2), dtype=np.float64)
+    for idx in range(k):
+        mask = comp == idx
+        n_idx = int(mask.sum())
+        if n_idx == 0:
+            continue
+        sample_pc[mask] = rng.multivariate_normal(mean=coords[idx], cov=cov2[idx] + np.eye(2) * 1e-6, size=n_idx)
+    fig, ax = plt.subplots(figsize=(8, 7), dpi=180)
+    ax.scatter(sample_pc[:, 0], sample_pc[:, 1], c=comp, cmap="tab20", s=2, alpha=0.35, linewidth=0)
+    ax.scatter(coords[:, 0], coords[:, 1], c="black", s=18, marker="x", linewidth=0.8)
+    ax.set_xlabel("prior mu PC1")
+    ax.set_ylabel("prior mu PC2")
+    ax.set_title("Samples from projected MFA prior")
+    ax.set_aspect("equal", adjustable="datalim")
+    fig.tight_layout()
+    fig.savefig(output_dir / "prior_sample_pca.png")
+    plt.close(fig)
+
+    print(f"[PriorViz] saved to {output_dir}")
 
 
 def _extract_model_embedding(model, x_count, x_mask, embedding_mode: str, tissue_id=None):
@@ -422,6 +620,19 @@ def main():
         print(f"[Load] missing_keys={load_ret.missing_keys[:20]}")
     if load_ret.unexpected_keys:
         print(f"[Load] unexpected_keys={load_ret.unexpected_keys[:20]}")
+
+    if not args.no_prior_viz:
+        prior_viz_dir = Path(args.prior_viz_dir) if args.prior_viz_dir else Path(args.output_dir) / "prior_viz"
+        try:
+            visualize_prior(
+                model=model,
+                output_dir=prior_viz_dir,
+                max_components=args.prior_viz_max_components,
+                factor_scale=args.prior_viz_factor_scale,
+                grid_size=args.prior_viz_grid,
+            )
+        except Exception as exc:
+            print(f"[PriorViz][WARN] failed: {exc}")
 
     tissue_map = {"liver": 31, "brain": 7}
     timing_records = []
