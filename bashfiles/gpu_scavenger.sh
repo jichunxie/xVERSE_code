@@ -71,7 +71,7 @@ run_one_model () {
       --max-cells 20000
 }
 
-run_one_model "vae" "/hpc/group/xielab/xj58/pretrain_model_celltype/vae_all_tissue0517_con3_nobatch_kl1e-3_con1" "main_mfa" "mu_base" "last_model.pth" --no-prior-viz
+run_one_model "vae" "/hpc/group/xielab/xj58/pretrain_model_celltype/vae_all_tissue0517_con3_nobatch_kl1e-3_con1" "main_mfa" "encoder_hidden" "last_model.pth" --no-prior-viz
 # run_one_model "mfa" "/hpc/group/xielab/xj58/pretrain_model_celltype/mfa_all_tissue0517_con2_16x4_nobatch_nobalance_randomprior5_trunk" "main_mfa" "encoder_hidden" "last_model.pth"
 # run_one_model "gene_theta_encoder_0515" "/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_all_tissue0515_2" "main_energy" "encoder_hidden"
 # run_one_model "mfa_rank4" "/hpc/group/xielab/xj58/pretrain_model_celltype/mfa_all_tissue0513_rank4" "main_mfa"
