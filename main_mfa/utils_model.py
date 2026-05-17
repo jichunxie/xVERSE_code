@@ -1721,9 +1721,31 @@ def train_gmm_vae_one_epoch(
                 kl_c_dbg = out_fake.get("kl_c_loss", torch.zeros_like(kl))
                 kl_u_dbg = out_fake.get("kl_u_loss", torch.zeros_like(kl))
                 kl_eps_dbg = out_fake.get("kl_eps_loss", torch.zeros_like(kl))
+                prior_factor_l2_dbg = out_fake.get("prior_factor_l2_loss", torch.zeros_like(kl))
+                prior_logvar_l2_dbg = out_fake.get("prior_logvar_l2_loss", torch.zeros_like(kl))
+                prior_mu_spread_dbg = out_fake.get("prior_mu_spread_loss", torch.zeros_like(kl))
+                post_c_balance_dbg = out_fake.get("post_c_balance_loss", torch.zeros_like(kl))
                 rate = out_fake.get("rate", torch.empty(0, device=x_count.device))
                 theta = out_fake.get("nb_theta", torch.empty(0, device=x_count.device))
                 z_cur = out_fake.get("z", torch.empty(0, device=x_count.device))
+                term_checks = {
+                    "loss": loss,
+                    "fake_loss": out_fake.get("loss", torch.zeros_like(kl)),
+                    "recon": recon,
+                    "kl": kl,
+                    "real_recon": real_recon,
+                    "batchless_recon": batchless_recon,
+                    "contrast": contrast,
+                    "cls": celltype_cls,
+                    "prior_factor_l2": prior_factor_l2_dbg,
+                    "prior_logvar_l2": prior_logvar_l2_dbg,
+                    "prior_mu_spread": prior_mu_spread_dbg,
+                    "post_c_balance": post_c_balance_dbg,
+                }
+                bad_terms = [
+                    name for name, val in term_checks.items()
+                    if torch.is_tensor(val) and val.numel() > 0 and (not torch.isfinite(val.detach()).all())
+                ]
                 diag_msg = ""
                 if rate.numel() > 0:
                     rate_f = rate.detach().float()
@@ -1745,7 +1767,13 @@ def train_gmm_vae_one_epoch(
                     f"Recon={recon.item():.4f}, KL={kl.item():.4f}, "
                     f"KLc={kl_c_dbg.item():.4f}, KLu={kl_u_dbg.item():.4f}, KLeps={kl_eps_dbg.item():.4f}, "
                     f"Contrast={contrast.item():.4f}, "
-                    f"cls={celltype_cls.item():.4f}{diag_msg}"
+                    f"cls={celltype_cls.item():.4f}, RealRecon={real_recon.item():.4f}, "
+                    f"BatchlessRecon={batchless_recon.item():.4f}, "
+                    f"priorFactorL2={prior_factor_l2_dbg.item():.4g}, "
+                    f"priorLogvarL2={prior_logvar_l2_dbg.item():.4g}, "
+                    f"priorMuSpread={prior_mu_spread_dbg.item():.4g}, "
+                    f"postCBal={post_c_balance_dbg.item():.4g}, "
+                    f"badTerms={bad_terms}{diag_msg}"
                 )
             optimizer.zero_grad(set_to_none=True)
             continue
