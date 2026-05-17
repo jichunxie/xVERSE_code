@@ -87,7 +87,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --lambda-contrast 2.0 \
   --lambda-real-recon 0.1 \
   --lambda-prior-pi-balance 1e-3 \
-  --lambda-prior-mu-spread 1e-3 \
+  --lambda-prior-mu-spread 0 \
   --prior-mu-spread-tau 1.0 \
   --lambda-post-c-balance 0 \
   --recon-gene-weight-mode cv_ema \
