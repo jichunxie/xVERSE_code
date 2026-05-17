@@ -115,6 +115,10 @@ def parse_args():
                         help="Factor rank R for each MFA prior component covariance: diag + A_k A_k^T.")
     parser.add_argument("--prior-shared-cov", action="store_true",
                         help="Ignored in main_mfa; MFA prior always uses component-specific covariance/factors.")
+    parser.add_argument("--prior-mu-init", choices=["normal", "sphere", "zero"], default="normal",
+                        help="Initial placement of prior component means before any delayed prior init.")
+    parser.add_argument("--prior-mu-init-radius", type=float, default=1.0,
+                        help="Radius used by --prior-mu-init sphere.")
     parser.add_argument("--posterior-cov-rank", type=int, default=0,
                         help="Ignored in main_mfa; q(u|x,c) uses --prior-cov-rank as the explicit MFA factor dimension.")
     parser.add_argument("--expr-hidden-dim", type=int, default=1024, help="Expression encoder hidden dim.")
@@ -834,6 +838,8 @@ def main():
         prior_cov_rank=args.prior_cov_rank,
         prior_shared_covariance=False,
         posterior_cov_rank=args.posterior_cov_rank,
+        prior_mu_init=args.prior_mu_init,
+        prior_mu_init_radius=args.prior_mu_init_radius,
         expr_hidden_dim=args.expr_hidden_dim,
         mask_hidden_dim=args.mask_hidden_dim,
         dec_hidden_dim=args.dec_hidden_dim,

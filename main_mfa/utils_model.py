@@ -106,6 +106,8 @@ class GaussianMixturePrior(nn.Module):
         conditional_on_tissue: bool = False,
         num_tissues: int = 0,
         shared_covariance: bool = False,
+        mu_init: str = "normal",
+        mu_init_radius: float = 1.0,
     ):
         super().__init__()
         self.K = int(num_components)
@@ -117,7 +119,14 @@ class GaussianMixturePrior(nn.Module):
         self.num_tissues = max(0, int(num_tissues))
         # Global (fallback/backward-compat) parameters.
         self.pi_logits = nn.Parameter(torch.zeros(self.K))
-        self.prior_mu = nn.Parameter(torch.randn(self.K, self.D))
+        if str(mu_init) == "sphere":
+            init_mu = torch.randn(self.K, self.D)
+            init_mu = F.normalize(init_mu, dim=-1) * float(mu_init_radius)
+        elif str(mu_init) == "zero":
+            init_mu = torch.zeros(self.K, self.D)
+        else:
+            init_mu = torch.randn(self.K, self.D)
+        self.prior_mu = nn.Parameter(init_mu)
         self.prior_logvar = nn.Parameter(torch.zeros(self.K, self.D))
         if self.R > 0:
             self.prior_factor = nn.Parameter(torch.randn(self.K, self.D, self.R) * 0.01)
@@ -393,6 +402,8 @@ class MaskFiLMGMMVAE(nn.Module):
         prior_cov_rank: int = 8,
         prior_shared_covariance: bool = False,
         posterior_cov_rank: int = 0,
+        prior_mu_init: str = "normal",
+        prior_mu_init_radius: float = 1.0,
         num_cell_types: int = 0,
         conditional_prior_on_tissue: bool = False,
         num_tissues: int = 0,
@@ -419,6 +430,8 @@ class MaskFiLMGMMVAE(nn.Module):
             conditional_on_tissue=conditional_prior_on_tissue,
             num_tissues=num_tissues,
             shared_covariance=prior_shared_covariance,
+            mu_init=prior_mu_init,
+            mu_init_radius=prior_mu_init_radius,
         )
         self.num_batches = max(0, int(num_batches))
         self.batch_emb_dim = max(0, int(batch_emb_dim))
