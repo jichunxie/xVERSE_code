@@ -10,6 +10,7 @@ This mirrors the original fig2 xVerse embedding extraction flow but uses:
 
 import argparse
 import os
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -515,9 +516,8 @@ def visualize_prior(
         _plot_prior_sample_kde(active_idx, "prior_sample_active", "active components", seed=0)
         _plot_prior_sample_kde(np.arange(k, dtype=int), "prior_sample_all", "all components", seed=1)
         # Backward-compatible copies for scripts expecting the old filenames.
-        (output_dir / "prior_sample_active_embedding.csv").replace(output_dir / "prior_sample_embedding.csv")
-        (output_dir / "prior_sample_active_kde.png").replace(output_dir / "prior_sample_umap_kde.png")
-        _plot_prior_sample_kde(active_idx, "prior_sample_active", "active components", seed=0)
+        shutil.copyfile(output_dir / "prior_sample_active_embedding.csv", output_dir / "prior_sample_embedding.csv")
+        shutil.copyfile(output_dir / "prior_sample_active_kde.png", output_dir / "prior_sample_umap_kde.png")
 
     fig = plt.figure(figsize=(8, 6), dpi=180)
     ax = fig.add_subplot(111, projection="3d")
