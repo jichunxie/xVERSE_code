@@ -70,8 +70,10 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --latent-dim 128 \
   --num-components 64 \
   --prior-cov-rank 16 \
-  --prior-mu-init sphere \
-  --prior-mu-init-radius 5 \
+  --prior-mu-init grouped_sphere \
+  --prior-mu-init-radius 2 \
+  --prior-mu-init-groups 8 \
+  --prior-mu-init-local-radius 0.5 \
   --batch-emb-dim 0 \
   --batch-cond-drop-prob 0.0 \
   --lambda-batchless-recon 0 \
