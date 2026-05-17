@@ -103,6 +103,10 @@ def parse_args():
     parser.add_argument("--last-ckpt-name", default="last_model.pth", help="Filename for last checkpoint.")
     parser.add_argument("--best-ckpt-name", default="best_model.pth", help="Filename for best checkpoint.")
     parser.add_argument("--beta-kl", type=float, default=0.01, help="KL weight.")
+    parser.add_argument("--beta-kl-warmup-epochs", type=int, default=0,
+                        help="Linearly warm KL weight from --beta-kl-warmup-start to --beta-kl over this many epochs. 0 disables.")
+    parser.add_argument("--beta-kl-warmup-start", type=float, default=0.0,
+                        help="Starting KL weight for linear KL warmup.")
     parser.add_argument("--prior-type", choices=["gmm", "gaussian"], default="gmm",
                         help="Latent prior type. 'gaussian' uses N(0,I) with closed-form KL.")
     parser.add_argument("--latent-dim", type=int, default=128, help="Latent dim.")
@@ -353,6 +357,15 @@ def _apply_training_stage(base_model, stage: str):
     _set_requires_grad(getattr(base_model, "post_eps_mu", None), True)
     _set_requires_grad(getattr(base_model, "post_eps_logvar", None), True)
     _set_requires_grad(getattr(base_model, "score_head", None), True)
+
+
+def _linear_kl_warmup(epoch: int, target_beta: float, warmup_epochs: int, start_beta: float = 0.0) -> float:
+    if int(warmup_epochs) <= 0:
+        return float(target_beta)
+    if int(warmup_epochs) == 1:
+        return float(target_beta)
+    progress = min(max(float(epoch - 1) / float(max(int(warmup_epochs) - 1, 1)), 0.0), 1.0)
+    return float(start_beta) + progress * (float(target_beta) - float(start_beta))
 
 
 def _kmeans_torch(x: torch.Tensor, k: int, iters: int, seed: int):
@@ -912,7 +925,12 @@ def main():
     while epoch_id <= args.num_epochs:
         start_time = time.time()
         log(f"\n[Epoch {epoch_id}] Starting...")
-        beta_t = float(args.beta_kl)
+        beta_t = _linear_kl_warmup(
+            epoch=epoch_id,
+            target_beta=args.beta_kl,
+            warmup_epochs=args.beta_kl_warmup_epochs,
+            start_beta=args.beta_kl_warmup_start,
+        )
         stage_name = "stage3"
         base_model = _unwrap_model(model)
         _apply_training_stage(base_model, stage_name)

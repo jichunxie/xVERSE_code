@@ -448,17 +448,17 @@ def visualize_prior(
     fig.savefig(output_dir / "prior_mu_active_mds_distances.png")
     plt.close(fig)
 
-    if int(sample_n) > 0:
+    def _plot_prior_sample_kde(component_idx: np.ndarray, stem: str, title_suffix: str, seed: int):
         prior_samples, prior_sample_comp = _sample_mfa_prior(
             mu=mu,
             logvar=logvar,
             factor=factor,
             pi=pi,
-            active_idx=active_idx,
+            active_idx=component_idx,
             n_sample=int(sample_n),
-            seed=0,
+            seed=int(seed),
         )
-        sample_emb, sample_method = _embed_prior_samples(prior_samples, method=sample_embed, seed=0)
+        sample_emb, sample_method = _embed_prior_samples(prior_samples, method=sample_embed, seed=int(seed))
         sample_df = pd.DataFrame(
             {
                 "x": sample_emb[:, 0],
@@ -466,7 +466,7 @@ def visualize_prior(
                 "component": prior_sample_comp,
             }
         )
-        sample_df.to_csv(output_dir / "prior_sample_embedding.csv", index=False)
+        sample_df.to_csv(output_dir / f"{stem}_embedding.csv", index=False)
 
         fig, ax = plt.subplots(figsize=(8, 7), dpi=180)
         try:
@@ -494,8 +494,8 @@ def visualize_prior(
             alpha=0.22,
             linewidth=0,
         )
-        # Place component labels at the median embedded sample position for each active component.
-        for idx in active_idx:
+        # Place component labels at the median embedded sample position for each sampled component.
+        for idx in component_idx:
             mask = prior_sample_comp == idx
             if not np.any(mask):
                 continue
@@ -505,11 +505,19 @@ def visualize_prior(
             ax.text(cx, cy, str(idx), fontsize=7, ha="center", va="center", zorder=5)
         ax.set_xlabel(f"{sample_method.upper()}1")
         ax.set_ylabel(f"{sample_method.upper()}2")
-        ax.set_title(f"True high-dimensional MFA prior samples with KDE ({sample_method})")
+        ax.set_title(f"True high-dimensional MFA prior samples with KDE ({title_suffix}, {sample_method})")
         ax.set_aspect("equal", adjustable="datalim")
         fig.tight_layout()
-        fig.savefig(output_dir / "prior_sample_umap_kde.png")
+        fig.savefig(output_dir / f"{stem}_kde.png")
         plt.close(fig)
+
+    if int(sample_n) > 0:
+        _plot_prior_sample_kde(active_idx, "prior_sample_active", "active components", seed=0)
+        _plot_prior_sample_kde(np.arange(k, dtype=int), "prior_sample_all", "all components", seed=1)
+        # Backward-compatible copies for scripts expecting the old filenames.
+        (output_dir / "prior_sample_active_embedding.csv").replace(output_dir / "prior_sample_embedding.csv")
+        (output_dir / "prior_sample_active_kde.png").replace(output_dir / "prior_sample_umap_kde.png")
+        _plot_prior_sample_kde(active_idx, "prior_sample_active", "active components", seed=0)
 
     fig = plt.figure(figsize=(8, 6), dpi=180)
     ax = fig.add_subplot(111, projection="3d")
