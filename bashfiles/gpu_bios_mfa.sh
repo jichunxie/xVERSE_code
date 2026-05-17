@@ -92,7 +92,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --prior-mu-spread-tau 0.5 \
   --lambda-prior-logvar-l2 0 \
   --prior-logvar-target -0.5 \
-  --prior-init-epoch 3 \
+  --prior-init-epoch 1 \
   --prior-init-samples 200000 \
   --prior-init-kmeans-iters 20 \
   --prior-init-logvar-min -4 \
