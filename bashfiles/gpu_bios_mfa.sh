@@ -78,7 +78,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --expr-hidden-dim 512 \
   --mask-hidden-dim 512 \
   --dec-hidden-dim 512 \
-  --beta-kl 1e-3 \
+  --beta-kl 5e-3 \
   --recon-observed-only \
   --mask-aug-prob 1.0 \
   --mask-aug-policy simple \
