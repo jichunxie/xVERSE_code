@@ -78,6 +78,7 @@ def parse_args():
     ap.add_argument("--no-prior-viz", action="store_true", help="Disable prior visualization before embedding extraction.")
     ap.add_argument("--prior-viz-dir", default=None, help="Directory for prior visualization outputs. Defaults to output-dir/prior_viz.")
     ap.add_argument("--prior-viz-max-components", type=int, default=32, help="Max top-pi components for factor-arrow overlay.")
+    ap.add_argument("--prior-viz-min-pi", type=float, default=0.02, help="Only draw active components with pi >= this threshold in prior figures.")
     ap.add_argument("--prior-viz-factor-scale", type=float, default=1.0, help="Scale for projected MFA factor arrows.")
     ap.add_argument("--prior-viz-grid", type=int, default=120, help="Grid size for projected prior density surface.")
     return ap.parse_args()
@@ -200,7 +201,14 @@ def _ellipse_xy(mean: np.ndarray, cov: np.ndarray, nsig: float = 2.0, n_points: 
     return xy[0], xy[1]
 
 
-def visualize_prior(model, output_dir: Path, max_components: int = 32, factor_scale: float = 1.0, grid_size: int = 120):
+def visualize_prior(
+    model,
+    output_dir: Path,
+    max_components: int = 32,
+    min_pi: float = 0.02,
+    factor_scale: float = 1.0,
+    grid_size: int = 120,
+):
     """Save PCA/density/factor visualizations for GMM/MFA prior."""
     import matplotlib
 
@@ -267,11 +275,30 @@ def visualize_prior(model, output_dir: Path, max_components: int = 32, factor_sc
     )
     table.to_csv(output_dir / "prior_pca_components.csv", index=False)
 
+    active_idx = np.where(pi >= float(min_pi))[0]
+    if active_idx.size == 0:
+        active_idx = np.argsort(-pi)[: max(1, min(int(max_components), k))]
+        print(f"[PriorViz] no pi >= {min_pi:g}; fallback to top {active_idx.size} components.")
+    else:
+        if active_idx.size > int(max_components):
+            active_idx = active_idx[np.argsort(-pi[active_idx])[: int(max_components)]]
+        print(f"[PriorViz] drawing {active_idx.size}/{k} active components with pi >= {min_pi:g}.")
+    table.loc[active_idx].to_csv(output_dir / "prior_pca_active_components.csv", index=False)
+
     fig = plt.figure(figsize=(8, 6), dpi=180)
     ax = fig.add_subplot(111, projection="3d")
     ax.plot_surface(xx, yy, zz, cmap="viridis", alpha=0.35, linewidth=0, antialiased=True)
     sizes = 30.0 + 600.0 * pi / max(float(pi.max()), 1e-12)
-    sca = ax.scatter(coords[:, 0], coords[:, 1], density_center, c=pi, s=sizes, cmap="magma", edgecolor="k", linewidth=0.3)
+    sca = ax.scatter(
+        coords[active_idx, 0],
+        coords[active_idx, 1],
+        density_center[active_idx],
+        c=pi[active_idx],
+        s=sizes[active_idx],
+        cmap="magma",
+        edgecolor="k",
+        linewidth=0.3,
+    )
     ax.set_xlabel("prior mu PC1")
     ax.set_ylabel("prior mu PC2")
     ax.set_zlabel("projected mixture density")
@@ -282,12 +309,20 @@ def visualize_prior(model, output_dir: Path, max_components: int = 32, factor_sc
     plt.close(fig)
 
     fig, ax = plt.subplots(figsize=(8, 7), dpi=180)
-    sca = ax.scatter(coords[:, 0], coords[:, 1], c=pi, s=sizes, cmap="magma", edgecolor="k", linewidth=0.3, zorder=3)
+    sca = ax.scatter(
+        coords[active_idx, 0],
+        coords[active_idx, 1],
+        c=pi[active_idx],
+        s=sizes[active_idx],
+        cmap="magma",
+        edgecolor="k",
+        linewidth=0.3,
+        zorder=3,
+    )
     ax.contour(xx, yy, zz, levels=12, cmap="viridis", alpha=0.55, linewidths=0.8)
     if factor2 is not None:
-        top = np.argsort(-pi)[: max(1, min(int(max_components), k))]
         colors = plt.get_cmap("tab10")
-        for idx in top:
+        for idx in active_idx:
             for r in range(factor2.shape[1]):
                 dx, dy = factor2[idx, r] * float(factor_scale)
                 ax.arrow(
@@ -302,7 +337,7 @@ def visualize_prior(model, output_dir: Path, max_components: int = 32, factor_sc
                     length_includes_head=True,
                     zorder=2,
                 )
-    for idx in range(k):
+    for idx in active_idx:
         ax.text(coords[idx, 0], coords[idx, 1], str(idx), fontsize=6, ha="center", va="center", zorder=4)
     ax.set_xlabel("prior mu PC1")
     ax.set_ylabel("prior mu PC2")
@@ -315,16 +350,25 @@ def visualize_prior(model, output_dir: Path, max_components: int = 32, factor_sc
 
     fig, ax = plt.subplots(figsize=(8, 7), dpi=180)
     ax.contour(xx, yy, zz, levels=12, cmap="Greys", alpha=0.45, linewidths=0.8)
-    order = np.argsort(pi)
+    order = active_idx[np.argsort(pi[active_idx])]
     cmap = plt.get_cmap("magma")
-    pi_min = float(pi.min())
-    pi_ptp = max(float(np.ptp(pi)), 1e-12)
+    pi_min = float(pi[active_idx].min())
+    pi_ptp = max(float(np.ptp(pi[active_idx])), 1e-12)
     for idx in order:
         color = cmap((float(pi[idx]) - pi_min) / pi_ptp)
         ex, ey = _ellipse_xy(coords[idx], cov2[idx], nsig=2.0)
         ax.plot(ex, ey, color=color, alpha=0.55, linewidth=1.0)
-    sca = ax.scatter(coords[:, 0], coords[:, 1], c=pi, s=sizes, cmap="magma", edgecolor="k", linewidth=0.3, zorder=3)
-    for idx in range(k):
+    sca = ax.scatter(
+        coords[active_idx, 0],
+        coords[active_idx, 1],
+        c=pi[active_idx],
+        s=sizes[active_idx],
+        cmap="magma",
+        edgecolor="k",
+        linewidth=0.3,
+        zorder=3,
+    )
+    for idx in active_idx:
         ax.text(coords[idx, 0], coords[idx, 1], str(idx), fontsize=6, ha="center", va="center", zorder=4)
     ax.set_xlabel("prior mu PC1")
     ax.set_ylabel("prior mu PC2")
@@ -337,9 +381,10 @@ def visualize_prior(model, output_dir: Path, max_components: int = 32, factor_sc
 
     rng = np.random.default_rng(0)
     n_sample = 8000
-    comp = rng.choice(k, size=n_sample, replace=True, p=pi / np.clip(pi.sum(), 1e-12, None))
+    active_pi = pi[active_idx]
+    comp = rng.choice(active_idx, size=n_sample, replace=True, p=active_pi / np.clip(active_pi.sum(), 1e-12, None))
     sample_pc = np.zeros((n_sample, 2), dtype=np.float64)
-    for idx in range(k):
+    for idx in active_idx:
         mask = comp == idx
         n_idx = int(mask.sum())
         if n_idx == 0:
@@ -347,7 +392,7 @@ def visualize_prior(model, output_dir: Path, max_components: int = 32, factor_sc
         sample_pc[mask] = rng.multivariate_normal(mean=coords[idx], cov=cov2[idx] + np.eye(2) * 1e-6, size=n_idx)
     fig, ax = plt.subplots(figsize=(8, 7), dpi=180)
     ax.scatter(sample_pc[:, 0], sample_pc[:, 1], c=comp, cmap="tab20", s=2, alpha=0.35, linewidth=0)
-    ax.scatter(coords[:, 0], coords[:, 1], c="black", s=18, marker="x", linewidth=0.8)
+    ax.scatter(coords[active_idx, 0], coords[active_idx, 1], c="black", s=18, marker="x", linewidth=0.8)
     ax.set_xlabel("prior mu PC1")
     ax.set_ylabel("prior mu PC2")
     ax.set_title("Samples from projected MFA prior")
@@ -628,6 +673,7 @@ def main():
                 model=model,
                 output_dir=prior_viz_dir,
                 max_components=args.prior_viz_max_components,
+                min_pi=args.prior_viz_min_pi,
                 factor_scale=args.prior_viz_factor_scale,
                 grid_size=args.prior_viz_grid,
             )
