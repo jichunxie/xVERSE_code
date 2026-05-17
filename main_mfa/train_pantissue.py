@@ -192,14 +192,24 @@ def parse_args():
                         help="Maximum cells used for delayed prior initialization.")
     parser.add_argument("--prior-init-kmeans-iters", type=int, default=20,
                         help="K-means iterations for delayed prior initialization.")
+    parser.add_argument("--prior-init-logvar-mode", choices=["cluster", "constant"], default="constant",
+                        help="How to initialize MFA diagonal prior log-variance after delayed k-means init.")
+    parser.add_argument("--prior-init-logvar-value", type=float, default=0.0,
+                        help="Constant prior log-variance used when --prior-init-logvar-mode constant.")
     parser.add_argument("--prior-init-logvar-min", type=float, default=-4.0,
                         help="Lower clamp for initialized prior log-variance.")
     parser.add_argument("--prior-init-logvar-max", type=float, default=2.0,
                         help="Upper clamp for initialized prior log-variance.")
-    parser.add_argument("--prior-init-factor-pca", action="store_true", default=True,
+    parser.add_argument("--prior-init-factor-pca", action="store_true", default=False,
                         help="Initialize MFA prior factors from per-cluster local PCA.")
     parser.add_argument("--no-prior-init-factor-pca", dest="prior_init_factor_pca", action="store_false",
                         help="Do not initialize MFA factors from local PCA; reset factors to small noise instead.")
+    parser.add_argument("--prior-init-factor-scale", type=float, default=0.05,
+                        help="Scale applied to PCA-initialized MFA prior factors.")
+    parser.add_argument("--prior-init-factor-std", type=float, default=0.01,
+                        help="Std for small-random MFA prior factors when PCA init is disabled.")
+    parser.add_argument("--prior-freeze-after-init-epochs", type=int, default=1,
+                        help="Freeze prior parameters for this many training epochs after delayed prior init.")
     parser.add_argument("--lambda-post-c-balance", type=float, default=0.0,
                         help="Weight for batch-level posterior component usage balance KL(q_mean(c)||uniform).")
     parser.add_argument("--lambda-contrast", type=float, default=1.0,
@@ -452,9 +462,13 @@ def delayed_init_mfa_prior_from_loader(
     device,
     samples: int,
     kmeans_iters: int,
+    logvar_mode: str,
+    logvar_value: float,
     logvar_min: float,
     logvar_max: float,
     factor_pca: bool,
+    factor_scale: float,
+    factor_std: float,
     seed: int,
     rank: int,
     world_size: int,
@@ -491,16 +505,23 @@ def delayed_init_mfa_prior_from_loader(
             global_var = torch.var(z, dim=0, unbiased=False).clamp_min(1e-6)
             for kk in range(k):
                 members = z[assign == kk]
-                if members.size(0) >= 2:
-                    var = torch.var(members - centers[kk].view(1, -1), dim=0, unbiased=False).clamp_min(1e-6)
+                if str(logvar_mode) == "constant":
+                    logvar_rows.append(
+                        torch.full((d,), float(logvar_value), device=device, dtype=z.dtype).clamp(
+                            float(logvar_min), float(logvar_max)
+                        )
+                    )
                 else:
-                    var = global_var
-                logvar_rows.append(torch.log(var).clamp(float(logvar_min), float(logvar_max)))
+                    if members.size(0) >= 2:
+                        var = torch.var(members - centers[kk].view(1, -1), dim=0, unbiased=False).clamp_min(1e-6)
+                    else:
+                        var = global_var
+                    logvar_rows.append(torch.log(var).clamp(float(logvar_min), float(logvar_max)))
                 if r > 0:
                     if bool(factor_pca) and members.size(0) >= 2:
-                        factor_rows.append(_init_factor_from_cluster(members, r))
+                        factor_rows.append(_init_factor_from_cluster(members, r) * float(factor_scale))
                     else:
-                        factor_rows.append(torch.randn((d, r), device=device, dtype=z.dtype) * 0.01)
+                        factor_rows.append(torch.randn((d, r), device=device, dtype=z.dtype) * float(factor_std))
             logvar = torch.stack(logvar_rows, dim=0)
             factor_new = torch.stack(factor_rows, dim=0) if r > 0 else torch.empty((0,), device=device)
             ok = torch.tensor([1], device=device, dtype=torch.long)
@@ -508,7 +529,9 @@ def delayed_init_mfa_prior_from_loader(
                 f"[PriorInit] done: samples={z.size(0)}, K={k}, "
                 f"pi_min={pi.min().item():.4f}, pi_max={pi.max().item():.4f}, "
                 f"logvar_min={logvar.min().item():.3f}, logvar_max={logvar.max().item():.3f}, "
-                f"factor_pca={bool(factor_pca)}"
+                f"logvar_mode={logvar_mode}, logvar_value={float(logvar_value):.3f}, "
+                f"factor_pca={bool(factor_pca)}, factor_scale={float(factor_scale):.4f}, "
+                f"factor_std={float(factor_std):.4f}"
             )
     else:
         ok = torch.tensor([0], device=device, dtype=torch.long)
@@ -831,6 +854,7 @@ def main():
     start_round = 1
     best_val_metric = float("inf")
     prior_initialized = False
+    prior_freeze_until_epoch = 0
 
     if os.path.exists(ckpt_path):
         map_location = device
@@ -862,6 +886,7 @@ def main():
                 )
         best_val_metric = float(ckpt.get("best_val_metric", best_val_metric))
         prior_initialized = bool(ckpt.get("prior_initialized", False))
+        prior_freeze_until_epoch = int(ckpt.get("prior_freeze_until_epoch", 0))
         last_epoch = int(ckpt.get("epoch", 0))
         start_round = last_epoch + 1
         log(
@@ -882,6 +907,9 @@ def main():
         stage_name = "stage3"
         base_model = _unwrap_model(model)
         _apply_training_stage(base_model, stage_name)
+        if prior_initialized and int(prior_freeze_until_epoch) >= epoch_id:
+            _set_requires_grad(getattr(base_model, "prior", None), False)
+            log(f"[PriorFreeze] prior frozen for adaptation epoch {epoch_id}/{prior_freeze_until_epoch}")
 
         # Default: global schedules.
         lambda_resp_anchor_t = 0.0
@@ -974,15 +1002,22 @@ def main():
                 device=device,
                 samples=args.prior_init_samples,
                 kmeans_iters=args.prior_init_kmeans_iters,
+                logvar_mode=args.prior_init_logvar_mode,
+                logvar_value=args.prior_init_logvar_value,
                 logvar_min=args.prior_init_logvar_min,
                 logvar_max=args.prior_init_logvar_max,
                 factor_pca=args.prior_init_factor_pca,
+                factor_scale=args.prior_init_factor_scale,
+                factor_std=args.prior_init_factor_std,
                 seed=args.seed + epoch_id,
                 rank=rank,
                 world_size=world_size,
                 log=log,
             )
             prior_initialized = bool(prior_initialized or initialized)
+            if initialized and int(args.prior_freeze_after_init_epochs) > 0:
+                prior_freeze_until_epoch = epoch_id + int(args.prior_freeze_after_init_epochs)
+                log(f"[PriorFreeze] prior will be frozen through epoch {prior_freeze_until_epoch}")
 
         do_val = (
             (int(args.val_every) <= 1)
@@ -1065,6 +1100,7 @@ def main():
                     "scheduler_state_dict": scheduler.state_dict(),
                     "best_val_metric": best_val_metric,
                     "prior_initialized": prior_initialized,
+                    "prior_freeze_until_epoch": prior_freeze_until_epoch,
                     "args": vars(args),
                 }, best_ckpt_path)
                 log(f"[Best Model] Updated at epoch {epoch_id} with metric={val_metric:.4f}")
@@ -1081,6 +1117,7 @@ def main():
                 "scheduler_state_dict": scheduler.state_dict(),
                 "best_val_metric": best_val_metric,
                 "prior_initialized": prior_initialized,
+                "prior_freeze_until_epoch": prior_freeze_until_epoch,
                 "args": vars(args),
             }, ckpt_path)
             log(f"[Checkpoint] Saved as {args.last_ckpt_name} at epoch {epoch_id}")

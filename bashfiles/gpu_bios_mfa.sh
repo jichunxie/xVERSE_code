@@ -92,12 +92,16 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --prior-mu-spread-tau 0.5 \
   --lambda-prior-logvar-l2 0 \
   --prior-logvar-target -0.5 \
-  --prior-init-epoch 1 \
+  --prior-init-epoch 3 \
   --prior-init-samples 200000 \
   --prior-init-kmeans-iters 20 \
+  --prior-init-logvar-mode constant \
+  --prior-init-logvar-value 0 \
   --prior-init-logvar-min -4 \
   --prior-init-logvar-max 2 \
-  --prior-init-factor-pca \
+  --no-prior-init-factor-pca \
+  --prior-init-factor-std 0.01 \
+  --prior-freeze-after-init-epochs 1 \
   --lambda-post-c-balance 0 \
   --recon-gene-weight-mode cv_ema \
   --recon-gene-weight-alpha 0.5 \
