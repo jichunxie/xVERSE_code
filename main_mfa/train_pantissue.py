@@ -180,6 +180,10 @@ def parse_args():
                         help="Length scale for prior mean spread regularization (smaller => stronger local repulsion).")
     parser.add_argument("--lambda-prior-factor-l2", type=float, default=0.0,
                         help="Weak L2 penalty on MFA prior factor loadings to prevent direction variance blow-up.")
+    parser.add_argument("--lambda-prior-logvar-l2", type=float, default=0.0,
+                        help="Weak L2 penalty that shrinks MFA diagonal prior log-variance toward --prior-logvar-target.")
+    parser.add_argument("--prior-logvar-target", type=float, default=-0.5,
+                        help="Target log-variance for --lambda-prior-logvar-l2. -0.5 means variance about 0.61.")
     parser.add_argument("--lambda-post-c-balance", type=float, default=0.0,
                         help="Weight for batch-level posterior component usage balance KL(q_mean(c)||uniform).")
     parser.add_argument("--lambda-contrast", type=float, default=1.0,
@@ -732,8 +736,8 @@ def main():
             prior_mu_spread_tau=args.prior_mu_spread_tau,
             lambda_post_c_balance=args.lambda_post_c_balance,
             lambda_celltype_cls=args.lambda_celltype_cls,
-            lambda_prior_logvar_l2=0.0,
-            prior_logvar_target=0.0,
+            lambda_prior_logvar_l2=args.lambda_prior_logvar_l2,
+            prior_logvar_target=args.prior_logvar_target,
             recon_gene_weight_mode=args.recon_gene_weight_mode,
             recon_gene_weight_alpha=args.recon_gene_weight_alpha,
             recon_gene_weight_ema_momentum=args.recon_gene_weight_ema_momentum,
@@ -795,8 +799,8 @@ def main():
                 prior_mu_spread_tau=args.prior_mu_spread_tau,
                 lambda_post_c_balance=args.lambda_post_c_balance,
                 lambda_celltype_cls=args.lambda_celltype_cls,
-                lambda_prior_logvar_l2=0.0,
-                prior_logvar_target=0.0,
+                lambda_prior_logvar_l2=args.lambda_prior_logvar_l2,
+                prior_logvar_target=args.prior_logvar_target,
                 recon_gene_weight_mode=args.recon_gene_weight_mode,
                 recon_gene_weight_alpha=args.recon_gene_weight_alpha,
                 recon_gene_weight_ema_momentum=args.recon_gene_weight_ema_momentum,
