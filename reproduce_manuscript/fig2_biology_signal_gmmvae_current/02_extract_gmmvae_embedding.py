@@ -81,6 +81,13 @@ def parse_args():
     ap.add_argument("--prior-viz-min-pi", type=float, default=0.02, help="Only draw active components with pi >= this threshold in prior figures.")
     ap.add_argument("--prior-viz-factor-scale", type=float, default=1.0, help="Scale for projected MFA factor arrows.")
     ap.add_argument("--prior-viz-grid", type=int, default=120, help="Grid size for projected prior density surface.")
+    ap.add_argument("--prior-viz-sample-n", type=int, default=5000, help="Number of true high-dimensional prior samples for UMAP/KDE visualization.")
+    ap.add_argument(
+        "--prior-viz-sample-embed",
+        default="auto",
+        choices=["auto", "umap", "mds", "pca"],
+        help="2D embedding for high-dimensional prior samples. auto uses UMAP if available, else PCA.",
+    )
     return ap.parse_args()
 
 
@@ -201,6 +208,93 @@ def _ellipse_xy(mean: np.ndarray, cov: np.ndarray, nsig: float = 2.0, n_points: 
     return xy[0], xy[1]
 
 
+def _metric_mds_from_dist(dmat: np.ndarray, seed: int = 0):
+    dmat = np.asarray(dmat, dtype=np.float64)
+    try:
+        from sklearn.manifold import MDS
+
+        mds = MDS(
+            n_components=2,
+            metric=True,
+            dissimilarity="precomputed",
+            random_state=int(seed),
+            normalized_stress="auto",
+            n_init=4,
+            max_iter=1000,
+        )
+        return mds.fit_transform(dmat), "metric_mds"
+    except Exception:
+        n = dmat.shape[0]
+        h = np.eye(n) - np.ones((n, n), dtype=np.float64) / float(n)
+        b = -0.5 * h @ (dmat ** 2) @ h
+        vals, vecs = np.linalg.eigh(b)
+        order = np.argsort(vals)[::-1][:2]
+        vals = np.clip(vals[order], 0.0, None)
+        return vecs[:, order] * np.sqrt(vals).reshape(1, -1), "classical_mds"
+
+
+def _embed_prior_samples(samples: np.ndarray, method: str = "auto", seed: int = 0):
+    samples = np.asarray(samples, dtype=np.float32)
+    method = str(method).lower()
+    if method in ("auto", "umap"):
+        try:
+            import umap
+
+            emb = umap.UMAP(
+                n_components=2,
+                n_neighbors=min(30, max(5, samples.shape[0] // 50)),
+                min_dist=0.15,
+                metric="euclidean",
+                random_state=int(seed),
+            ).fit_transform(samples)
+            return np.asarray(emb, dtype=np.float64), "umap"
+        except Exception as exc:
+            if method == "umap":
+                print(f"[PriorViz][WARN] UMAP failed, falling back to PCA: {exc}")
+    if method == "mds":
+        try:
+            from sklearn.manifold import MDS
+            from sklearn.metrics import pairwise_distances
+
+            max_n = min(samples.shape[0], 1500)
+            rng = np.random.default_rng(seed)
+            idx = np.arange(samples.shape[0])
+            if samples.shape[0] > max_n:
+                idx = rng.choice(samples.shape[0], size=max_n, replace=False)
+                idx.sort()
+            dmat = pairwise_distances(samples[idx], metric="euclidean")
+            emb_small, _ = _metric_mds_from_dist(dmat, seed=seed)
+            if samples.shape[0] == max_n:
+                return emb_small, "metric_mds"
+            # Use PCA for all points if exact MDS had to be subsampled; this keeps output complete.
+            print("[PriorViz][WARN] MDS requested but sample count is large; using PCA for full sample KDE.")
+        except Exception as exc:
+            print(f"[PriorViz][WARN] MDS failed, falling back to PCA: {exc}")
+    coords, _, _ = _pca2(samples)
+    return coords, "pca"
+
+
+def _sample_mfa_prior(mu: np.ndarray, logvar: np.ndarray, factor: np.ndarray, pi: np.ndarray, active_idx: np.ndarray, n_sample: int, seed: int = 0):
+    rng = np.random.default_rng(seed)
+    active_pi = pi[active_idx]
+    active_pi = active_pi / np.clip(active_pi.sum(), 1e-12, None)
+    comp = rng.choice(active_idx, size=int(n_sample), replace=True, p=active_pi)
+    samples = np.zeros((int(n_sample), mu.shape[1]), dtype=np.float32)
+    for idx in active_idx:
+        mask = comp == idx
+        n_idx = int(mask.sum())
+        if n_idx == 0:
+            continue
+        eps = rng.normal(size=(n_idx, mu.shape[1])).astype(np.float32) * np.exp(0.5 * logvar[idx]).astype(np.float32)
+        if factor is not None:
+            u = rng.normal(size=(n_idx, factor.shape[2])).astype(np.float32)
+            shift = u @ factor[idx].T.astype(np.float32)
+        else:
+            shift = 0.0
+        samples[mask] = mu[idx].astype(np.float32) + shift + eps
+    return samples, comp
+
+
 def visualize_prior(
     model,
     output_dir: Path,
@@ -208,6 +302,8 @@ def visualize_prior(
     min_pi: float = 0.02,
     factor_scale: float = 1.0,
     grid_size: int = 120,
+    sample_n: int = 5000,
+    sample_embed: str = "auto",
 ):
     """Save PCA/density/factor visualizations for GMM/MFA prior."""
     import matplotlib
@@ -284,11 +380,140 @@ def visualize_prior(
             active_idx = active_idx[np.argsort(-pi[active_idx])[: int(max_components)]]
         print(f"[PriorViz] drawing {active_idx.size}/{k} active components with pi >= {min_pi:g}.")
     table.loc[active_idx].to_csv(output_dir / "prior_pca_active_components.csv", index=False)
+    sizes = 30.0 + 600.0 * pi / max(float(pi.max()), 1e-12)
+
+    mu_active = mu[active_idx]
+    pairwise = np.linalg.norm(mu_active[:, None, :] - mu_active[None, :, :], axis=-1)
+    pd.DataFrame(pairwise, index=active_idx, columns=active_idx).to_csv(output_dir / "prior_mu_active_pairwise_dist.csv")
+    nn_rows = []
+    for local_i, comp_i in enumerate(active_idx):
+        row = pairwise[local_i].copy()
+        row[local_i] = np.inf
+        local_j = int(np.argmin(row))
+        comp_j = int(active_idx[local_j])
+        nn_rows.append(
+            {
+                "component": int(comp_i),
+                "nearest_component": comp_j,
+                "nearest_mu_l2": float(pairwise[local_i, local_j]),
+                "pi": float(pi[comp_i]),
+                "nearest_pi": float(pi[comp_j]),
+            }
+        )
+    pd.DataFrame(nn_rows).to_csv(output_dir / "prior_mu_active_nearest_neighbors.csv", index=False)
+
+    fig, ax = plt.subplots(figsize=(7, 6), dpi=180)
+    im = ax.imshow(pairwise, cmap="mako" if "mako" in plt.colormaps() else "viridis")
+    ax.set_xticks(np.arange(active_idx.size))
+    ax.set_yticks(np.arange(active_idx.size))
+    ax.set_xticklabels(active_idx, rotation=90, fontsize=7)
+    ax.set_yticklabels(active_idx, fontsize=7)
+    ax.set_xlabel("component")
+    ax.set_ylabel("component")
+    ax.set_title("Active prior center distances in latent space")
+    fig.colorbar(im, ax=ax, label="L2 distance in original latent space")
+    fig.tight_layout()
+    fig.savefig(output_dir / "prior_mu_active_distance_heatmap.png")
+    plt.close(fig)
+
+    mds_coords, mds_name = _metric_mds_from_dist(pairwise, seed=0)
+    fig, ax = plt.subplots(figsize=(8, 7), dpi=180)
+    sca = ax.scatter(
+        mds_coords[:, 0],
+        mds_coords[:, 1],
+        c=pi[active_idx],
+        s=sizes[active_idx],
+        cmap="magma",
+        edgecolor="k",
+        linewidth=0.3,
+        zorder=3,
+    )
+    for local_i, comp_i in enumerate(active_idx):
+        ax.text(mds_coords[local_i, 0], mds_coords[local_i, 1], str(comp_i), fontsize=7, ha="center", va="center", zorder=4)
+        nn_local = int(np.argmin(np.where(np.arange(active_idx.size) == local_i, np.inf, pairwise[local_i])))
+        ax.plot(
+            [mds_coords[local_i, 0], mds_coords[nn_local, 0]],
+            [mds_coords[local_i, 1], mds_coords[nn_local, 1]],
+            color="grey",
+            alpha=0.35,
+            linewidth=0.8,
+            zorder=1,
+        )
+    ax.set_xlabel("MDS1")
+    ax.set_ylabel("MDS2")
+    ax.set_title(f"Active prior centers preserving latent L2 distances ({mds_name})")
+    ax.set_aspect("equal", adjustable="datalim")
+    fig.colorbar(sca, ax=ax, label="mixture weight pi")
+    fig.tight_layout()
+    fig.savefig(output_dir / "prior_mu_active_mds_distances.png")
+    plt.close(fig)
+
+    if int(sample_n) > 0:
+        prior_samples, prior_sample_comp = _sample_mfa_prior(
+            mu=mu,
+            logvar=logvar,
+            factor=factor,
+            pi=pi,
+            active_idx=active_idx,
+            n_sample=int(sample_n),
+            seed=0,
+        )
+        sample_emb, sample_method = _embed_prior_samples(prior_samples, method=sample_embed, seed=0)
+        sample_df = pd.DataFrame(
+            {
+                "x": sample_emb[:, 0],
+                "y": sample_emb[:, 1],
+                "component": prior_sample_comp,
+            }
+        )
+        sample_df.to_csv(output_dir / "prior_sample_embedding.csv", index=False)
+
+        fig, ax = plt.subplots(figsize=(8, 7), dpi=180)
+        try:
+            import scipy.stats as st
+
+            xy = np.vstack([sample_emb[:, 0], sample_emb[:, 1]])
+            kde = st.gaussian_kde(xy)
+            pad_x_s = max(float(np.ptp(sample_emb[:, 0])) * 0.08, 1e-3)
+            pad_y_s = max(float(np.ptp(sample_emb[:, 1])) * 0.08, 1e-3)
+            gx = np.linspace(sample_emb[:, 0].min() - pad_x_s, sample_emb[:, 0].max() + pad_x_s, int(grid_size))
+            gy = np.linspace(sample_emb[:, 1].min() - pad_y_s, sample_emb[:, 1].max() + pad_y_s, int(grid_size))
+            gxx, gyy = np.meshgrid(gx, gy)
+            kde_z = kde(np.vstack([gxx.ravel(), gyy.ravel()])).reshape(gxx.shape)
+            ax.contourf(gxx, gyy, kde_z, levels=18, cmap="viridis", alpha=0.65)
+            ax.contour(gxx, gyy, kde_z, levels=10, colors="black", alpha=0.18, linewidths=0.5)
+        except Exception as exc:
+            print(f"[PriorViz][WARN] sample KDE failed, using hexbin only: {exc}")
+            ax.hexbin(sample_emb[:, 0], sample_emb[:, 1], gridsize=55, cmap="viridis", mincnt=1, alpha=0.75)
+        ax.scatter(
+            sample_emb[:, 0],
+            sample_emb[:, 1],
+            c=prior_sample_comp,
+            cmap="tab20",
+            s=2,
+            alpha=0.22,
+            linewidth=0,
+        )
+        # Place component labels at the median embedded sample position for each active component.
+        for idx in active_idx:
+            mask = prior_sample_comp == idx
+            if not np.any(mask):
+                continue
+            cx = float(np.median(sample_emb[mask, 0]))
+            cy = float(np.median(sample_emb[mask, 1]))
+            ax.scatter([cx], [cy], c="white", s=70, edgecolor="black", linewidth=0.6, zorder=4)
+            ax.text(cx, cy, str(idx), fontsize=7, ha="center", va="center", zorder=5)
+        ax.set_xlabel(f"{sample_method.upper()}1")
+        ax.set_ylabel(f"{sample_method.upper()}2")
+        ax.set_title(f"True high-dimensional MFA prior samples with KDE ({sample_method})")
+        ax.set_aspect("equal", adjustable="datalim")
+        fig.tight_layout()
+        fig.savefig(output_dir / "prior_sample_umap_kde.png")
+        plt.close(fig)
 
     fig = plt.figure(figsize=(8, 6), dpi=180)
     ax = fig.add_subplot(111, projection="3d")
     ax.plot_surface(xx, yy, zz, cmap="viridis", alpha=0.35, linewidth=0, antialiased=True)
-    sizes = 30.0 + 600.0 * pi / max(float(pi.max()), 1e-12)
     sca = ax.scatter(
         coords[active_idx, 0],
         coords[active_idx, 1],
@@ -676,6 +901,8 @@ def main():
                 min_pi=args.prior_viz_min_pi,
                 factor_scale=args.prior_viz_factor_scale,
                 grid_size=args.prior_viz_grid,
+                sample_n=args.prior_viz_sample_n,
+                sample_embed=args.prior_viz_sample_embed,
             )
         except Exception as exc:
             print(f"[PriorViz][WARN] failed: {exc}")
