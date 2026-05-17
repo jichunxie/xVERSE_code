@@ -186,6 +186,20 @@ def parse_args():
                         help="Weak L2 penalty that shrinks MFA diagonal prior log-variance toward --prior-logvar-target.")
     parser.add_argument("--prior-logvar-target", type=float, default=-0.5,
                         help="Target log-variance for --lambda-prior-logvar-l2. -0.5 means variance about 0.61.")
+    parser.add_argument("--prior-init-epoch", type=int, default=3,
+                        help="If >0, run one-shot MFA prior initialization after this training epoch.")
+    parser.add_argument("--prior-init-samples", type=int, default=100000,
+                        help="Maximum cells used for delayed prior initialization.")
+    parser.add_argument("--prior-init-kmeans-iters", type=int, default=20,
+                        help="K-means iterations for delayed prior initialization.")
+    parser.add_argument("--prior-init-logvar-min", type=float, default=-4.0,
+                        help="Lower clamp for initialized prior log-variance.")
+    parser.add_argument("--prior-init-logvar-max", type=float, default=2.0,
+                        help="Upper clamp for initialized prior log-variance.")
+    parser.add_argument("--prior-init-factor-pca", action="store_true", default=True,
+                        help="Initialize MFA prior factors from per-cluster local PCA.")
+    parser.add_argument("--no-prior-init-factor-pca", dest="prior_init_factor_pca", action="store_false",
+                        help="Do not initialize MFA factors from local PCA; reset factors to small noise instead.")
     parser.add_argument("--lambda-post-c-balance", type=float, default=0.0,
                         help="Weight for batch-level posterior component usage balance KL(q_mean(c)||uniform).")
     parser.add_argument("--lambda-contrast", type=float, default=1.0,
@@ -349,6 +363,182 @@ def _kmeans_torch(x: torch.Tensor, k: int, iters: int, seed: int):
             new_centers[~non_empty] = refill
         centers = new_centers
     return centers, assign
+
+
+def _clear_optimizer_state_for_params(optimizer, params):
+    for p in params:
+        if p is not None and p in optimizer.state:
+            optimizer.state.pop(p, None)
+
+
+def _collect_prior_init_embeddings(model, train_loader, device, max_samples: int):
+    base_model = _unwrap_model(model)
+    was_training = base_model.training
+    base_model.eval()
+    chunks = []
+    n_seen = 0
+    with torch.no_grad():
+        for sample_id, tissue_id, celltype_id, x_count, x_mask, x_mask_encoder in train_loader:
+            x_count = x_count.to(device, non_blocking=True)
+            x_mask = x_mask.to(device, non_blocking=True)
+            # Use the real observed panel for initialization; avoid sampling noise and
+            # avoid random-mask views so centers represent the current posterior manifold.
+            out = base_model(
+                x_count=x_count,
+                x_mask=x_mask,
+                tissue_id=tissue_id.to(device, non_blocking=True),
+                sample_id=None,
+                use_batch_condition=False,
+            )
+            z = out.get("mu_base", out.get("mu")).detach().float()
+            take = min(z.size(0), max(0, int(max_samples) - n_seen))
+            if take > 0:
+                chunks.append(z[:take].cpu())
+                n_seen += take
+            if n_seen >= int(max_samples):
+                break
+    if was_training:
+        base_model.train()
+    if not chunks:
+        return torch.empty((0, base_model.latent_dim), dtype=torch.float32)
+    return torch.cat(chunks, dim=0)
+
+
+def _gather_init_embeddings(local_z: torch.Tensor, device, rank: int, world_size: int):
+    if (not dist.is_available()) or (not dist.is_initialized()) or world_size <= 1:
+        return local_z.to(device) if rank == 0 else None
+    local_z = local_z.to(device)
+    local_n = torch.tensor([local_z.size(0)], device=device, dtype=torch.long)
+    sizes = [torch.zeros_like(local_n) for _ in range(world_size)]
+    dist.all_gather(sizes, local_n)
+    max_n = int(max(s.item() for s in sizes))
+    d = local_z.size(1)
+    padded = torch.zeros((max_n, d), device=device, dtype=local_z.dtype)
+    if local_z.size(0) > 0:
+        padded[: local_z.size(0)] = local_z
+    gathered = [torch.zeros_like(padded) for _ in range(world_size)]
+    dist.all_gather(gathered, padded)
+    if rank != 0:
+        return None
+    parts = [g[: int(sizes[i].item())] for i, g in enumerate(gathered) if int(sizes[i].item()) > 0]
+    return torch.cat(parts, dim=0) if parts else torch.empty((0, d), device=device, dtype=local_z.dtype)
+
+
+def _init_factor_from_cluster(xc: torch.Tensor, rank: int):
+    d = xc.size(1)
+    if rank <= 0:
+        return None
+    if xc.size(0) < 2:
+        return torch.randn((d, rank), device=xc.device, dtype=xc.dtype) * 0.01
+    xc = xc - xc.mean(dim=0, keepdim=True)
+    try:
+        # xc = U S Vh; covariance eigenvalues are S^2 / (n - 1).
+        _, s, vh = torch.linalg.svd(xc, full_matrices=False)
+        r = min(rank, vh.size(0), s.numel())
+        fac = torch.zeros((d, rank), device=xc.device, dtype=xc.dtype)
+        scale = s[:r] / float(max(xc.size(0) - 1, 1)) ** 0.5
+        fac[:, :r] = vh[:r].T * scale.view(1, r)
+        if r < rank:
+            fac[:, r:] = torch.randn((d, rank - r), device=xc.device, dtype=xc.dtype) * 0.01
+        return fac
+    except RuntimeError:
+        return torch.randn((d, rank), device=xc.device, dtype=xc.dtype) * 0.01
+
+
+def delayed_init_mfa_prior_from_loader(
+    model,
+    optimizer,
+    train_loader,
+    device,
+    samples: int,
+    kmeans_iters: int,
+    logvar_min: float,
+    logvar_max: float,
+    factor_pca: bool,
+    seed: int,
+    rank: int,
+    world_size: int,
+    log,
+):
+    base_model = _unwrap_model(model)
+    if getattr(base_model, "prior_type", None) != "gmm":
+        log("[PriorInit][Skip] prior_type is not gmm.")
+        return False
+    prior = base_model.prior
+    k = int(prior.K)
+    d = int(prior.D)
+    r = int(getattr(prior, "R", 0))
+    local_z = _collect_prior_init_embeddings(model, train_loader, device, max_samples=max(1, int(samples)))
+    z = _gather_init_embeddings(local_z, device=device, rank=rank, world_size=world_size)
+
+    if rank == 0:
+        if z is None or z.size(0) < k:
+            log(f"[PriorInit][Skip] not enough embeddings: n={0 if z is None else z.size(0)}, K={k}")
+            ok = torch.tensor([0], device=device, dtype=torch.long)
+            centers = torch.zeros((k, d), device=device)
+            logvar = torch.zeros((k, d), device=device)
+            logits = torch.zeros((k,), device=device)
+            factor_new = torch.zeros((k, d, r), device=device) if r > 0 else torch.empty((0,), device=device)
+        else:
+            z = z.float()
+            centers, assign = _kmeans_torch(z, k=k, iters=int(kmeans_iters), seed=int(seed))
+            counts = torch.bincount(assign, minlength=k).float()
+            pi = torch.clamp(counts / torch.clamp(counts.sum(), min=1.0), min=1e-6)
+            pi = pi / pi.sum()
+            logits = torch.log(pi)
+            logvar_rows = []
+            factor_rows = []
+            global_var = torch.var(z, dim=0, unbiased=False).clamp_min(1e-6)
+            for kk in range(k):
+                members = z[assign == kk]
+                if members.size(0) >= 2:
+                    var = torch.var(members - centers[kk].view(1, -1), dim=0, unbiased=False).clamp_min(1e-6)
+                else:
+                    var = global_var
+                logvar_rows.append(torch.log(var).clamp(float(logvar_min), float(logvar_max)))
+                if r > 0:
+                    if bool(factor_pca) and members.size(0) >= 2:
+                        factor_rows.append(_init_factor_from_cluster(members, r))
+                    else:
+                        factor_rows.append(torch.randn((d, r), device=device, dtype=z.dtype) * 0.01)
+            logvar = torch.stack(logvar_rows, dim=0)
+            factor_new = torch.stack(factor_rows, dim=0) if r > 0 else torch.empty((0,), device=device)
+            ok = torch.tensor([1], device=device, dtype=torch.long)
+            log(
+                f"[PriorInit] done: samples={z.size(0)}, K={k}, "
+                f"pi_min={pi.min().item():.4f}, pi_max={pi.max().item():.4f}, "
+                f"logvar_min={logvar.min().item():.3f}, logvar_max={logvar.max().item():.3f}, "
+                f"factor_pca={bool(factor_pca)}"
+            )
+    else:
+        ok = torch.tensor([0], device=device, dtype=torch.long)
+        centers = torch.zeros((k, d), device=device)
+        logvar = torch.zeros((k, d), device=device)
+        logits = torch.zeros((k,), device=device)
+        factor_new = torch.zeros((k, d, r), device=device) if r > 0 else torch.empty((0,), device=device)
+
+    if dist.is_available() and dist.is_initialized():
+        dist.broadcast(ok, src=0)
+        dist.broadcast(centers, src=0)
+        dist.broadcast(logvar, src=0)
+        dist.broadcast(logits, src=0)
+        if r > 0:
+            dist.broadcast(factor_new, src=0)
+    if int(ok.item()) != 1:
+        return False
+
+    with torch.no_grad():
+        prior.prior_mu.copy_(centers.to(device=prior.prior_mu.device, dtype=prior.prior_mu.dtype))
+        prior.prior_logvar.copy_(logvar.to(device=prior.prior_logvar.device, dtype=prior.prior_logvar.dtype))
+        prior.pi_logits.copy_(logits.to(device=prior.pi_logits.device, dtype=prior.pi_logits.dtype))
+        if r > 0 and getattr(prior, "prior_factor", None) is not None:
+            prior.prior_factor.copy_(factor_new.to(device=prior.prior_factor.device, dtype=prior.prior_factor.dtype))
+    _clear_optimizer_state_for_params(
+        optimizer,
+        [prior.prior_mu, prior.prior_logvar, prior.pi_logits, getattr(prior, "prior_factor", None)],
+    )
+    log("[PriorInit] broadcast done and optimizer state cleared.")
+    return True
 
 
 def main():
@@ -640,6 +830,7 @@ def main():
 
     start_round = 1
     best_val_metric = float("inf")
+    prior_initialized = False
 
     if os.path.exists(ckpt_path):
         map_location = device
@@ -670,6 +861,7 @@ def main():
                     "Skip scheduler resume and continue with freshly initialized scheduler."
                 )
         best_val_metric = float(ckpt.get("best_val_metric", best_val_metric))
+        prior_initialized = bool(ckpt.get("prior_initialized", False))
         last_epoch = int(ckpt.get("epoch", 0))
         start_round = last_epoch + 1
         log(
@@ -767,6 +959,31 @@ def main():
             train_msg += f", BatchlessRecon={loss_batchless_recon:.4f}"
         log(train_msg)
 
+        if (
+            int(args.prior_init_epoch) > 0
+            and (not prior_initialized)
+            and epoch_id >= int(args.prior_init_epoch)
+        ):
+            log(f"[PriorInit] Triggered after epoch {epoch_id}")
+            if val_sampler is not None:
+                val_sampler.set_epoch(epoch_id)
+            initialized = delayed_init_mfa_prior_from_loader(
+                model=model,
+                optimizer=optimizer,
+                train_loader=train_loader,
+                device=device,
+                samples=args.prior_init_samples,
+                kmeans_iters=args.prior_init_kmeans_iters,
+                logvar_min=args.prior_init_logvar_min,
+                logvar_max=args.prior_init_logvar_max,
+                factor_pca=args.prior_init_factor_pca,
+                seed=args.seed + epoch_id,
+                rank=rank,
+                world_size=world_size,
+                log=log,
+            )
+            prior_initialized = bool(prior_initialized or initialized)
+
         do_val = (
             (int(args.val_every) <= 1)
             or (epoch_id % int(args.val_every) == 0)
@@ -847,6 +1064,7 @@ def main():
                     "optimizer_state_dict": optimizer.state_dict(),
                     "scheduler_state_dict": scheduler.state_dict(),
                     "best_val_metric": best_val_metric,
+                    "prior_initialized": prior_initialized,
                     "args": vars(args),
                 }, best_ckpt_path)
                 log(f"[Best Model] Updated at epoch {epoch_id} with metric={val_metric:.4f}")
@@ -862,6 +1080,7 @@ def main():
                 "optimizer_state_dict": optimizer.state_dict(),
                 "scheduler_state_dict": scheduler.state_dict(),
                 "best_val_metric": best_val_metric,
+                "prior_initialized": prior_initialized,
                 "args": vars(args),
             }, ckpt_path)
             log(f"[Checkpoint] Saved as {args.last_ckpt_name} at epoch {epoch_id}")
