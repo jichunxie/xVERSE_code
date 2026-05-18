@@ -667,6 +667,7 @@ class MaskFiLMGMMVAE(nn.Module):
         celltype_id: torch.Tensor = None,
         force_base_posterior: bool = False,
         beta: float = 1.0,
+        beta_u_kl_multiplier: float = 1.0,
         beta_eps_kl_multiplier: float = 1.0,
         encoder_mask: torch.Tensor = None,
         use_batch_condition: bool = True,
@@ -827,8 +828,9 @@ class MaskFiLMGMMVAE(nn.Module):
 
             kl_u = (q_c.float() * kl_u_per_comp).sum(dim=1).mean().to(z.dtype)
             kl_eps = (q_c.float() * kl_eps_per_comp).sum(dim=1).mean().to(z.dtype)
+            u_kl_mult = max(float(beta_u_kl_multiplier), 0.0)
             eps_kl_mult = max(float(beta_eps_kl_multiplier), 0.0)
-            kl_z = kl_u + eps_kl_mult * kl_eps
+            kl_z = u_kl_mult * kl_u + eps_kl_mult * kl_eps
 
             kl_loss = kl_c + kl_z
             log_q = (q_c * (log_q_c + log_q_u + log_q_eps)).sum(dim=1)
@@ -1514,6 +1516,7 @@ def train_gmm_vae_one_epoch(
     train_loader,
     device,
     beta_kl=1.0,
+    beta_u_kl_multiplier=1.0,
     beta_eps_kl_multiplier=1.0,
     recon_observed_only=False,
     mask_aug_prob=1.0,
@@ -1588,6 +1591,7 @@ def train_gmm_vae_one_epoch(
                 celltype_id=celltype_id,
                 force_base_posterior=force_base_posterior,
                 beta=beta_kl,
+                beta_u_kl_multiplier=beta_u_kl_multiplier,
                 beta_eps_kl_multiplier=beta_eps_kl_multiplier,
                 encoder_mask=x_mask_encoder,
                 recon_mask=x_mask if recon_observed_only else None,
@@ -1637,6 +1641,7 @@ def train_gmm_vae_one_epoch(
                     celltype_id=celltype_id,
                     force_base_posterior=force_base_posterior,
                     beta=0.0,
+                    beta_u_kl_multiplier=beta_u_kl_multiplier,
                     beta_eps_kl_multiplier=beta_eps_kl_multiplier,
                     encoder_mask=x_mask,
                     recon_mask=x_mask if recon_observed_only else None,
@@ -1686,6 +1691,7 @@ def train_gmm_vae_one_epoch(
                     celltype_id=celltype_id,
                     force_base_posterior=force_base_posterior,
                     beta=0.0,
+                    beta_u_kl_multiplier=beta_u_kl_multiplier,
                     beta_eps_kl_multiplier=beta_eps_kl_multiplier,
                     encoder_mask=x_mask_encoder,
                     use_batch_condition=False,
@@ -1902,6 +1908,7 @@ def evaluate_gmm_vae_one_epoch(
     val_loader,
     device,
     beta_kl=1.0,
+    beta_u_kl_multiplier=1.0,
     beta_eps_kl_multiplier=1.0,
     recon_observed_only=False,
     lambda_score=0.0,
@@ -1976,6 +1983,7 @@ def evaluate_gmm_vae_one_epoch(
                 celltype_id=celltype_id,
                 force_base_posterior=force_base_posterior,
                 beta=beta_kl,
+                beta_u_kl_multiplier=beta_u_kl_multiplier,
                 beta_eps_kl_multiplier=beta_eps_kl_multiplier,
                 use_batch_condition=False,
                 encoder_mask=x_mask,

@@ -103,6 +103,8 @@ def parse_args():
     parser.add_argument("--last-ckpt-name", default="last_model.pth", help="Filename for last checkpoint.")
     parser.add_argument("--best-ckpt-name", default="best_model.pth", help="Filename for best checkpoint.")
     parser.add_argument("--beta-kl", type=float, default=0.01, help="KL weight.")
+    parser.add_argument("--beta-u-kl-multiplier", type=float, default=1.0,
+                        help="Extra multiplier on the MFA factor u KL inside the KL term. 1.0 keeps standard KL.")
     parser.add_argument("--beta-eps-kl-multiplier", type=float, default=1.0,
                         help="Extra multiplier on the MFA residual eps KL inside the KL term. 1.0 keeps standard KL.")
     parser.add_argument("--beta-kl-warmup-epochs", type=int, default=0,
@@ -980,6 +982,7 @@ def main():
             train_loader=train_loader,
             device=device,
             beta_kl=beta_t,
+            beta_u_kl_multiplier=args.beta_u_kl_multiplier,
             beta_eps_kl_multiplier=args.beta_eps_kl_multiplier,
             recon_observed_only=args.recon_observed_only,
             mask_aug_prob=args.mask_aug_prob,
@@ -1081,6 +1084,7 @@ def main():
                 val_loader=val_loader,
                 device=device,
                 beta_kl=beta_t,
+                beta_u_kl_multiplier=args.beta_u_kl_multiplier,
                 beta_eps_kl_multiplier=args.beta_eps_kl_multiplier,
                 recon_observed_only=args.recon_observed_only,
                 lambda_score=0.0,
