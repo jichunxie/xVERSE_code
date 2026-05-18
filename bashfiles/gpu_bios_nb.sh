@@ -72,8 +72,8 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --prior-mu-init-radius 4 \
   --prior-cov-rank 0 \
   --posterior-cov-rank 0 \
-  --batch-emb-dim 16 \
-  --use-batch-condition \
+  --batch-emb-dim 0 \
+  --no-use-batch-condition \
   --no-use-tissue-condition \
   --tissue-emb-dim 0 \
   --batch-cond-drop-prob 0.0 \
