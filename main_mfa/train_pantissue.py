@@ -77,6 +77,10 @@ def parse_args():
                         help="CSV containing cell-type mapping info. Must be provided.")
     parser.add_argument("--result-dir", default=None,
                         help="Directory for checkpoints. Must be provided.")
+    parser.add_argument("--init-ckpt", default=None,
+                        help="Optional checkpoint used to initialize model weights when result-dir last checkpoint does not exist.")
+    parser.add_argument("--train-mode", choices=["full", "prior_only"], default="full",
+                        help="full trains all modules; prior_only freezes everything except model.prior.")
     parser.add_argument("--total-gene", type=int, default=17999, help="Total number of genes.")
     parser.add_argument("--num-epochs", type=int, default=100, help="Training epochs.")
     parser.add_argument("--val-every", type=int, default=1, help="Run validation every N epochs.")
@@ -369,6 +373,15 @@ def _apply_training_stage(base_model, stage: str):
     _set_requires_grad(getattr(base_model, "post_eps_mu", None), True)
     _set_requires_grad(getattr(base_model, "post_eps_logvar", None), True)
     _set_requires_grad(getattr(base_model, "score_head", None), True)
+
+
+def _apply_train_mode(base_model, train_mode: str):
+    if str(train_mode) == "prior_only":
+        for p in base_model.parameters():
+            p.requires_grad = False
+        _set_requires_grad(getattr(base_model, "prior", None), True)
+        return
+    _apply_training_stage(base_model, "stage3")
 
 
 def _linear_kl_warmup(epoch: int, target_beta: float, warmup_epochs: int, start_beta: float = 0.0) -> float:
@@ -935,6 +948,47 @@ def main():
             log(f"[Resume] Missing keys (expected with new heads): {load_ret.missing_keys}")
         if getattr(load_ret, "unexpected_keys", None):
             log(f"[Resume] Unexpected keys: {load_ret.unexpected_keys}")
+    elif args.init_ckpt:
+        if not os.path.exists(args.init_ckpt):
+            raise FileNotFoundError(f"--init-ckpt not found: {args.init_ckpt}")
+        map_location = device
+        ckpt = torch.load(args.init_ckpt, map_location=map_location)
+        ckpt_state = ckpt.get("model_state_dict", ckpt)
+        filtered_state, skipped = _filter_state_dict_by_shape(model, ckpt_state)
+        load_ret = model.load_state_dict(filtered_state, strict=False)
+        if skipped:
+            log(f"[InitCkpt] Skipped {len(skipped)} incompatible/missing keys from checkpoint.")
+            for name, reason in skipped[:20]:
+                log(f"[InitCkpt][Skip] {name}: {reason}")
+            if len(skipped) > 20:
+                log(f"[InitCkpt] ... and {len(skipped) - 20} more skipped keys.")
+        log(f"[InitCkpt] Loaded model weights from {args.init_ckpt}. Training starts from epoch 1 in {args.result_dir}.")
+        if getattr(load_ret, "missing_keys", None):
+            log(f"[InitCkpt] Missing keys: {load_ret.missing_keys}")
+        if getattr(load_ret, "unexpected_keys", None):
+            log(f"[InitCkpt] Unexpected keys: {load_ret.unexpected_keys}")
+
+    base_model = _unwrap_model(model)
+    _apply_train_mode(base_model, args.train_mode)
+    if args.train_mode == "prior_only":
+        trainable_params = [p for p in model.parameters() if p.requires_grad]
+        if not trainable_params:
+            raise RuntimeError("--train-mode prior_only selected but no trainable prior parameters were found.")
+        optimizer = torch.optim.Adam(trainable_params, lr=args.lr, weight_decay=args.weight_decay)
+        scheduler = ReduceLROnPlateau(
+            optimizer,
+            mode='min',
+            factor=args.scheduler_factor,
+            patience=args.scheduler_patience,
+            threshold=args.scheduler_threshold,
+            cooldown=0,
+            min_lr=args.scheduler_min_lr
+        )
+        scaler = GradScaler(enabled=torch.cuda.is_available())
+        total_params, trainable_count = count_parameters(base_model)
+        log(f"[TrainMode] prior_only: trainable parameters reset to {trainable_count:,}/{total_params:,}; optimizer rebuilt.")
+    else:
+        log("[TrainMode] full")
 
     epoch_id = start_round
 
@@ -949,7 +1003,7 @@ def main():
         )
         stage_name = "stage3"
         base_model = _unwrap_model(model)
-        _apply_training_stage(base_model, stage_name)
+        _apply_train_mode(base_model, args.train_mode)
         if prior_initialized and int(prior_freeze_until_epoch) >= epoch_id:
             _set_requires_grad(getattr(base_model, "prior", None), False)
             log(f"[PriorFreeze] prior frozen for adaptation epoch {epoch_id}/{prior_freeze_until_epoch}")
