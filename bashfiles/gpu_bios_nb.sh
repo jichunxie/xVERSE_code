@@ -107,7 +107,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --recon-gene-weight-min 0.2 \
   --recon-gene-weight-max 3.0 \
   --recon-cell-weight-mode batch_kmeans \
-  --recon-cell-weight-alpha 0 \
+  --recon-cell-weight-alpha 0.5 \
   --recon-cell-weight-clusters 32 \
   --recon-cell-weight-kmeans-iters 5 \
   --lambda-rank-recon 0 \
