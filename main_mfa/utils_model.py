@@ -1326,15 +1326,33 @@ def bidirectional_contrastive_loss(z_real: torch.Tensor, z_fake: torch.Tensor, t
     - z_real[i] <-> z_fake[i] is a positive pair
     - other samples in batch are negatives
     """
+    if z_real.dim() != 2 or z_fake.dim() != 2:
+        raise ValueError(
+            "bidirectional_contrastive_loss expects 2D embeddings [B, D], "
+            f"got z_real={tuple(z_real.shape)}, z_fake={tuple(z_fake.shape)}"
+        )
+    if z_real.size(0) != z_fake.size(0):
+        raise ValueError(
+            "bidirectional_contrastive_loss requires paired views with the same batch size, "
+            f"got z_real={tuple(z_real.shape)}, z_fake={tuple(z_fake.shape)}"
+        )
+    if z_real.size(1) != z_fake.size(1):
+        raise ValueError(
+            "bidirectional_contrastive_loss requires same embedding dim, "
+            f"got z_real={tuple(z_real.shape)}, z_fake={tuple(z_fake.shape)}"
+        )
     if z_real.size(0) <= 1:
         return torch.zeros((), device=z_real.device, dtype=z_real.dtype)
-    z1 = F.normalize(z_real, dim=-1)
-    z2 = F.normalize(z_fake, dim=-1)
-    logits = torch.matmul(z1, z2.transpose(0, 1)) / max(temperature, 1e-6)
+    z1 = torch.nan_to_num(z_real.float(), nan=0.0, posinf=0.0, neginf=0.0)
+    z2 = torch.nan_to_num(z_fake.float(), nan=0.0, posinf=0.0, neginf=0.0)
+    z1 = F.normalize(z1, dim=-1, eps=1e-8)
+    z2 = F.normalize(z2, dim=-1, eps=1e-8)
+    logits = torch.matmul(z1, z2.transpose(0, 1)) / max(float(temperature), 1e-6)
+    logits = torch.nan_to_num(logits, nan=0.0, posinf=50.0, neginf=-50.0).clamp(min=-50.0, max=50.0)
     labels = torch.arange(z1.size(0), device=z1.device)
     loss_12 = F.cross_entropy(logits, labels)
     loss_21 = F.cross_entropy(logits.transpose(0, 1), labels)
-    return 0.5 * (loss_12 + loss_21)
+    return (0.5 * (loss_12 + loss_21)).to(dtype=z_real.dtype)
 
 
 def deterministic_contrast_embedding(out: Dict[str, torch.Tensor]) -> torch.Tensor:
@@ -1455,6 +1473,123 @@ def batch_kmeans_usage_diagnostics(
             "km_max": float(usage.max().item()),
             "km_min": float(nonzero.min().item()) if nonzero.numel() > 0 else 0.0,
         }
+
+
+def batch_count_diagnostics(
+    x_count: torch.Tensor,
+    sample_id: torch.Tensor = None,
+    tissue_id: torch.Tensor = None,
+    celltype_id: torch.Tensor = None,
+    topk: int = 3,
+) -> Dict[str, object]:
+    with torch.no_grad():
+        x = _safe_count_tensor(x_count)
+        lib = x.sum(dim=1)
+        max_gene = x.max(dim=1).values if x.numel() > 0 else torch.zeros_like(lib)
+        valid = _library_valid_weight(x)
+        topk = max(1, min(int(topk), int(lib.numel()))) if lib.numel() > 0 else 0
+
+        def _rows(order_tensor: torch.Tensor) -> str:
+            rows = []
+            for idx_t in order_tensor[:topk]:
+                i = int(idx_t.item())
+                sid = int(sample_id[i].item()) if sample_id is not None else -1
+                tid = int(tissue_id[i].item()) if tissue_id is not None else -1
+                ct = int(celltype_id[i].item()) if celltype_id is not None else -1
+                rows.append(
+                    f"i={i}:sid={sid}:tid={tid}:ct={ct}:lib={float(lib[i].item()):.0f}:"
+                    f"maxGene={float(max_gene[i].item()):.0f}:filtered={int((not bool(valid[i].item())))}"
+                )
+            return "[" + "; ".join(rows) + "]"
+
+        if lib.numel() == 0:
+            return {
+                "lib_mean": 0.0,
+                "lib_p99": 0.0,
+                "lib_max": 0.0,
+                "max_gene": 0.0,
+                "n_filtered": 0,
+                "top_lib": "[]",
+                "top_gene": "[]",
+            }
+        lib_sorted_idx = torch.argsort(lib, descending=True)
+        gene_sorted_idx = torch.argsort(max_gene, descending=True)
+        q = torch.quantile(lib.float(), 0.99) if lib.numel() > 1 else lib.float().max()
+        return {
+            "lib_mean": float(lib.float().mean().item()),
+            "lib_p99": float(q.item()),
+            "lib_max": float(lib.float().max().item()),
+            "max_gene": float(max_gene.float().max().item()),
+            "n_filtered": int((~valid.bool()).sum().item()),
+            "top_lib": _rows(lib_sorted_idx),
+            "top_gene": _rows(gene_sorted_idx),
+        }
+
+
+def prior_parameter_snapshot(model) -> Dict[str, torch.Tensor]:
+    base = model.module if hasattr(model, "module") else model
+    prior = getattr(base, "prior", None)
+    if prior is None:
+        return {}
+    snap = {}
+    for key in (
+        "prior_mu",
+        "prior_logvar",
+        "prior_factor",
+        "pi_logits",
+        "prior_mu_t",
+        "prior_logvar_t",
+        "prior_factor_t",
+        "pi_logits_t",
+    ):
+        val = getattr(prior, key, None)
+        if torch.is_tensor(val):
+            snap[key] = val.detach().float().cpu().clone()
+    return snap
+
+
+def prior_parameter_delta(model, snapshot: Dict[str, torch.Tensor] = None) -> Dict[str, float]:
+    if not snapshot:
+        return {}
+    base = model.module if hasattr(model, "module") else model
+    prior = getattr(base, "prior", None)
+    if prior is None:
+        return {}
+    out = {}
+    for key, old in snapshot.items():
+        val = getattr(prior, key, None)
+        if not torch.is_tensor(val):
+            continue
+        cur = val.detach().float().cpu()
+        if tuple(cur.shape) != tuple(old.shape):
+            continue
+        diff = (cur - old).reshape(-1)
+        if diff.numel() == 0:
+            continue
+        out[f"{key}_mean"] = float(diff.abs().mean().item())
+        out[f"{key}_max"] = float(diff.abs().max().item())
+    return out
+
+
+def format_prior_delta(delta: Dict[str, float]) -> str:
+    if not delta:
+        return "priorDelta=NA"
+    parts = []
+    for prefix, label in (
+        ("prior_mu", "mu"),
+        ("prior_logvar", "logvar"),
+        ("prior_factor", "factor"),
+        ("pi_logits", "piLogit"),
+        ("prior_mu_t", "muT"),
+        ("prior_logvar_t", "logvarT"),
+        ("prior_factor_t", "factorT"),
+        ("pi_logits_t", "piLogitT"),
+    ):
+        mean_key = f"{prefix}_mean"
+        max_key = f"{prefix}_max"
+        if mean_key in delta:
+            parts.append(f"{label}={delta[mean_key]:.3g}/{delta[max_key]:.3g}")
+    return "priorDelta[" + ", ".join(parts) + "]" if parts else "priorDelta=NA"
 
 
 # =========================
@@ -1618,6 +1753,7 @@ def train_gmm_vae_one_epoch(
     recon_cell_weight_kmeans_iters=2,
     lambda_batchless_recon=0.0,
     force_base_posterior=False,
+    prior_snapshot_start: Dict[str, torch.Tensor] = None,
 ):
     model.train()
     loss_fn = model.module.loss if hasattr(model, "module") else model.loss
@@ -1855,6 +1991,18 @@ def train_gmm_vae_one_epoch(
                 if z_cur.numel() > 0:
                     z_f = z_cur.detach().float()
                     diag_msg += f", zAbsMax={z_f.nan_to_num().abs().max().item():.3g}"
+                cnt_diag = batch_count_diagnostics(
+                    x_count=x_count,
+                    sample_id=sample_id,
+                    tissue_id=tissue_id,
+                    celltype_id=celltype_id,
+                    topk=5,
+                )
+                diag_msg += (
+                    f", libMean/P99/Max={cnt_diag['lib_mean']:.1f}/{cnt_diag['lib_p99']:.1f}/{cnt_diag['lib_max']:.1f}, "
+                    f"maxGene={cnt_diag['max_gene']:.1f}, nLibFiltered={cnt_diag['n_filtered']}, "
+                    f"topLib={cnt_diag['top_lib']}, topGene={cnt_diag['top_gene']}"
+                )
                 if getattr(model.module if hasattr(model, "module") else model, "prior_type", None) == "gmm":
                     diag = gmm_collapse_diagnostics(prior=prior_ref, z=z_cur.detach() if z_cur.numel() > 0 else None, tissue_id=tissue_id)
                     diag_msg += (
@@ -1896,13 +2044,23 @@ def train_gmm_vae_one_epoch(
         total_batchless_recon += batchless_recon.item() * bsz
 
         if (batch_idx + 1) % 1000 == 0 and is_rank0:
+            cnt_diag = batch_count_diagnostics(
+                x_count=x_count,
+                sample_id=sample_id,
+                tissue_id=tissue_id,
+                celltype_id=celltype_id,
+                topk=3,
+            )
             msg = (
                 f"[Batch {batch_idx + 1}] "
                 f"Loss={loss.item():.4f}, Recon={recon.item():.4f}, KL={kl.item():.4f}, "
                 f"KLc={out_fake.get('kl_c_loss', torch.zeros_like(kl)).item():.4f}, "
                 f"KLu={out_fake.get('kl_u_loss', torch.zeros_like(kl)).item():.4f}, "
                 f"KLeps={out_fake.get('kl_eps_loss', torch.zeros_like(kl)).item():.4f}, "
-                f"cls={celltype_cls.item():.4f}"
+                f"cls={celltype_cls.item():.4f}, "
+                f"libMean/P99/Max={cnt_diag['lib_mean']:.1f}/{cnt_diag['lib_p99']:.1f}/{cnt_diag['lib_max']:.1f}, "
+                f"maxGene={cnt_diag['max_gene']:.1f}, nLibFiltered={cnt_diag['n_filtered']}, "
+                f"topLib={cnt_diag['top_lib']}, topGene={cnt_diag['top_gene']}"
             )
             if lambda_contrast > 0:
                 msg += f", Contrast={contrast.item():.4f}"
@@ -1912,6 +2070,8 @@ def train_gmm_vae_one_epoch(
                 msg += f", BatchlessRecon={batchless_recon.item():.4f}"
             if lambda_post_c_balance > 0:
                 msg += f", postCBal={post_c_balance.item():.4f}"
+            if prior_snapshot_start:
+                msg += ", " + format_prior_delta(prior_parameter_delta(model, prior_snapshot_start))
             if str(recon_cell_weight_mode).lower() == "batch_kmeans" and float(recon_cell_weight_alpha) > 0:
                 km = batch_kmeans_usage_diagnostics(
                     z=out_fake["z"],
@@ -2843,6 +3003,7 @@ class CompiledBalancedSampler(Sampler):
 
         self.sample_ids = list(self.samples_by_id.keys())
         self.samples_per_id = samples_per_id or min(len(v) for v in self.samples_by_id.values())
+        self.global_num_samples = sum(min(len(v), self.samples_per_id) for v in self.samples_by_id.values())
 
     def set_epoch(self, epoch: int):
         self.epoch = int(epoch)
@@ -2855,7 +3016,8 @@ class CompiledBalancedSampler(Sampler):
             if len(candidates) >= self.samples_per_id:
                 selected = rng.sample(candidates, self.samples_per_id)
             else:
-                selected = [candidates[rng.randrange(len(candidates))] for _ in range(self.samples_per_id)]
+                # Avoid repeatedly sampling rare bad cells from small sample_ids.
+                selected = list(candidates)
             indices.extend(selected)
         rng.shuffle(indices)
         if self.active_shards > 0 and self.num_shards > self.active_shards and len(indices) > 0:
@@ -2880,7 +3042,7 @@ class CompiledBalancedSampler(Sampler):
         return iter(indices)
 
     def __len__(self):
-        return self.samples_per_id * len(self.sample_ids)
+        return self.global_num_samples
 
 
 class DistributedCompiledBalancedSampler(Sampler):
@@ -2919,9 +3081,9 @@ class DistributedCompiledBalancedSampler(Sampler):
         self.sample_ids = list(self.samples_by_id.keys())
         self.samples_per_id = samples_per_id or min(len(v) for v in self.samples_by_id.values())
 
-        self.global_num_samples = self.samples_per_id * len(self.sample_ids)
-        self.num_samples = int(math.ceil(self.global_num_samples / self.num_replicas))
-        self.total_size = self.num_samples * self.num_replicas
+        self.global_num_samples = sum(min(len(v), self.samples_per_id) for v in self.samples_by_id.values())
+        self.total_size = (self.global_num_samples // self.num_replicas) * self.num_replicas
+        self.num_samples = self.total_size // self.num_replicas
 
     def set_epoch(self, epoch: int):
         self.epoch = int(epoch)
@@ -2934,7 +3096,8 @@ class DistributedCompiledBalancedSampler(Sampler):
             if len(candidates) >= self.samples_per_id:
                 selected = rng.sample(candidates, self.samples_per_id)
             else:
-                selected = [candidates[rng.randrange(len(candidates))] for _ in range(self.samples_per_id)]
+                # Avoid repeatedly sampling rare bad cells from small sample_ids.
+                selected = list(candidates)
             indices.extend(selected)
         rng.shuffle(indices)
         if self.active_shards > 0 and self.num_shards > self.active_shards and len(indices) > 0:
@@ -2957,10 +3120,7 @@ class DistributedCompiledBalancedSampler(Sampler):
                 reordered.extend(chunk[int(i)] for i in order)
             indices = reordered
 
-        if len(indices) < self.total_size:
-            indices.extend(indices[: self.total_size - len(indices)])
-        else:
-            indices = indices[: self.total_size]
+        indices = indices[: self.total_size]
 
         rank_indices = indices[self.rank:self.total_size:self.num_replicas]
         return iter(rank_indices)
@@ -2978,6 +3138,7 @@ class BalancedSampleSampler(Sampler):
 
         self.sample_ids = list(self.samples_by_id.keys())
         self.samples_per_id = samples_per_id or min(len(v) for v in self.samples_by_id.values())
+        self.global_num_samples = sum(min(len(v), self.samples_per_id) for v in self.samples_by_id.values())
         self.seed = int(seed)
         self.epoch = 0
 
@@ -2992,13 +3153,14 @@ class BalancedSampleSampler(Sampler):
             if len(candidates) >= self.samples_per_id:
                 selected = rng.sample(candidates, self.samples_per_id)
             else:
-                selected = [candidates[rng.randrange(len(candidates))] for _ in range(self.samples_per_id)]
+                # Avoid repeatedly sampling rare bad cells from small sample_ids.
+                selected = list(candidates)
             indices.extend(selected)
         rng.shuffle(indices)
         return iter(indices)
 
     def __len__(self):
-        return self.samples_per_id * len(self.sample_ids)
+        return self.global_num_samples
 
 
 class DistributedBalancedSampler(Sampler):
@@ -3024,9 +3186,9 @@ class DistributedBalancedSampler(Sampler):
         self.sample_ids = list(self.samples_by_id.keys())
         self.samples_per_id = samples_per_id or min(len(v) for v in self.samples_by_id.values())
 
-        self.global_num_samples = self.samples_per_id * len(self.sample_ids)
-        self.num_samples = int(math.ceil(self.global_num_samples / self.num_replicas))
-        self.total_size = self.num_samples * self.num_replicas
+        self.global_num_samples = sum(min(len(v), self.samples_per_id) for v in self.samples_by_id.values())
+        self.total_size = (self.global_num_samples // self.num_replicas) * self.num_replicas
+        self.num_samples = self.total_size // self.num_replicas
 
     def set_epoch(self, epoch: int):
         self.epoch = int(epoch)
@@ -3039,14 +3201,12 @@ class DistributedBalancedSampler(Sampler):
             if len(candidates) >= self.samples_per_id:
                 selected = rng.sample(candidates, self.samples_per_id)
             else:
-                selected = [candidates[rng.randrange(len(candidates))] for _ in range(self.samples_per_id)]
+                # Avoid repeatedly sampling rare bad cells from small sample_ids.
+                selected = list(candidates)
             indices.extend(selected)
         rng.shuffle(indices)
 
-        if len(indices) < self.total_size:
-            indices.extend(indices[: self.total_size - len(indices)])
-        else:
-            indices = indices[: self.total_size]
+        indices = indices[: self.total_size]
 
         rank_indices = indices[self.rank:self.total_size:self.num_replicas]
         return iter(rank_indices)

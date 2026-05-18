@@ -1381,13 +1381,16 @@ def bidirectional_contrastive_loss(z_real: torch.Tensor, z_fake: torch.Tensor, t
         )
     if z_real.size(0) <= 1:
         return torch.zeros((), device=z_real.device, dtype=z_real.dtype)
-    z1 = F.normalize(z_real, dim=-1)
-    z2 = F.normalize(z_fake, dim=-1)
-    logits = torch.matmul(z1, z2.transpose(0, 1)) / max(temperature, 1e-6)
+    z1 = torch.nan_to_num(z_real.float(), nan=0.0, posinf=0.0, neginf=0.0)
+    z2 = torch.nan_to_num(z_fake.float(), nan=0.0, posinf=0.0, neginf=0.0)
+    z1 = F.normalize(z1, dim=-1, eps=1e-8)
+    z2 = F.normalize(z2, dim=-1, eps=1e-8)
+    logits = torch.matmul(z1, z2.transpose(0, 1)) / max(float(temperature), 1e-6)
+    logits = torch.nan_to_num(logits, nan=0.0, posinf=50.0, neginf=-50.0).clamp(min=-50.0, max=50.0)
     labels = torch.arange(z1.size(0), device=z1.device)
     loss_12 = F.cross_entropy(logits, labels)
     loss_21 = F.cross_entropy(logits.transpose(0, 1), labels)
-    return 0.5 * (loss_12 + loss_21)
+    return (0.5 * (loss_12 + loss_21)).to(dtype=z_real.dtype)
 
 
 def deterministic_contrast_embedding(out: Dict[str, torch.Tensor], mode: str = "mixmu") -> torch.Tensor:
@@ -1418,10 +1421,12 @@ def supervised_celltype_contrastive_loss(
     valid = labels >= 0
     if int(valid.sum().item()) <= 1:
         return torch.zeros((), device=emb.device, dtype=emb.dtype)
-    z = F.normalize(emb[valid].float(), dim=-1)
+    z = torch.nan_to_num(emb[valid].float(), nan=0.0, posinf=0.0, neginf=0.0)
+    z = F.normalize(z, dim=-1, eps=1e-8)
     y = labels[valid]
     n = z.size(0)
     logits = torch.matmul(z, z.transpose(0, 1)) / max(float(temperature), 1e-6)
+    logits = torch.nan_to_num(logits, nan=0.0, posinf=50.0, neginf=-50.0).clamp(min=-50.0, max=50.0)
     eye = torch.eye(n, device=z.device, dtype=torch.bool)
     pos = (y[:, None] == y[None, :]) & (~eye)
     has_pos = pos.any(dim=1)
@@ -3149,6 +3154,7 @@ class CompiledBalancedSampler(Sampler):
 
         self.sample_ids = list(self.samples_by_id.keys())
         self.samples_per_id = samples_per_id or min(len(v) for v in self.samples_by_id.values())
+        self.global_num_samples = sum(min(len(v), self.samples_per_id) for v in self.samples_by_id.values())
 
     def set_epoch(self, epoch: int):
         self.epoch = int(epoch)
@@ -3161,7 +3167,8 @@ class CompiledBalancedSampler(Sampler):
             if len(candidates) >= self.samples_per_id:
                 selected = rng.sample(candidates, self.samples_per_id)
             else:
-                selected = [candidates[rng.randrange(len(candidates))] for _ in range(self.samples_per_id)]
+                # Avoid repeatedly sampling rare bad cells from small sample_ids.
+                selected = list(candidates)
             indices.extend(selected)
         rng.shuffle(indices)
         if self.active_shards > 0 and self.num_shards > self.active_shards and len(indices) > 0:
@@ -3186,7 +3193,7 @@ class CompiledBalancedSampler(Sampler):
         return iter(indices)
 
     def __len__(self):
-        return self.samples_per_id * len(self.sample_ids)
+        return self.global_num_samples
 
 
 class DistributedCompiledBalancedSampler(Sampler):
@@ -3225,9 +3232,9 @@ class DistributedCompiledBalancedSampler(Sampler):
         self.sample_ids = list(self.samples_by_id.keys())
         self.samples_per_id = samples_per_id or min(len(v) for v in self.samples_by_id.values())
 
-        self.global_num_samples = self.samples_per_id * len(self.sample_ids)
-        self.num_samples = int(math.ceil(self.global_num_samples / self.num_replicas))
-        self.total_size = self.num_samples * self.num_replicas
+        self.global_num_samples = sum(min(len(v), self.samples_per_id) for v in self.samples_by_id.values())
+        self.total_size = (self.global_num_samples // self.num_replicas) * self.num_replicas
+        self.num_samples = self.total_size // self.num_replicas
 
     def set_epoch(self, epoch: int):
         self.epoch = int(epoch)
@@ -3240,7 +3247,8 @@ class DistributedCompiledBalancedSampler(Sampler):
             if len(candidates) >= self.samples_per_id:
                 selected = rng.sample(candidates, self.samples_per_id)
             else:
-                selected = [candidates[rng.randrange(len(candidates))] for _ in range(self.samples_per_id)]
+                # Avoid repeatedly sampling rare bad cells from small sample_ids.
+                selected = list(candidates)
             indices.extend(selected)
         rng.shuffle(indices)
         if self.active_shards > 0 and self.num_shards > self.active_shards and len(indices) > 0:
@@ -3263,10 +3271,7 @@ class DistributedCompiledBalancedSampler(Sampler):
                 reordered.extend(chunk[int(i)] for i in order)
             indices = reordered
 
-        if len(indices) < self.total_size:
-            indices.extend(indices[: self.total_size - len(indices)])
-        else:
-            indices = indices[: self.total_size]
+        indices = indices[: self.total_size]
 
         rank_indices = indices[self.rank:self.total_size:self.num_replicas]
         return iter(rank_indices)
@@ -3284,6 +3289,7 @@ class BalancedSampleSampler(Sampler):
 
         self.sample_ids = list(self.samples_by_id.keys())
         self.samples_per_id = samples_per_id or min(len(v) for v in self.samples_by_id.values())
+        self.global_num_samples = sum(min(len(v), self.samples_per_id) for v in self.samples_by_id.values())
         self.seed = int(seed)
         self.epoch = 0
 
@@ -3298,13 +3304,14 @@ class BalancedSampleSampler(Sampler):
             if len(candidates) >= self.samples_per_id:
                 selected = rng.sample(candidates, self.samples_per_id)
             else:
-                selected = [candidates[rng.randrange(len(candidates))] for _ in range(self.samples_per_id)]
+                # Avoid repeatedly sampling rare bad cells from small sample_ids.
+                selected = list(candidates)
             indices.extend(selected)
         rng.shuffle(indices)
         return iter(indices)
 
     def __len__(self):
-        return self.samples_per_id * len(self.sample_ids)
+        return self.global_num_samples
 
 
 class DistributedBalancedSampler(Sampler):
@@ -3330,9 +3337,9 @@ class DistributedBalancedSampler(Sampler):
         self.sample_ids = list(self.samples_by_id.keys())
         self.samples_per_id = samples_per_id or min(len(v) for v in self.samples_by_id.values())
 
-        self.global_num_samples = self.samples_per_id * len(self.sample_ids)
-        self.num_samples = int(math.ceil(self.global_num_samples / self.num_replicas))
-        self.total_size = self.num_samples * self.num_replicas
+        self.global_num_samples = sum(min(len(v), self.samples_per_id) for v in self.samples_by_id.values())
+        self.total_size = (self.global_num_samples // self.num_replicas) * self.num_replicas
+        self.num_samples = self.total_size // self.num_replicas
 
     def set_epoch(self, epoch: int):
         self.epoch = int(epoch)
@@ -3345,14 +3352,12 @@ class DistributedBalancedSampler(Sampler):
             if len(candidates) >= self.samples_per_id:
                 selected = rng.sample(candidates, self.samples_per_id)
             else:
-                selected = [candidates[rng.randrange(len(candidates))] for _ in range(self.samples_per_id)]
+                # Avoid repeatedly sampling rare bad cells from small sample_ids.
+                selected = list(candidates)
             indices.extend(selected)
         rng.shuffle(indices)
 
-        if len(indices) < self.total_size:
-            indices.extend(indices[: self.total_size - len(indices)])
-        else:
-            indices = indices[: self.total_size]
+        indices = indices[: self.total_size]
 
         rank_indices = indices[self.rank:self.total_size:self.num_replicas]
         return iter(rank_indices)

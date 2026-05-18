@@ -44,6 +44,9 @@ from main_mfa.utils_model import (
     DistributedBalancedSampler,
     CompiledBalancedSampler,
     DistributedCompiledBalancedSampler,
+    prior_parameter_snapshot,
+    prior_parameter_delta,
+    format_prior_delta,
 )
 
 
@@ -1043,6 +1046,9 @@ def main():
             f"[Epoch {epoch_id}] stage={stage_name}, beta_kl={beta_t:.6f}, "
             f"lambda_resp_anchor={lambda_resp_anchor_t:.6f}"
         )
+        prior_snapshot_start = prior_parameter_snapshot(model)
+        if prior_snapshot_start and is_main_process(rank):
+            log(f"[Epoch {epoch_id}] PriorSnapshot captured keys={','.join(sorted(prior_snapshot_start.keys()))}")
 
         force_base_posterior = False
 
@@ -1102,6 +1108,7 @@ def main():
             recon_cell_weight_kmeans_iters=args.recon_cell_weight_kmeans_iters,
             lambda_batchless_recon=args.lambda_batchless_recon,
             force_base_posterior=force_base_posterior,
+            prior_snapshot_start=prior_snapshot_start,
         )
         train_msg = (
             f"[Epoch {epoch_id}] "
@@ -1112,6 +1119,8 @@ def main():
             train_msg += f", Contrast={loss_contrast:.4f}"
         if args.lambda_batchless_recon > 0:
             train_msg += f", BatchlessRecon={loss_batchless_recon:.4f}"
+        if prior_snapshot_start:
+            train_msg += ", " + format_prior_delta(prior_parameter_delta(model, prior_snapshot_start))
         log(train_msg)
 
         if (
