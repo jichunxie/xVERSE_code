@@ -67,7 +67,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --prior-type gmm \
   --recon-loss nb \
   --latent-dim 256 \
-  --num-components 1024 \
+  --num-components 64 \
   --prior-mu-init sphere \
   --prior-mu-init-radius 4 \
   --prior-cov-rank 0 \
