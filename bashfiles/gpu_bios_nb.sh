@@ -62,12 +62,12 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --val-num-workers 5 \
   --prefetch-factor 8 \
   --samples-per-id 500 \
-  --lr 1e-3 \
+  --lr 1e-4 \
   --weight-decay 1e-5 \
   --prior-type gmm \
   --recon-loss nb \
   --latent-dim 256 \
-  --num-components 64 \
+  --num-components 1024 \
   --prior-mu-init sphere \
   --prior-mu-init-radius 4 \
   --prior-cov-rank 0 \
@@ -79,11 +79,11 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --batch-cond-drop-prob 0.0 \
   --lambda-batchless-recon 0.01 \
   --lambda-tissueless-recon 0 \
-  --prior-logvar-max 0 \
+  --prior-logvar-max 4 \
   --expr-hidden-dim 512 \
   --mask-hidden-dim 512 \
   --dec-hidden-dim 512 \
-  --beta-kl 0.001 \
+  --beta-kl 0.0005 \
   --recon-observed-only \
   --mask-aug-prob 1.0 \
   --mask-aug-policy simple \
