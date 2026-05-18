@@ -209,6 +209,8 @@ def parse_args():
                         help="Target log-variance for --lambda-prior-logvar-l2. -0.5 means variance about 0.61.")
     parser.add_argument("--prior-init-epoch", type=int, default=3,
                         help="If >0, run one-shot MFA prior initialization after this training epoch.")
+    parser.add_argument("--prior-init-before-train", action="store_true",
+                        help="Run one-shot MFA prior initialization from current encoder embeddings before epoch 1.")
     parser.add_argument("--prior-init-samples", type=int, default=100000,
                         help="Maximum cells used for delayed prior initialization.")
     parser.add_argument("--prior-init-kmeans-iters", type=int, default=20,
@@ -989,6 +991,32 @@ def main():
         log(f"[TrainMode] prior_only: trainable parameters reset to {trainable_count:,}/{total_params:,}; optimizer rebuilt.")
     else:
         log("[TrainMode] full")
+
+    if bool(args.prior_init_before_train) and (not prior_initialized):
+        log("[PriorInit] Triggered before training")
+        if train_sampler is not None:
+            train_sampler.set_epoch(0)
+        initialized = delayed_init_mfa_prior_from_loader(
+            model=model,
+            optimizer=optimizer,
+            train_loader=train_loader,
+            device=device,
+            samples=args.prior_init_samples,
+            kmeans_iters=args.prior_init_kmeans_iters,
+            logvar_mode=args.prior_init_logvar_mode,
+            logvar_value=args.prior_init_logvar_value,
+            logvar_shrink_alpha=args.prior_init_logvar_shrink_alpha,
+            logvar_min=args.prior_init_logvar_min,
+            logvar_max=args.prior_init_logvar_max,
+            factor_pca=args.prior_init_factor_pca,
+            factor_scale=args.prior_init_factor_scale,
+            factor_std=args.prior_init_factor_std,
+            seed=args.seed,
+            rank=rank,
+            world_size=world_size,
+            log=log,
+        )
+        prior_initialized = bool(prior_initialized or initialized)
 
     epoch_id = start_round
 

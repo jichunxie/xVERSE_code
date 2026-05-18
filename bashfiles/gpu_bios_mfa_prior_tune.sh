@@ -104,6 +104,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --lambda-prior-factor-l2 0\
   --prior-logvar-target 0 \
   --prior-init-epoch 0 \
+  --prior-init-before-train \
   --prior-init-samples 500000 \
   --prior-init-kmeans-iters 20 \
   --prior-init-logvar-mode shrink \
