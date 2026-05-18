@@ -73,10 +73,34 @@ SCIB_SCORE_TABLE = [
     ("iLISI", "Batch correction"),
     ("KBET", "Batch correction"),
     ("Graph connectivity", "Batch correction"),
-    ("Batch correction", "Aggregate score"),
-    ("Bio conservation", "Aggregate score"),
-    ("Total", "Aggregate score"),
 ]
+
+SCIB_METRIC_COLUMNS = [name for name, _ in SCIB_SCORE_TABLE]
+METRIC_OUTPUT_COLUMNS = ["tissue", "gene_set", "model", "key", "n_cells"] + SCIB_METRIC_COLUMNS
+
+PCR_COLUMNS = {
+    "PCR_batch",
+    "PCR_before",
+    "PCR_after",
+    "PCR_delta_after_minus_before",
+    "PCR comparison",
+}
+
+
+def drop_pcr_columns(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    return df.drop(columns=[c for c in PCR_COLUMNS if c in df.columns], errors="ignore")
+
+
+def format_metric_output_df(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    df = drop_pcr_columns(df.copy())
+    for col in METRIC_OUTPUT_COLUMNS:
+        if col not in df.columns:
+            df[col] = np.nan
+    return df[METRIC_OUTPUT_COLUMNS]
 
 
 def pick_celltype_col(obs: pd.DataFrame):
@@ -502,6 +526,7 @@ def load_cached_metric_rows(cache_path: str, tissue_name: str, gene_set: str) ->
     if not dfs:
         return pd.DataFrame()
     cached = pd.concat(dfs, ignore_index=True)
+    cached = format_metric_output_df(cached)
     cached = cached.drop_duplicates(subset=["tissue", "gene_set", "model", "key"], keep="first")
     return cached
 
@@ -524,16 +549,17 @@ def update_metric_cache(cache_path: str, rows: list):
     if not rows:
         return
     os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-    new_df = pd.DataFrame(rows)
+    new_df = format_metric_output_df(pd.DataFrame(rows))
     if os.path.exists(cache_path):
         try:
-            old_df = pd.read_csv(cache_path)
+            old_df = format_metric_output_df(pd.read_csv(cache_path))
             df = pd.concat([old_df, new_df], ignore_index=True)
         except Exception as e:
             print(f"[cache warn] cannot read existing cache {cache_path}: {e}")
             df = new_df
     else:
         df = new_df
+    df = format_metric_output_df(df)
     df = df.drop_duplicates(subset=["tissue", "gene_set", "model", "key"], keep="last")
     df.to_csv(cache_path, index=False)
     print(f"[cache save] {cache_path}")
@@ -648,6 +674,7 @@ def main():
                 all_err_rows.append(erow)
 
             df_tg = pd.DataFrame([r for r in all_rows if r["tissue"] == tissue_name and r["gene_set"] == gene_set])
+            df_tg = format_metric_output_df(df_tg)
             if not df_tg.empty:
                 out_csv = os.path.join(args.output_dir, f"{tissue_name}_{gene_set}_scib_full_metrics.csv")
                 df_tg.to_csv(out_csv, index=False)
@@ -657,8 +684,8 @@ def main():
                 print(f"[save] {score_csv}")
                 update_metric_cache(cache_path, new_cache_rows)
 
-    df_all = pd.DataFrame(all_rows)
-    df_err = pd.DataFrame(all_err_rows)
+    df_all = format_metric_output_df(pd.DataFrame(all_rows))
+    df_err = drop_pcr_columns(pd.DataFrame(all_err_rows))
     all_csv = os.path.join(args.output_dir, "all_scib_full_metrics.csv")
     err_csv = os.path.join(args.output_dir, "all_scib_metric_errors.csv")
     score_csv = os.path.join(args.output_dir, "all_scib_score_table.csv")
