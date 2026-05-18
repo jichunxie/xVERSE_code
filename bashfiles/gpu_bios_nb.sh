@@ -72,12 +72,12 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --prior-mu-init-radius 4 \
   --prior-cov-rank 0 \
   --posterior-cov-rank 0 \
-  --batch-emb-dim 0 \
-  --no-use-batch-condition \
+  --batch-emb-dim 16 \
+  --use-batch-condition \
   --no-use-tissue-condition \
   --tissue-emb-dim 0 \
   --batch-cond-drop-prob 0.0 \
-  --lambda-batchless-recon 0.01 \
+  --lambda-batchless-recon 0.1 \
   --lambda-tissueless-recon 0 \
   --prior-logvar-max 4 \
   --expr-hidden-dim 512 \
