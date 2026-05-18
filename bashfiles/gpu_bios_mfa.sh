@@ -88,7 +88,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --recon-observed-only \
   --mask-aug-prob 1.0 \
   --mask-aug-policy simple \
-  --mask-aug-min-frac 0.1 \
+  --mask-aug-min-frac 0 \
   --mask-aug-max-frac 0.5 \
   --lambda-celltype-cls 1 \
   --lambda-contrast 0.25 \
