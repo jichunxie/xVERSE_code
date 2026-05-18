@@ -14,6 +14,7 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import argparse
+import math
 import os
 import random
 import json
@@ -47,7 +48,7 @@ from main_hierarchy.utils_model import (
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Train the mask-FiLM GMM-VAE with original xVERSE data pipeline.")
+    parser = argparse.ArgumentParser(description="Train the mask-FiLM MFA-VAE with original xVERSE data pipeline.")
     parser.add_argument("--compiled-dataset-root", default=None,
                         help="Path to compiled dataset root (format=xverse_train_v1). If set, training reads compiled shards directly.")
     parser.add_argument("--compiled-max-cached-shards", type=int, default=8,
@@ -89,6 +90,8 @@ def parse_args():
                         help="Keep DataLoader workers alive across epochs.")
     parser.add_argument("--no-persistent-workers", dest="persistent_workers", action="store_false",
                         help="Disable persistent DataLoader workers.")
+    parser.add_argument("--val-persistent-workers", action="store_true", default=False,
+                        help="Keep validation DataLoader workers alive across validation calls.")
     parser.add_argument("--samples-per-id", type=int, default=1000, help="Samples drawn per id in sampler.")
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate.")
     parser.add_argument("--weight-decay", type=float, default=1e-5, help="Weight decay.")
@@ -98,20 +101,32 @@ def parse_args():
     parser.add_argument("--scheduler-min-lr", type=float, default=1e-6, help="LR scheduler minimum LR.")
     parser.add_argument("--seed", type=int, default=42, help="Random seed.")
     parser.add_argument("--last-ckpt-name", default="last_model.pth", help="Filename for last checkpoint.")
-    parser.add_argument("--best-recon-ckpt-name", default="best_recon_model.pth", help="Filename for best validation reconstruction checkpoint.")
-    parser.add_argument("--best-cls-ckpt-name", default="best_cls_model.pth", help="Filename for best validation cell-type classification checkpoint.")
-    parser.add_argument("--best-contrast-ckpt-name", default="best_contrast_model.pth", help="Filename for best validation contrast checkpoint.")
+    parser.add_argument("--best-ckpt-name", default="best_model.pth", help="Filename for best checkpoint.")
     parser.add_argument("--beta-kl", type=float, default=0.01, help="KL weight.")
+    parser.add_argument("--beta-kl-warmup-epochs", type=int, default=0,
+                        help="Linearly warm KL weight from --beta-kl-warmup-start to --beta-kl over this many epochs. 0 disables.")
+    parser.add_argument("--beta-kl-warmup-start", type=float, default=0.0,
+                        help="Starting KL weight for linear KL warmup.")
     parser.add_argument("--prior-type", choices=["gmm", "gaussian"], default="gmm",
                         help="Latent prior type. 'gaussian' uses N(0,I) with closed-form KL.")
     parser.add_argument("--latent-dim", type=int, default=128, help="Latent dim.")
-    parser.add_argument("--num-components", type=int, default=16, help="GMM component count K.")
+    parser.add_argument("--num-components", type=int, default=16, help="MFA component count K.")
     parser.add_argument("--prior-cov-rank", type=int, default=8,
-                        help="Low-rank size R for each GMM component covariance: diag + U U^T.")
+                        help="Factor rank R for each MFA prior component covariance: diag + A_k A_k^T.")
     parser.add_argument("--prior-shared-cov", action="store_true",
-                        help="Share GMM prior log-variance and low-rank covariance factor across components.")
+                        help="Ignored in main_hierarchy; MFA prior always uses component-specific covariance/factors.")
+    parser.add_argument("--prior-mu-init", choices=["normal", "sphere", "grouped_sphere", "zero"], default="normal",
+                        help="Initial placement of prior component means before any delayed prior init.")
+    parser.add_argument("--prior-mu-init-radius", type=float, default=1.0,
+                        help="Coarse radius used by sphere/grouped_sphere prior mean initialization.")
+    parser.add_argument("--prior-mu-init-groups", type=int, default=8,
+                        help="Number of coarse groups for --prior-mu-init grouped_sphere.")
+    parser.add_argument("--prior-mu-init-local-radius", type=float, default=0.5,
+                        help="Local radius around each coarse group for --prior-mu-init grouped_sphere.")
+    parser.add_argument("--hierarchy-groups", type=int, default=8,
+                        help="Number of coarse groups g in hierarchical prior g -> s -> z.")
     parser.add_argument("--posterior-cov-rank", type=int, default=0,
-                        help="Low-rank size R for posterior q(z|x,c) covariance: diag + U U^T. 0 keeps diagonal posterior.")
+                        help="Ignored in main_hierarchy; q(u|x,c) uses --prior-cov-rank as the explicit MFA factor dimension.")
     parser.add_argument("--expr-hidden-dim", type=int, default=1024, help="Expression encoder hidden dim.")
     parser.add_argument("--mask-hidden-dim", type=int, default=512, help="Mask encoder hidden dim.")
     parser.add_argument("--dec-hidden-dim", type=int, default=1024, help="Decoder hidden dim.")
@@ -146,22 +161,6 @@ def parse_args():
                         help="Number of batch k-means clusters for cell recon weighting.")
     parser.add_argument("--recon-cell-weight-kmeans-iters", type=int, default=2,
                         help="Fast k-means iterations for batch_kmeans cell recon weighting.")
-    parser.add_argument("--lambda-rank-recon", type=float, default=0.0,
-                        help="Weight for pairwise rank reconstruction loss on rate vs counts.")
-    parser.add_argument("--rank-recon-gene-pairs", type=int, default=256,
-                        help="Per-cell gene pairs sampled for rank reconstruction.")
-    parser.add_argument("--rank-recon-cell-pairs", type=int, default=256,
-                        help="Cross-cell pairs sampled per batch for same-gene rank reconstruction.")
-    parser.add_argument("--gmm-latent-dim", type=int, default=64,
-                        help="Hierarchical split latent: dimensions regularized by GMM prior. Remaining latent dimensions use a standard Gaussian residual prior. <=0 uses all latent dimensions.")
-    parser.add_argument("--num-prior-groups", type=int, default=1,
-                        help="Hierarchical prior groups. Components are partitioned into this many interpretable coarse groups; <=1 recovers a flat GMM.")
-    parser.add_argument("--group-latent-dim", type=int, default=64,
-                        help="For hierarchical prior: dimensions assigned to z_group. Remaining latent dimensions are z_sub; no free residual block is used.")
-    parser.add_argument("--lambda-prior-logvar-l2", type=float, default=0.0,
-                        help="Weak L2 penalty pulling GMM prior log-variance toward --prior-logvar-target.")
-    parser.add_argument("--prior-logvar-target", type=float, default=-0.5,
-                        help="Target log-variance for --lambda-prior-logvar-l2.")
     parser.add_argument("--mask-aug-prob", type=float, default=1.0,
                         help="For gmm_vae training, probability of applying random observed->unobserved masking per cell.")
     parser.add_argument("--mask-aug-policy", choices=["xverse", "simple"], default="xverse",
@@ -176,60 +175,66 @@ def parse_args():
                         help="Number of tissue ids for conditional prior. <=0 means auto infer from dataset.")
     parser.add_argument("--num-batches", type=int, default=0,
                         help="Number of sample/batch ids for decoder conditioning. <=0 means auto infer from dataset.")
-    parser.add_argument("--use-batch-condition", dest="use_batch_condition", action="store_true", default=True,
-                        help="Enable sample/batch decoder FiLM conditioning.")
-    parser.add_argument("--no-use-batch-condition", dest="use_batch_condition", action="store_false",
-                        help="Disable sample/batch decoder FiLM conditioning.")
-    parser.add_argument("--use-tissue-condition", dest="use_tissue_condition", action="store_true", default=False,
-                        help="Enable tissue decoder FiLM conditioning.")
-    parser.add_argument("--no-use-tissue-condition", dest="use_tissue_condition", action="store_false",
-                        help="Disable tissue decoder FiLM conditioning.")
     parser.add_argument("--batch-emb-dim", type=int, default=0,
                         help="Sample/batch embedding dim for decoder FiLM conditioning. 0 disables batch conditioning.")
-    parser.add_argument("--tissue-emb-dim", type=int, default=0,
-                        help="Tissue embedding dim for decoder FiLM conditioning. 0 disables tissue decoder conditioning.")
     parser.add_argument("--batch-cond-drop-prob", type=float, default=0.0,
                         help="Probability of dropping decoder batch condition during training.")
     parser.add_argument("--lambda-batchless-recon", type=float, default=0.0,
                         help="Weight of reconstruction loss with decoder batch condition disabled.")
-    parser.add_argument("--lambda-tissueless-recon", type=float, default=0.0,
-                        help="Weight of reconstruction loss with decoder tissue condition disabled.")
     parser.add_argument("--conditional-prior-on-tissue", action="store_true",
-                        help="Use tissue-conditional GMM prior p(z|tissue).")
+                        help="Use tissue-conditional MFA prior p(z|tissue).")
     parser.add_argument("--lambda-celltype-cls", type=float, default=0.0,
                         help="Weight for auxiliary celltype cross-entropy loss (ignore label -1).")
-    parser.add_argument("--lambda-celltype-contrast", type=float, default=0.0,
-                        help="Weight for supervised cell-type contrastive loss on the selected contrast embedding.")
-    parser.add_argument("--celltype-contrast-temp", type=float, default=0.2,
-                        help="Temperature for supervised cell-type contrastive loss.")
+    parser.add_argument("--prior-logvar-min", type=float, default=-4.0,
+                        help="Lower clamp bound for MFA prior log-variance used in KL. Prevents tiny prior variance from exploding KL.")
     parser.add_argument("--prior-logvar-max", type=float, default=4.0,
-                        help="Upper clamp bound for GMM prior log-variance.")
+                        help="Upper clamp bound for MFA prior log-variance used in KL.")
     parser.add_argument("--lambda-prior-pi-balance", type=float, default=0.0,
                         help="Weight for balancing global mixture weights toward uniform.")
     parser.add_argument("--lambda-prior-mu-spread", type=float, default=0.0,
                         help="Weight for repulsive regularization between prior component means.")
     parser.add_argument("--prior-mu-spread-tau", type=float, default=1.0,
                         help="Length scale for prior mean spread regularization (smaller => stronger local repulsion).")
+    parser.add_argument("--lambda-prior-factor-l2", type=float, default=0.0,
+                        help="Weak L2 penalty on MFA prior factor loadings to prevent direction variance blow-up.")
+    parser.add_argument("--lambda-prior-logvar-l2", type=float, default=0.0,
+                        help="Weak L2 penalty that shrinks MFA diagonal prior log-variance toward --prior-logvar-target.")
+    parser.add_argument("--prior-logvar-target", type=float, default=-0.5,
+                        help="Target log-variance for --lambda-prior-logvar-l2. -0.5 means variance about 0.61.")
+    parser.add_argument("--prior-init-epoch", type=int, default=0,
+                        help="If >0, run one-shot MFA prior initialization after this training epoch.")
+    parser.add_argument("--prior-init-samples", type=int, default=100000,
+                        help="Maximum cells used for delayed prior initialization.")
+    parser.add_argument("--prior-init-kmeans-iters", type=int, default=20,
+                        help="K-means iterations for delayed prior initialization.")
+    parser.add_argument("--prior-init-logvar-mode", choices=["cluster", "constant", "shrink"], default="constant",
+                        help="How to initialize MFA diagonal prior log-variance after delayed k-means init.")
+    parser.add_argument("--prior-init-logvar-value", type=float, default=0.0,
+                        help="Baseline prior log-variance used by constant/shrink init modes.")
+    parser.add_argument("--prior-init-logvar-shrink-alpha", type=float, default=0.1,
+                        help="For --prior-init-logvar-mode shrink: mix cluster variance into baseline variance by this weight.")
+    parser.add_argument("--prior-init-logvar-min", type=float, default=-4.0,
+                        help="Lower clamp for initialized prior log-variance.")
+    parser.add_argument("--prior-init-logvar-max", type=float, default=2.0,
+                        help="Upper clamp for initialized prior log-variance.")
+    parser.add_argument("--prior-init-factor-pca", action="store_true", default=False,
+                        help="Initialize MFA prior factors from per-cluster local PCA.")
+    parser.add_argument("--no-prior-init-factor-pca", dest="prior_init_factor_pca", action="store_false",
+                        help="Do not initialize MFA factors from local PCA; reset factors to small noise instead.")
+    parser.add_argument("--prior-init-factor-scale", type=float, default=0.05,
+                        help="Scale applied to PCA-initialized MFA prior factors.")
+    parser.add_argument("--prior-init-factor-std", type=float, default=0.01,
+                        help="Std for small-random MFA prior factors when PCA init is disabled.")
+    parser.add_argument("--prior-freeze-after-init-epochs", type=int, default=1,
+                        help="Freeze prior parameters for this many training epochs after delayed prior init.")
     parser.add_argument("--lambda-post-c-balance", type=float, default=0.0,
                         help="Weight for batch-level posterior component usage balance KL(q_mean(c)||uniform).")
-    parser.add_argument("--prior-refresh-every", type=int, default=0,
-                        help="If >0, refresh GMM prior mu/pi from training embeddings every N epochs.")
-    parser.add_argument("--prior-refresh-start-epoch", type=int, default=1,
-                        help="First epoch where prior refresh is allowed.")
-    parser.add_argument("--prior-refresh-samples", type=int, default=50000,
-                        help="Maximum training cells used for each prior refresh.")
-    parser.add_argument("--prior-refresh-kmeans-iters", type=int, default=10,
-                        help="KMeans iterations used by prior refresh.")
-    parser.add_argument("--prior-refresh-ema", type=float, default=0.2,
-                        help="EMA update strength for prior refresh. 1.0 fully replaces current prior mu/pi.")
     parser.add_argument("--lambda-contrast", type=float, default=1.0,
                         help="Weight of contrastive loss between real-mask and fake-mask views.")
     parser.add_argument("--lambda-real-recon", type=float, default=0.1,
                         help="Weight of real-mask reconstruction loss term.")
     parser.add_argument("--contrast-temp", type=float, default=0.1,
                         help="Temperature for bidirectional InfoNCE contrastive loss.")
-    parser.add_argument("--contrast-embedding", choices=["mixmu", "encoder_hidden", "mu_base", "z"], default="encoder_hidden",
-                        help="Embedding used by view contrast and cell-type contrast.")
     parser.add_argument("--ddp", action="store_true", default=True,
                         help="Use torch DistributedDataParallel when launched with torchrun.")
     parser.add_argument("--no-ddp", dest="ddp", action="store_false",
@@ -357,10 +362,20 @@ def _apply_training_stage(base_model, stage: str):
     _set_requires_grad(getattr(base_model, "library_head", None), True)
     _set_requires_grad(getattr(base_model, "prior", None), True)
     _set_requires_grad(getattr(base_model, "post_c_logits", None), True)
-    _set_requires_grad(getattr(base_model, "post_mu", None), True)
-    _set_requires_grad(getattr(base_model, "post_logvar", None), True)
-    _set_requires_grad(getattr(base_model, "post_factor", None), True)
+    _set_requires_grad(getattr(base_model, "post_u_mu", None), True)
+    _set_requires_grad(getattr(base_model, "post_u_logvar", None), True)
+    _set_requires_grad(getattr(base_model, "post_eps_mu", None), True)
+    _set_requires_grad(getattr(base_model, "post_eps_logvar", None), True)
     _set_requires_grad(getattr(base_model, "score_head", None), True)
+
+
+def _linear_kl_warmup(epoch: int, target_beta: float, warmup_epochs: int, start_beta: float = 0.0) -> float:
+    if int(warmup_epochs) <= 0:
+        return float(target_beta)
+    if int(warmup_epochs) == 1:
+        return float(target_beta)
+    progress = min(max(float(epoch - 1) / float(max(int(warmup_epochs) - 1, 1)), 0.0), 1.0)
+    return float(start_beta) + progress * (float(target_beta) - float(start_beta))
 
 
 def _kmeans_torch(x: torch.Tensor, k: int, iters: int, seed: int):
@@ -386,147 +401,199 @@ def _kmeans_torch(x: torch.Tensor, k: int, iters: int, seed: int):
     return centers, assign
 
 
-def _match_centers_to_prior(old_mu: torch.Tensor, new_centers: torch.Tensor) -> torch.Tensor:
-    """Return indices that align new centers to existing component order."""
-    cost = torch.cdist(old_mu.float(), new_centers.float(), p=2)
-    pairs = torch.argsort(cost.flatten())
-    k_old, k_new = cost.shape
-    assigned_old = torch.zeros(k_old, dtype=torch.bool, device=cost.device)
-    assigned_new = torch.zeros(k_new, dtype=torch.bool, device=cost.device)
-    match = torch.full((k_old,), -1, dtype=torch.long, device=cost.device)
-    for flat_idx in pairs:
-        old_idx = torch.div(flat_idx, k_new, rounding_mode="floor")
-        new_idx = flat_idx % k_new
-        if (not bool(assigned_old[old_idx])) and (not bool(assigned_new[new_idx])):
-            match[old_idx] = new_idx
-            assigned_old[old_idx] = True
-            assigned_new[new_idx] = True
-            if bool(assigned_old.all()):
+def _clear_optimizer_state_for_params(optimizer, params):
+    for p in params:
+        if p is not None and p in optimizer.state:
+            optimizer.state.pop(p, None)
+
+
+def _collect_prior_init_embeddings(model, train_loader, device, max_samples: int):
+    base_model = _unwrap_model(model)
+    was_training = base_model.training
+    base_model.eval()
+    chunks = []
+    n_seen = 0
+    with torch.no_grad():
+        for sample_id, tissue_id, celltype_id, x_count, x_mask, x_mask_encoder in train_loader:
+            x_count = x_count.to(device, non_blocking=True)
+            x_mask = x_mask.to(device, non_blocking=True)
+            # Use the real observed panel for initialization; avoid sampling noise and
+            # avoid random-mask views so centers represent the current posterior manifold.
+            out = base_model(
+                x_count=x_count,
+                x_mask=x_mask,
+                tissue_id=tissue_id.to(device, non_blocking=True),
+                sample_id=None,
+                use_batch_condition=False,
+            )
+            z = out.get("mu_base", out.get("mu")).detach().float()
+            take = min(z.size(0), max(0, int(max_samples) - n_seen))
+            if take > 0:
+                chunks.append(z[:take].cpu())
+                n_seen += take
+            if n_seen >= int(max_samples):
                 break
-    if (match < 0).any():
-        unused = torch.nonzero(~assigned_new, as_tuple=False).flatten()
-        missing = torch.nonzero(match < 0, as_tuple=False).flatten()
-        match[missing] = unused[: missing.numel()]
-    return match
+    if was_training:
+        base_model.train()
+    if not chunks:
+        return torch.empty((0, base_model.latent_dim), dtype=torch.float32)
+    return torch.cat(chunks, dim=0)
 
 
-def refresh_gmm_prior_from_loader(
+def _gather_init_embeddings(local_z: torch.Tensor, device, rank: int, world_size: int):
+    if (not dist.is_available()) or (not dist.is_initialized()) or world_size <= 1:
+        return local_z.to(device) if rank == 0 else None
+    local_z = local_z.to(device)
+    local_n = torch.tensor([local_z.size(0)], device=device, dtype=torch.long)
+    sizes = [torch.zeros_like(local_n) for _ in range(world_size)]
+    dist.all_gather(sizes, local_n)
+    max_n = int(max(s.item() for s in sizes))
+    d = local_z.size(1)
+    padded = torch.zeros((max_n, d), device=device, dtype=local_z.dtype)
+    if local_z.size(0) > 0:
+        padded[: local_z.size(0)] = local_z
+    gathered = [torch.zeros_like(padded) for _ in range(world_size)]
+    dist.all_gather(gathered, padded)
+    if rank != 0:
+        return None
+    parts = [g[: int(sizes[i].item())] for i, g in enumerate(gathered) if int(sizes[i].item()) > 0]
+    return torch.cat(parts, dim=0) if parts else torch.empty((0, d), device=device, dtype=local_z.dtype)
+
+
+def _init_factor_from_cluster(xc: torch.Tensor, rank: int):
+    d = xc.size(1)
+    if rank <= 0:
+        return None
+    if xc.size(0) < 2:
+        return torch.randn((d, rank), device=xc.device, dtype=xc.dtype) * 0.01
+    xc = xc - xc.mean(dim=0, keepdim=True)
+    try:
+        # xc = U S Vh; covariance eigenvalues are S^2 / (n - 1).
+        _, s, vh = torch.linalg.svd(xc, full_matrices=False)
+        r = min(rank, vh.size(0), s.numel())
+        fac = torch.zeros((d, rank), device=xc.device, dtype=xc.dtype)
+        scale = s[:r] / float(max(xc.size(0) - 1, 1)) ** 0.5
+        fac[:, :r] = vh[:r].T * scale.view(1, r)
+        if r < rank:
+            fac[:, r:] = torch.randn((d, rank - r), device=xc.device, dtype=xc.dtype) * 0.01
+        return fac
+    except RuntimeError:
+        return torch.randn((d, rank), device=xc.device, dtype=xc.dtype) * 0.01
+
+
+def delayed_init_mfa_prior_from_loader(
     model,
     optimizer,
     train_loader,
     device,
-    *,
-    epoch_id: int,
-    rank: int,
     samples: int,
     kmeans_iters: int,
-    ema: float,
+    logvar_mode: str,
+    logvar_value: float,
+    logvar_shrink_alpha: float,
+    logvar_min: float,
+    logvar_max: float,
+    factor_pca: bool,
+    factor_scale: float,
+    factor_std: float,
     seed: int,
+    rank: int,
+    world_size: int,
     log,
 ):
     base_model = _unwrap_model(model)
-    if getattr(base_model, "prior_type", None) != "gmm" or not hasattr(base_model, "prior"):
-        return
+    if getattr(base_model, "prior_type", None) != "gmm":
+        log("[PriorInit][Skip] prior_type is not gmm.")
+        return False
     prior = base_model.prior
-    if getattr(prior, "is_hierarchical", False):
-        if is_main_process(rank):
-            log("[PriorRefresh][Skip] hierarchical prior uses group_mu + component_offset; disable flat k-means refresh.")
-        return
-    if not hasattr(prior, "prior_mu") or prior.prior_mu is None:
-        return
+    k = int(prior.K)
+    d = int(prior.D)
+    r = int(getattr(prior, "R", 0))
+    local_z = _collect_prior_init_embeddings(model, train_loader, device, max_samples=max(1, int(samples)))
+    z = _gather_init_embeddings(local_z, device=device, rank=rank, world_size=world_size)
 
-    should_collect = is_main_process(rank)
-    old_mode = base_model.training
-    if should_collect:
-        base_model.eval()
-        chunks = []
-        seen = 0
-        with torch.no_grad():
-            for sample_id, tissue_id, _celltype_id, x_count, x_mask, _x_mask_encoder in train_loader:
-                x_count = x_count.to(device, non_blocking=True)
-                x_mask = x_mask.to(device, non_blocking=True)
-                sample_id = sample_id.to(device, non_blocking=True)
-                tissue_id = tissue_id.to(device, non_blocking=True)
-                out = base_model(
-                    x_count=x_count,
-                    x_mask=x_mask,
-                    tissue_id=tissue_id,
-                    sample_id=sample_id,
-                    use_batch_condition=False,
-                )
-                z_mu = out["mu"].detach().float()
-                need = int(samples) - seen
-                if need <= 0:
-                    break
-                if z_mu.size(0) > need:
-                    z_mu = z_mu[:need]
-                chunks.append(z_mu.cpu())
-                seen += z_mu.size(0)
-                if seen >= int(samples):
-                    break
-
-        if old_mode:
-            base_model.train()
-
-        if chunks:
-            z = torch.cat(chunks, dim=0).to(device=device, dtype=prior.prior_mu.dtype)
+    if rank == 0:
+        if z is None or z.size(0) < k:
+            log(f"[PriorInit][Skip] not enough embeddings: n={0 if z is None else z.size(0)}, K={k}")
+            ok = torch.tensor([0], device=device, dtype=torch.long)
+            centers = torch.zeros((k, d), device=device)
+            logvar = torch.zeros((k, d), device=device)
+            logits = torch.zeros((k,), device=device)
+            factor_new = torch.zeros((k, d, r), device=device) if r > 0 else torch.empty((0,), device=device)
         else:
-            z = torch.empty((0, prior.prior_mu.size(1)), device=device, dtype=prior.prior_mu.dtype)
-
-        k = int(prior.prior_mu.size(0))
-        if z.size(0) < k:
-            log(f"[PriorRefresh][Skip] epoch={epoch_id}, samples={z.size(0)} < K={k}")
-        else:
-            centers, _ = _kmeans_torch(z, k=k, iters=int(kmeans_iters), seed=int(seed) + int(epoch_id))
-            assign = torch.argmin(torch.cdist(z.float(), centers.float(), p=2), dim=1)
+            z = z.float()
+            centers, assign = _kmeans_torch(z, k=k, iters=int(kmeans_iters), seed=int(seed))
             counts = torch.bincount(assign, minlength=k).float()
-
-            old_mu = prior.prior_mu.detach().float()
-            match = _match_centers_to_prior(old_mu, centers.detach().float())
-            centers = centers[match]
-            counts = counts[match]
-
-            rho = min(max(float(ema), 0.0), 1.0)
-            old_pi = torch.softmax(prior.pi_logits.detach().float(), dim=0)
-            new_pi = torch.clamp(counts / counts.sum().clamp_min(1.0), min=1e-6)
-            new_pi = new_pi / new_pi.sum()
-            pi_ema = (1.0 - rho) * old_pi + rho * new_pi.to(old_pi.device)
-            pi_ema = torch.clamp(pi_ema, min=1e-6)
-            pi_ema = pi_ema / pi_ema.sum()
-
-            with torch.no_grad():
-                before = prior.prior_mu.detach().float().clone()
-                prior.prior_mu.mul_(1.0 - rho).add_(centers.to(prior.prior_mu.device, dtype=prior.prior_mu.dtype), alpha=rho)
-                logits = torch.log(pi_ema.to(prior.pi_logits.device, dtype=prior.pi_logits.dtype))
-                logits = logits - logits.mean()
-                prior.pi_logits.copy_(logits)
-                if getattr(prior, "pi_logits_t", None) is not None:
-                    prior.pi_logits_t.copy_(logits.view(1, -1).expand_as(prior.pi_logits_t))
-                shift = (prior.prior_mu.detach().float() - before).norm(dim=1).mean().item()
-
-            eff = float(torch.exp(-(pi_ema * torch.log(pi_ema.clamp_min(1e-12))).sum()).item())
-            active = int((pi_ema > 1e-3).sum().item())
+            pi = torch.clamp(counts / torch.clamp(counts.sum(), min=1.0), min=1e-6)
+            pi = pi / pi.sum()
+            logits = torch.log(pi)
+            logvar_rows = []
+            factor_rows = []
+            global_var = torch.var(z, dim=0, unbiased=False).clamp_min(1e-6)
+            base_var = torch.full((d,), float(math.exp(float(logvar_value))), device=device, dtype=z.dtype)
+            shrink_alpha = min(max(float(logvar_shrink_alpha), 0.0), 1.0)
+            for kk in range(k):
+                members = z[assign == kk]
+                if str(logvar_mode) == "constant":
+                    logvar_rows.append(
+                        torch.full((d,), float(logvar_value), device=device, dtype=z.dtype).clamp(
+                            float(logvar_min), float(logvar_max)
+                        )
+                    )
+                else:
+                    if members.size(0) >= 2:
+                        var = torch.var(members - centers[kk].view(1, -1), dim=0, unbiased=False).clamp_min(1e-6)
+                    else:
+                        var = global_var
+                    if str(logvar_mode) == "shrink":
+                        var = (1.0 - shrink_alpha) * base_var + shrink_alpha * var
+                    logvar_rows.append(torch.log(var).clamp(float(logvar_min), float(logvar_max)))
+                if r > 0:
+                    if bool(factor_pca) and members.size(0) >= 2:
+                        factor_rows.append(_init_factor_from_cluster(members, r) * float(factor_scale))
+                    else:
+                        factor_rows.append(torch.randn((d, r), device=device, dtype=z.dtype) * float(factor_std))
+            logvar = torch.stack(logvar_rows, dim=0)
+            factor_new = torch.stack(factor_rows, dim=0) if r > 0 else torch.empty((0,), device=device)
+            ok = torch.tensor([1], device=device, dtype=torch.long)
             log(
-                f"[PriorRefresh] epoch={epoch_id}, samples={z.size(0)}, ema={rho:.3f}, "
-                f"kmEff={eff:.2f}, kmActive={active}, piMin={pi_ema.min().item():.4f}, "
-                f"piMax={pi_ema.max().item():.4f}, meanMuShift={shift:.4f}"
+                f"[PriorInit] done: samples={z.size(0)}, K={k}, "
+                f"pi_min={pi.min().item():.4f}, pi_max={pi.max().item():.4f}, "
+                f"logvar_min={logvar.min().item():.3f}, logvar_max={logvar.max().item():.3f}, "
+                f"logvar_mode={logvar_mode}, logvar_value={float(logvar_value):.3f}, "
+                f"logvar_shrink_alpha={shrink_alpha:.3f}, "
+                f"factor_pca={bool(factor_pca)}, factor_scale={float(factor_scale):.4f}, "
+                f"factor_std={float(factor_std):.4f}"
             )
-
-    refreshed_params = [prior.prior_mu, prior.pi_logits, getattr(prior, "pi_logits_t", None)]
-    for param in refreshed_params:
-        if param is None:
-            continue
-        state = optimizer.state.get(param) if optimizer is not None else None
-        if state:
-            for value in state.values():
-                if torch.is_tensor(value):
-                    value.zero_()
+    else:
+        ok = torch.tensor([0], device=device, dtype=torch.long)
+        centers = torch.zeros((k, d), device=device)
+        logvar = torch.zeros((k, d), device=device)
+        logits = torch.zeros((k,), device=device)
+        factor_new = torch.zeros((k, d, r), device=device) if r > 0 else torch.empty((0,), device=device)
 
     if dist.is_available() and dist.is_initialized():
-        for param in refreshed_params:
-            if param is not None:
-                dist.broadcast(param.data, src=0)
-        dist.barrier()
+        dist.broadcast(ok, src=0)
+        dist.broadcast(centers, src=0)
+        dist.broadcast(logvar, src=0)
+        dist.broadcast(logits, src=0)
+        if r > 0:
+            dist.broadcast(factor_new, src=0)
+    if int(ok.item()) != 1:
+        return False
+
+    with torch.no_grad():
+        prior.prior_mu.copy_(centers.to(device=prior.prior_mu.device, dtype=prior.prior_mu.dtype))
+        prior.prior_logvar.copy_(logvar.to(device=prior.prior_logvar.device, dtype=prior.prior_logvar.dtype))
+        prior.pi_logits.copy_(logits.to(device=prior.pi_logits.device, dtype=prior.pi_logits.dtype))
+        if r > 0 and getattr(prior, "prior_factor", None) is not None:
+            prior.prior_factor.copy_(factor_new.to(device=prior.prior_factor.device, dtype=prior.prior_factor.dtype))
+    _clear_optimizer_state_for_params(
+        optimizer,
+        [prior.prior_mu, prior.prior_logvar, prior.pi_logits, getattr(prior, "prior_factor", None)],
+    )
+    log("[PriorInit] broadcast done and optimizer state cleared.")
+    return True
 
 
 def main():
@@ -551,9 +618,7 @@ def main():
     os.makedirs(args.result_dir, exist_ok=True)
     _write_args_csv(args.result_dir, args, rank)
     ckpt_path = os.path.join(args.result_dir, args.last_ckpt_name)
-    best_recon_ckpt_path = os.path.join(args.result_dir, args.best_recon_ckpt_name)
-    best_cls_ckpt_path = os.path.join(args.result_dir, args.best_cls_ckpt_name)
-    best_contrast_ckpt_path = os.path.join(args.result_dir, args.best_contrast_ckpt_name)
+    best_ckpt_path = os.path.join(args.result_dir, args.best_ckpt_name)
 
     if args.compiled_dataset_root:
         ignored = ["--data-root"]
@@ -695,15 +760,17 @@ def main():
         num_batches = int(args.num_batches)
     else:
         num_batches = int(inferred_num_batches)
-    effective_batch_emb_dim = int(args.batch_emb_dim) if bool(args.use_batch_condition) else 0
-    effective_tissue_emb_dim = int(args.tissue_emb_dim) if bool(args.use_tissue_condition) else 0
     log(
-        f"[BatchCond] use_batch_condition={args.use_batch_condition}, num_batches={num_batches}, "
-        f"batch_emb_dim={effective_batch_emb_dim} (arg={args.batch_emb_dim}), "
-        f"use_tissue_condition={args.use_tissue_condition}, tissue_emb_dim={effective_tissue_emb_dim} (arg={args.tissue_emb_dim}), "
-        f"drop_prob={args.batch_cond_drop_prob}, "
-        f"lambda_batchless_recon={args.lambda_batchless_recon}, "
-        f"lambda_tissueless_recon={args.lambda_tissueless_recon}"
+        f"[BatchCond] num_batches={num_batches}, batch_emb_dim={args.batch_emb_dim}, "
+        f"drop_prob={args.batch_cond_drop_prob}, lambda_batchless_recon={args.lambda_batchless_recon}"
+    )
+    if args.prior_shared_cov:
+        log("[HierarchyPrior] Ignoring --prior-shared-cov: group-level factor covariances are used.")
+    sub_per_group = int(math.ceil(float(args.num_components) / float(max(1, args.hierarchy_groups))))
+    log(
+        f"[HierarchyPrior] g={args.hierarchy_groups}, sub_per_group~={sub_per_group}, "
+        f"K={args.num_components}, u_dim={args.prior_cov_rank}, "
+        "z = group_mu_g + sub_delta_gs + A_g u + eps_gs."
     )
 
     loader_kwargs = dict(num_workers=args.num_workers, pin_memory=True)
@@ -715,8 +782,7 @@ def main():
     val_loader_kwargs = dict(num_workers=val_num_workers, pin_memory=True)
     if val_num_workers > 0:
         val_loader_kwargs["prefetch_factor"] = args.prefetch_factor
-        # Keep val workers non-persistent to avoid train/val worker resource contention.
-        val_loader_kwargs["persistent_workers"] = False
+        val_loader_kwargs["persistent_workers"] = bool(args.val_persistent_workers)
     log(
         f"[Loader] train_workers={args.num_workers}, train_persistent={args.persistent_workers}, "
         f"val_workers={val_num_workers}, val_persistent={val_loader_kwargs.get('persistent_workers', False)}"
@@ -781,8 +847,13 @@ def main():
         latent_dim=args.latent_dim,
         num_components=args.num_components,
         prior_cov_rank=args.prior_cov_rank,
-        prior_shared_covariance=args.prior_shared_cov,
+        prior_shared_covariance=False,
         posterior_cov_rank=args.posterior_cov_rank,
+        prior_mu_init=args.prior_mu_init,
+        prior_mu_init_radius=args.prior_mu_init_radius,
+        prior_mu_init_groups=args.prior_mu_init_groups,
+        prior_mu_init_local_radius=args.prior_mu_init_local_radius,
+        hierarchy_groups=args.hierarchy_groups,
         expr_hidden_dim=args.expr_hidden_dim,
         mask_hidden_dim=args.mask_hidden_dim,
         dec_hidden_dim=args.dec_hidden_dim,
@@ -792,13 +863,9 @@ def main():
         conditional_prior_on_tissue=args.conditional_prior_on_tissue,
         num_tissues=num_tissues,
         num_batches=num_batches,
-        batch_emb_dim=effective_batch_emb_dim,
-        tissue_emb_dim=effective_tissue_emb_dim,
+        batch_emb_dim=args.batch_emb_dim,
         batch_cond_drop_prob=args.batch_cond_drop_prob,
         recon_loss_type=args.recon_loss,
-        gmm_latent_dim=args.gmm_latent_dim,
-        num_prior_groups=args.num_prior_groups,
-        group_latent_dim=args.group_latent_dim,
     ).to(device)
 
     total_params, trainable_params = count_parameters(model)
@@ -828,9 +895,8 @@ def main():
 
     start_round = 1
     best_val_metric = float("inf")
-    best_recon_metric = float("inf")
-    best_cls_metric = float("inf")
-    best_contrast_metric = float("inf")
+    prior_initialized = False
+    prior_freeze_until_epoch = 0
 
     if os.path.exists(ckpt_path):
         map_location = device
@@ -861,15 +927,12 @@ def main():
                     "Skip scheduler resume and continue with freshly initialized scheduler."
                 )
         best_val_metric = float(ckpt.get("best_val_metric", best_val_metric))
-        best_recon_metric = float(ckpt.get("best_recon_metric", best_recon_metric))
-        best_cls_metric = float(ckpt.get("best_cls_metric", best_cls_metric))
-        best_contrast_metric = float(ckpt.get("best_contrast_metric", best_contrast_metric))
+        prior_initialized = bool(ckpt.get("prior_initialized", False))
+        prior_freeze_until_epoch = int(ckpt.get("prior_freeze_until_epoch", 0))
         last_epoch = int(ckpt.get("epoch", 0))
         start_round = last_epoch + 1
         log(
-            f"[Resume] Loaded {ckpt_path} (epoch={last_epoch}, best_val_metric={best_val_metric:.6f}, "
-            f"best_recon={best_recon_metric:.6f}, best_cls={best_cls_metric:.6f}, "
-            f"best_contrast={best_contrast_metric:.6f}). "
+            f"[Resume] Loaded {ckpt_path} (epoch={last_epoch}, best_val_metric={best_val_metric:.6f}). "
             f"Continue from epoch {start_round}."
         )
         if getattr(load_ret, "missing_keys", None):
@@ -882,10 +945,18 @@ def main():
     while epoch_id <= args.num_epochs:
         start_time = time.time()
         log(f"\n[Epoch {epoch_id}] Starting...")
-        beta_t = float(args.beta_kl)
+        beta_t = _linear_kl_warmup(
+            epoch=epoch_id,
+            target_beta=args.beta_kl,
+            warmup_epochs=args.beta_kl_warmup_epochs,
+            start_beta=args.beta_kl_warmup_start,
+        )
         stage_name = "stage3"
         base_model = _unwrap_model(model)
         _apply_training_stage(base_model, stage_name)
+        if prior_initialized and int(prior_freeze_until_epoch) >= epoch_id:
+            _set_requires_grad(getattr(base_model, "prior", None), False)
+            log(f"[PriorFreeze] prior frozen for adaptation epoch {epoch_id}/{prior_freeze_until_epoch}")
 
         # Default: global schedules.
         lambda_resp_anchor_t = 0.0
@@ -900,7 +971,7 @@ def main():
         train_sampler.set_epoch(epoch_id)
         if val_sampler is not None:
             val_sampler.set_epoch(epoch_id)
-        loss_full, loss_recon, loss_kl, loss_score, loss_contrast, loss_cov, loss_prior_pi_balance, loss_celltype_cls, loss_batchless_recon, loss_tissueless_recon, loss_rank_recon, loss_rank_gene, loss_rank_cell, loss_celltype_contrast = train_gmm_vae_one_epoch(
+        loss_full, loss_recon, loss_kl, loss_score, loss_contrast, loss_cov, loss_prior_pi_balance, loss_celltype_cls, loss_batchless_recon = train_gmm_vae_one_epoch(
             model=model,
             optimizer=optimizer,
             scaler=scaler,
@@ -914,9 +985,6 @@ def main():
             mask_aug_max_frac=args.mask_aug_max_frac,
             lambda_contrast=args.lambda_contrast,
             contrast_temp=args.contrast_temp,
-            contrast_embedding=args.contrast_embedding,
-            lambda_celltype_contrast=args.lambda_celltype_contrast,
-            celltype_contrast_temp=args.celltype_contrast_temp,
             lambda_real_recon=args.lambda_real_recon,
             lambda_resp_anchor=lambda_resp_anchor_t,
             lambda_score=0.0,
@@ -928,10 +996,10 @@ def main():
             lambda_resp_confidence=0.0,
             resp_temperature=1.0,
             resp_topk=0,
-            prior_logvar_min=None,
+            prior_logvar_min=args.prior_logvar_min,
             prior_logvar_max=args.prior_logvar_max,
             lambda_prior_mu_l2=0.0,
-            lambda_prior_factor_l2=0.0,
+            lambda_prior_factor_l2=args.lambda_prior_factor_l2,
             lambda_prior_pi_balance=args.lambda_prior_pi_balance,
             lambda_prior_mu_spread=args.lambda_prior_mu_spread,
             prior_mu_spread_tau=args.prior_mu_spread_tau,
@@ -953,10 +1021,6 @@ def main():
             recon_cell_weight_clusters=args.recon_cell_weight_clusters,
             recon_cell_weight_kmeans_iters=args.recon_cell_weight_kmeans_iters,
             lambda_batchless_recon=args.lambda_batchless_recon,
-            lambda_tissueless_recon=args.lambda_tissueless_recon,
-            lambda_rank_recon=args.lambda_rank_recon,
-            rank_recon_gene_pairs=args.rank_recon_gene_pairs,
-            rank_recon_cell_pairs=args.rank_recon_cell_pairs,
             force_base_posterior=force_base_posterior,
         )
         train_msg = (
@@ -966,34 +1030,42 @@ def main():
         )
         if args.lambda_contrast > 0:
             train_msg += f", Contrast={loss_contrast:.4f}"
-        if args.lambda_celltype_contrast > 0:
-            train_msg += f", CtContrast={loss_celltype_contrast:.4f}"
         if args.lambda_batchless_recon > 0:
             train_msg += f", BatchlessRecon={loss_batchless_recon:.4f}"
-        if args.lambda_tissueless_recon > 0:
-            train_msg += f", TissuelessRecon={loss_tissueless_recon:.4f}"
-        if args.lambda_rank_recon > 0:
-            train_msg += f", RankRecon={loss_rank_recon:.4f}, RankGene={loss_rank_gene:.4f}, RankCell={loss_rank_cell:.4f}"
         log(train_msg)
 
         if (
-            int(args.prior_refresh_every) > 0
-            and epoch_id >= int(args.prior_refresh_start_epoch)
-            and ((epoch_id - int(args.prior_refresh_start_epoch)) % int(args.prior_refresh_every) == 0)
+            int(args.prior_init_epoch) > 0
+            and (not prior_initialized)
+            and epoch_id >= int(args.prior_init_epoch)
         ):
-            refresh_gmm_prior_from_loader(
+            log(f"[PriorInit] Triggered after epoch {epoch_id}")
+            if val_sampler is not None:
+                val_sampler.set_epoch(epoch_id)
+            initialized = delayed_init_mfa_prior_from_loader(
                 model=model,
                 optimizer=optimizer,
                 train_loader=train_loader,
                 device=device,
-                epoch_id=epoch_id,
+                samples=args.prior_init_samples,
+                kmeans_iters=args.prior_init_kmeans_iters,
+                logvar_mode=args.prior_init_logvar_mode,
+                logvar_value=args.prior_init_logvar_value,
+                logvar_shrink_alpha=args.prior_init_logvar_shrink_alpha,
+                logvar_min=args.prior_init_logvar_min,
+                logvar_max=args.prior_init_logvar_max,
+                factor_pca=args.prior_init_factor_pca,
+                factor_scale=args.prior_init_factor_scale,
+                factor_std=args.prior_init_factor_std,
+                seed=args.seed + epoch_id,
                 rank=rank,
-                samples=args.prior_refresh_samples,
-                kmeans_iters=args.prior_refresh_kmeans_iters,
-                ema=args.prior_refresh_ema,
-                seed=args.seed,
+                world_size=world_size,
                 log=log,
             )
+            prior_initialized = bool(prior_initialized or initialized)
+            if initialized and int(args.prior_freeze_after_init_epochs) > 0:
+                prior_freeze_until_epoch = epoch_id + int(args.prior_freeze_after_init_epochs)
+                log(f"[PriorFreeze] prior will be frozen through epoch {prior_freeze_until_epoch}")
 
         do_val = (
             (int(args.val_every) <= 1)
@@ -1001,7 +1073,7 @@ def main():
             or (epoch_id == args.num_epochs)
         )
         if do_val:
-            val_loss_full, val_loss_recon, val_loss_kl, val_loss_score, val_loss_contrast, val_loss_cov, val_loss_prior_pi_balance, val_loss_celltype_cls, val_loss_real_recon, val_loss_batchless_recon, val_loss_tissueless_recon, val_loss_rank_recon, val_loss_rank_gene, val_loss_rank_cell, val_loss_celltype_contrast = evaluate_gmm_vae_one_epoch(
+            val_loss_full, val_loss_recon, val_loss_kl, val_loss_score, val_loss_contrast, val_loss_cov, val_loss_prior_pi_balance, val_loss_celltype_cls, val_loss_batchless_recon = evaluate_gmm_vae_one_epoch(
                 model=model,
                 val_loader=val_loader,
                 device=device,
@@ -1012,9 +1084,6 @@ def main():
                 score_detach_z=True,
                 lambda_contrast=args.lambda_contrast,
                 contrast_temp=args.contrast_temp,
-                contrast_embedding=args.contrast_embedding,
-                lambda_celltype_contrast=args.lambda_celltype_contrast,
-                celltype_contrast_temp=args.celltype_contrast_temp,
                 lambda_real_recon=args.lambda_real_recon,
                 lambda_cov=0.0,
                 cov_use_mu=True,
@@ -1023,10 +1092,10 @@ def main():
                 lambda_resp_anchor=lambda_resp_anchor_t,
                 resp_temperature=1.0,
                 resp_topk=0,
-                prior_logvar_min=None,
+                prior_logvar_min=args.prior_logvar_min,
                 prior_logvar_max=args.prior_logvar_max,
                 lambda_prior_mu_l2=0.0,
-                lambda_prior_factor_l2=0.0,
+                lambda_prior_factor_l2=args.lambda_prior_factor_l2,
                 lambda_prior_pi_balance=args.lambda_prior_pi_balance,
                 lambda_prior_mu_spread=args.lambda_prior_mu_spread,
                 prior_mu_spread_tau=args.prior_mu_spread_tau,
@@ -1048,10 +1117,6 @@ def main():
                 recon_cell_weight_clusters=args.recon_cell_weight_clusters,
                 recon_cell_weight_kmeans_iters=args.recon_cell_weight_kmeans_iters,
                 lambda_batchless_recon=args.lambda_batchless_recon,
-                lambda_tissueless_recon=args.lambda_tissueless_recon,
-                lambda_rank_recon=args.lambda_rank_recon,
-                rank_recon_gene_pairs=args.rank_recon_gene_pairs,
-                rank_recon_cell_pairs=args.rank_recon_cell_pairs,
                 mask_aug_prob=args.mask_aug_prob,
                 mask_aug_policy=args.mask_aug_policy,
                 mask_aug_min_frac=args.mask_aug_min_frac,
@@ -1065,37 +1130,8 @@ def main():
             )
             if args.lambda_contrast > 0:
                 val_msg += f", Contrast={val_loss_contrast:.4f}"
-            if args.lambda_celltype_contrast > 0:
-                val_msg += f", CtContrast={val_loss_celltype_contrast:.4f}"
-            if args.lambda_real_recon > 0:
-                val_msg += f", RealRecon={val_loss_real_recon:.4f}"
             if args.lambda_batchless_recon > 0:
                 val_msg += f", BatchlessRecon={val_loss_batchless_recon:.4f}"
-            if args.lambda_tissueless_recon > 0:
-                val_msg += f", TissuelessRecon={val_loss_tissueless_recon:.4f}"
-            if args.lambda_rank_recon > 0:
-                val_msg += f", RankRecon={val_loss_rank_recon:.4f}, RankGene={val_loss_rank_gene:.4f}, RankCell={val_loss_rank_cell:.4f}"
-            weighted_terms = [
-                f"Recon={val_loss_recon:.4f}",
-                f"KL={float(beta_t) * val_loss_kl:.4f}",
-            ]
-            if args.lambda_celltype_cls != 0:
-                weighted_terms.append(f"cls={float(args.lambda_celltype_cls) * val_loss_celltype_cls:.4f}")
-            if args.lambda_contrast != 0:
-                weighted_terms.append(f"Contrast={float(args.lambda_contrast) * val_loss_contrast:.4f}")
-            if args.lambda_celltype_contrast != 0:
-                weighted_terms.append(f"CtContrast={float(args.lambda_celltype_contrast) * val_loss_celltype_contrast:.4f}")
-            if args.lambda_real_recon != 0:
-                weighted_terms.append(f"RealRecon={float(args.lambda_real_recon) * val_loss_real_recon:.4f}")
-            if args.lambda_batchless_recon != 0:
-                weighted_terms.append(f"BatchlessRecon={float(args.lambda_batchless_recon) * val_loss_batchless_recon:.4f}")
-            if args.lambda_tissueless_recon != 0:
-                weighted_terms.append(f"TissuelessRecon={float(args.lambda_tissueless_recon) * val_loss_tissueless_recon:.4f}")
-            if args.lambda_rank_recon != 0:
-                weighted_terms.append(f"RankRecon={float(args.lambda_rank_recon) * val_loss_rank_recon:.4f}")
-            if args.lambda_prior_pi_balance != 0:
-                weighted_terms.append(f"priorPiBal={float(args.lambda_prior_pi_balance) * val_loss_prior_pi_balance:.4f}")
-            val_msg += ", weighted[" + ", ".join(weighted_terms) + "]"
             log(val_msg)
             val_metric = val_loss_full
 
@@ -1103,35 +1139,19 @@ def main():
             current_lr = optimizer.param_groups[0]['lr']
             log(f"[Epoch {epoch_id}] Current Learning Rate: {current_lr:.6f}")
 
-            best_val_metric = min(best_val_metric, val_metric)
-
-            def save_best_checkpoint(path: str, metric_name: str, metric_value: float):
+            if val_metric < best_val_metric and is_main_process(rank):
+                best_val_metric = val_metric
                 torch.save({
                     "epoch": epoch_id,
                     "model_state_dict": model.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
                     "scheduler_state_dict": scheduler.state_dict(),
                     "best_val_metric": best_val_metric,
-                    "best_recon_metric": best_recon_metric,
-                    "best_cls_metric": best_cls_metric,
-                    "best_contrast_metric": best_contrast_metric,
-                    "selected_metric_name": metric_name,
-                    "selected_metric_value": metric_value,
+                    "prior_initialized": prior_initialized,
+                    "prior_freeze_until_epoch": prior_freeze_until_epoch,
                     "args": vars(args),
-                }, path)
-
-            if val_loss_recon < best_recon_metric and is_main_process(rank):
-                best_recon_metric = val_loss_recon
-                save_best_checkpoint(best_recon_ckpt_path, "val_recon", val_loss_recon)
-                log(f"[Best Recon] Updated at epoch {epoch_id} with recon={val_loss_recon:.4f}")
-            if val_loss_celltype_cls < best_cls_metric and is_main_process(rank):
-                best_cls_metric = val_loss_celltype_cls
-                save_best_checkpoint(best_cls_ckpt_path, "val_celltype_cls", val_loss_celltype_cls)
-                log(f"[Best Cls] Updated at epoch {epoch_id} with cls={val_loss_celltype_cls:.4f}")
-            if val_loss_contrast < best_contrast_metric and is_main_process(rank):
-                best_contrast_metric = val_loss_contrast
-                save_best_checkpoint(best_contrast_ckpt_path, "val_contrast", val_loss_contrast)
-                log(f"[Best Contrast] Updated at epoch {epoch_id} with contrast={val_loss_contrast:.4f}")
+                }, best_ckpt_path)
+                log(f"[Best Model] Updated at epoch {epoch_id} with metric={val_metric:.4f}")
         else:
             log(f"[Epoch {epoch_id}] Skip validation (val_every={args.val_every}).")
             current_lr = optimizer.param_groups[0]['lr']
@@ -1144,9 +1164,8 @@ def main():
                 "optimizer_state_dict": optimizer.state_dict(),
                 "scheduler_state_dict": scheduler.state_dict(),
                 "best_val_metric": best_val_metric,
-                "best_recon_metric": best_recon_metric,
-                "best_cls_metric": best_cls_metric,
-                "best_contrast_metric": best_contrast_metric,
+                "prior_initialized": prior_initialized,
+                "prior_freeze_until_epoch": prior_freeze_until_epoch,
                 "args": vars(args),
             }, ckpt_path)
             log(f"[Checkpoint] Saved as {args.last_ckpt_name} at epoch {epoch_id}")

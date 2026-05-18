@@ -15,7 +15,7 @@ from main_hierarchy.utils_model import (
 
 def parse_args():
     p = argparse.ArgumentParser(
-        description="Load a trained checkpoint and print dominant GMM component for each cell type."
+        description="Load a trained checkpoint and print dominant MFA component for each cell type."
     )
     p.add_argument("--ckpt-path", required=True, help="Path to checkpoint file, e.g. best_model.pth")
     p.add_argument("--compiled-dataset-root", required=True, help="Compiled dataset root (xverse_train_v1)")
@@ -54,10 +54,6 @@ def build_model_from_ckpt_args(args_dict: dict, device: torch.device):
         dropout=float(args_dict.get("dropout", 0.1)),
         prior_type=str(args_dict.get("prior_type", "gmm")),
         prior_cov_rank=int(args_dict.get("prior_cov_rank", 8)),
-        num_tissues=int(args_dict.get("num_tissues", 0)),
-        num_batches=int(args_dict.get("num_batches", 0)),
-        batch_emb_dim=int(args_dict.get("batch_emb_dim", 0)),
-        tissue_emb_dim=int(args_dict.get("tissue_emb_dim", 0)),
     ).to(device)
     return model
 

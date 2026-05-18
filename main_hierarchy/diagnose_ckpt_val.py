@@ -179,10 +179,6 @@ def main():
         dropout=float(_get(saved, "dropout", 0.1)),
         prior_type=str(_get(saved, "prior_type", "gmm")),
         num_cell_types=num_cell_types,
-        num_tissues=int(_get(saved, "num_tissues", 0)),
-        num_batches=int(_get(saved, "num_batches", 0)),
-        batch_emb_dim=int(_get(saved, "batch_emb_dim", 0)),
-        tissue_emb_dim=int(_get(saved, "tissue_emb_dim", 0)),
     ).to(device)
     state = ckpt["model_state_dict"]
     normalized_state, strategy = _normalize_state_keys_for_model(state, model.state_dict().keys())

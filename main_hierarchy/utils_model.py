@@ -6,7 +6,7 @@ import hashlib
 import json
 import bisect
 from collections import OrderedDict, defaultdict
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -19,7 +19,7 @@ from torch.utils.data import Dataset, Sampler
 
 
 # =========================
-# Model blocks (GMM-VAE)
+# Model blocks (MFA-VAE)
 # =========================
 class MLP(nn.Module):
     def __init__(self, input_dim: int, hidden_dims: List[int], output_dim: int, dropout: float = 0.0):
@@ -89,8 +89,13 @@ class FiLMMaskEncoder(nn.Module):
 
 class GaussianMixturePrior(nn.Module):
     """
-    Learnable low-rank-covariance GMM prior.
-    Optional tissue-conditional prior: one GMM parameter set per tissue id.
+    Mixture-of-factor-analyzers prior:
+      c ~ Cat(pi)
+      u ~ N(0, I)
+      eps ~ N(0, diag(exp(logvar_c)))
+      z = mu_c + A_c u + eps
+    Marginally, p(z|c=k) = N(mu_k, diag(exp(logvar_k)) + A_k A_k^T).
+    Optional tissue-conditional prior: one MFA parameter set per tissue id.
     """
 
     def __init__(
@@ -101,49 +106,45 @@ class GaussianMixturePrior(nn.Module):
         conditional_on_tissue: bool = False,
         num_tissues: int = 0,
         shared_covariance: bool = False,
-        num_groups: int = 1,
-        group_latent_dim: int = 64,
+        mu_init: str = "normal",
+        mu_init_radius: float = 1.0,
+        mu_init_groups: int = 8,
+        mu_init_local_radius: float = 0.5,
+        hierarchy_groups: int = 8,
     ):
         super().__init__()
         self.K = int(num_components)
         self.D = int(latent_dim)
         self.R = max(0, int(cov_rank))
-        self.G = max(1, min(int(num_groups), self.K))
-        self.is_hierarchical = self.G > 1
-        self.D_group = min(max(1, int(group_latent_dim)), self.D) if self.is_hierarchical else self.D
-        self.D_sub = self.D - self.D_group if self.is_hierarchical else 0
-        if self.is_hierarchical and self.D_sub <= 0:
-            raise ValueError("Hierarchical prior requires latent_dim > group_latent_dim so z=[z_group,z_sub].")
-        self.shared_covariance = bool(shared_covariance)
+        # Hierarchical prior: g -> s -> z, with K flattened components.
+        self.shared_covariance = False
         self.conditional_on_tissue = bool(conditional_on_tissue and int(num_tissues) > 0)
         self.num_tissues = max(0, int(num_tissues))
-        group_index = torch.div(torch.arange(self.K) * self.G, self.K, rounding_mode="floor").long()
-        self.register_buffer("component_group", group_index, persistent=True)
-        # Global (fallback/backward-compat) parameters.
-        self.pi_logits = nn.Parameter(torch.zeros(self.K))
-        self.prior_mu = nn.Parameter(torch.randn(self.K, self.D))
-        if self.is_hierarchical:
-            self.prior_mu.requires_grad_(False)
-            self.group_pi_logits = nn.Parameter(torch.zeros(self.G))
-            self.component_pi_logits = nn.Parameter(torch.zeros(self.K))
-            self.group_mu = nn.Parameter(torch.randn(self.G, self.D_group) * 0.1)
-            self.group_logvar = nn.Parameter(torch.zeros(self.G, self.D_group))
-            self.component_mu = nn.Parameter(torch.randn(self.K, self.D_sub) * 0.1)
-            self.component_logvar = nn.Parameter(torch.zeros(self.K, self.D_sub))
+
+        self.G = max(1, min(int(hierarchy_groups), self.K))
+        self.S = int(math.ceil(float(self.K) / float(self.G)))
+        comp_group = torch.arange(self.K, dtype=torch.long) % self.G
+        comp_sub = torch.arange(self.K, dtype=torch.long) // self.G
+        self.register_buffer("component_group", comp_group, persistent=False)
+        self.register_buffer("component_sub", comp_sub, persistent=False)
+
+        self.group_logits = nn.Parameter(torch.zeros(self.G))
+        self.sub_logits = nn.Parameter(torch.zeros(self.G, self.S))
+        if str(mu_init) in ("sphere", "grouped_sphere"):
+            group_mu = F.normalize(torch.randn(self.G, self.D), dim=-1) * float(mu_init_radius)
+        elif str(mu_init) == "zero":
+            group_mu = torch.zeros(self.G, self.D)
         else:
-            self.register_parameter("group_pi_logits", None)
-            self.register_parameter("component_pi_logits", None)
-            self.register_parameter("group_mu", None)
-            self.register_parameter("group_logvar", None)
-            self.register_parameter("component_mu", None)
-            self.register_parameter("component_logvar", None)
-        logvar_shape = (self.D,) if self.shared_covariance else (self.K, self.D)
-        self.prior_logvar = nn.Parameter(torch.zeros(*logvar_shape))
+            group_mu = torch.randn(self.G, self.D)
+        sub_delta = F.normalize(torch.randn(self.G, self.S, self.D), dim=-1) * float(mu_init_local_radius)
+        self.group_mu = nn.Parameter(group_mu)
+        self.sub_delta = nn.Parameter(sub_delta)
+        self.prior_logvar_h = nn.Parameter(torch.zeros(self.G, self.S, self.D))
         if self.R > 0:
-            factor_shape = (self.D, self.R) if self.shared_covariance else (self.K, self.D, self.R)
-            self.prior_factor = nn.Parameter(torch.randn(*factor_shape) * 0.01)
+            # Shared local factor directions per coarse group.
+            self.group_factor = nn.Parameter(torch.randn(self.G, self.D, self.R) * 0.01)
         else:
-            self.register_parameter("prior_factor", None)
+            self.register_parameter("group_factor", None)
 
         # Tissue-specific parameters: pi only (component usage prior).
         if self.conditional_on_tissue:
@@ -157,31 +158,39 @@ class GaussianMixturePrior(nn.Module):
             self.register_parameter("prior_logvar_t", None)
             self.register_parameter("prior_factor_t", None)
 
-    def effective_prior_mu(self) -> torch.Tensor:
-        if self.is_hierarchical:
-            return torch.cat(
-                [
-                    self.group_mu.float()[self.component_group],
-                    self.component_mu.float(),
-                ],
-                dim=-1,
-            )
-        return self.prior_mu.float()
+    @property
+    def prior_mu(self) -> torch.Tensor:
+        g = self.component_group.to(self.group_mu.device)
+        s = self.component_sub.to(self.group_mu.device)
+        return self.group_mu[g] + self.sub_delta[g, s]
 
-    def group_component_tables(self) -> Dict[str, torch.Tensor]:
-        if not self.is_hierarchical:
-            return {
-                "component_group": self.component_group,
-                "component_mu": self.effective_prior_mu(),
-            }
-        return {
-            "component_group": self.component_group,
-            "group_mu": self.group_mu.float(),
-            "sub_mu": self.component_mu.float(),
-            "component_mu": self.effective_prior_mu(),
-            "group_pi": torch.softmax(self.group_pi_logits.float(), dim=0),
-            "component_pi": torch.exp(self._log_weights().squeeze(0)),
-        }
+    @property
+    def prior_logvar(self) -> torch.Tensor:
+        g = self.component_group.to(self.prior_logvar_h.device)
+        s = self.component_sub.to(self.prior_logvar_h.device)
+        return self.prior_logvar_h[g, s]
+
+    @property
+    def prior_factor(self) -> Optional[torch.Tensor]:
+        if self.group_factor is None:
+            return None
+        g = self.component_group.to(self.group_factor.device)
+        return self.group_factor[g]
+
+    @property
+    def pi_logits(self) -> torch.Tensor:
+        # Return flat normalized log-weights; softmax(pi_logits) equals p(g)p(s|g).
+        log_w = self._hierarchical_log_weights_flat()
+        return log_w
+
+    def _hierarchical_log_weights_flat(self) -> torch.Tensor:
+        log_g = F.log_softmax(self.group_logits.float(), dim=0)
+        log_s = F.log_softmax(self.sub_logits.float(), dim=-1)
+        g = self.component_group.to(self.group_logits.device)
+        s = self.component_sub.to(self.group_logits.device)
+        flat = log_g[g] + log_s[g, s]
+        # Renormalize if K is not exactly G*S and some sub slots are unused.
+        return flat - torch.logsumexp(flat, dim=0)
 
     def _sanitize_tissue_id(self, tissue_id: torch.Tensor) -> torch.Tensor:
         if (not self.conditional_on_tissue) or tissue_id is None:
@@ -199,23 +208,12 @@ class GaussianMixturePrior(nn.Module):
         return torch.clamp(logvar, min=min_v, max=max_v)
 
     def _expanded_logvar(self, logvar_min: float = None, logvar_max: float = None) -> torch.Tensor:
-        if self.is_hierarchical:
-            logvar = torch.cat(
-                [
-                    self.group_logvar.float()[self.component_group],
-                    self.component_logvar.float(),
-                ],
-                dim=-1,
-            )
-            return self._clamp_logvar(logvar, logvar_min, logvar_max)
         logvar = self._clamp_logvar(self.prior_logvar.float(), logvar_min, logvar_max)
         if self.shared_covariance:
             return logvar.view(1, self.D).expand(self.K, self.D)
         return logvar
 
     def _expanded_factor(self) -> Optional[torch.Tensor]:
-        if self.is_hierarchical:
-            return None
         if self.prior_factor is None:
             return None
         factor = self.prior_factor.float()
@@ -233,7 +231,7 @@ class GaussianMixturePrior(nn.Module):
         device_type = z.device.type
         with torch.amp.autocast(device_type=device_type, enabled=False):
             zf = z.float()
-            mu = self.effective_prior_mu().unsqueeze(0)  # (1,K,D)
+            mu = self.prior_mu.float().unsqueeze(0)  # (1,K,D)
             logvar = self._expanded_logvar(logvar_min, logvar_max).unsqueeze(0)  # (1,K,D)
             factor_exp = self._expanded_factor()
             factor = factor_exp.unsqueeze(0) if factor_exp is not None else None
@@ -280,7 +278,7 @@ class GaussianMixturePrior(nn.Module):
     ) -> torch.Tensor:
         device_type = zc.device.type
         with torch.amp.autocast(device_type=device_type, enabled=False):
-            mu = self.effective_prior_mu().unsqueeze(0)
+            mu = self.prior_mu.float().unsqueeze(0)
             logvar = self._expanded_logvar(logvar_min, logvar_max).unsqueeze(0)
             factor_exp = self._expanded_factor()
             factor = factor_exp.unsqueeze(0) if factor_exp is not None else None
@@ -303,26 +301,10 @@ class GaussianMixturePrior(nn.Module):
             return -0.5 * (quad + log_det + self.D * math.log(2.0 * math.pi))
 
     def _log_weights(self, tissue_id: torch.Tensor = None) -> torch.Tensor:
-        if self.is_hierarchical:
-            log_group = F.log_softmax(self.group_pi_logits.float(), dim=0)
-            comp_log = torch.empty(self.K, device=log_group.device, dtype=log_group.dtype)
-            for g in range(self.G):
-                idx = torch.where(self.component_group == g)[0].to(log_group.device)
-                comp_log[idx] = log_group[g] + F.log_softmax(self.component_pi_logits.float()[idx], dim=0)
-            return comp_log.unsqueeze(0)
         tid = self._sanitize_tissue_id(tissue_id)
         if tid is None:
             return F.log_softmax(self.pi_logits.float(), dim=0).unsqueeze(0)
         return F.log_softmax(self.pi_logits_t[tid].float(), dim=-1)
-
-    def _log_component_given_group(self) -> torch.Tensor:
-        if not self.is_hierarchical:
-            return F.log_softmax(self.pi_logits.float(), dim=0)
-        comp_log = torch.empty(self.K, device=self.component_pi_logits.device, dtype=self.component_pi_logits.dtype)
-        for g in range(self.G):
-            idx = torch.where(self.component_group == g)[0].to(comp_log.device)
-            comp_log[idx] = F.log_softmax(self.component_pi_logits.float()[idx], dim=0)
-        return comp_log
 
     def log_prob(
         self,
@@ -350,7 +332,7 @@ class GaussianMixturePrior(nn.Module):
     ) -> torch.Tensor:
         device_type = z.device.type
         with torch.amp.autocast(device_type=device_type, enabled=False):
-            mu = self.effective_prior_mu().unsqueeze(0)
+            mu = self.prior_mu.float().unsqueeze(0)
             logvar = self._expanded_logvar(logvar_min, logvar_max).unsqueeze(0)
             factor_exp = self._expanded_factor()
             factor = factor_exp.unsqueeze(0) if factor_exp is not None else None
@@ -387,7 +369,7 @@ class GaussianMixturePrior(nn.Module):
     def global_covariance(self) -> torch.Tensor:
         w = torch.softmax(self.pi_logits.float(), dim=0)
         cov_k = self.component_covariances()
-        mu = self.effective_prior_mu()
+        mu = self.prior_mu.float()
         mean = (w.unsqueeze(1) * mu).sum(dim=0)
         second = (w.unsqueeze(1).unsqueeze(2) * (cov_k + mu.unsqueeze(2) * mu.unsqueeze(1))).sum(dim=0)
         return second - mean.unsqueeze(1) * mean.unsqueeze(0)
@@ -414,7 +396,7 @@ class GaussianMixturePrior(nn.Module):
 
     def clamp_logvar_(self, min_val: float = -6.0, max_val: float = 4.0):
         with torch.no_grad():
-            self.prior_logvar.clamp_(min=min_val, max=max_val)
+            self.prior_logvar_h.clamp_(min=min_val, max=max_val)
             if self.prior_logvar_t is not None:
                 self.prior_logvar_t.clamp_(min=min_val, max=max_val)
 
@@ -467,36 +449,23 @@ class MaskFiLMGMMVAE(nn.Module):
         prior_cov_rank: int = 8,
         prior_shared_covariance: bool = False,
         posterior_cov_rank: int = 0,
+        prior_mu_init: str = "normal",
+        prior_mu_init_radius: float = 1.0,
+        prior_mu_init_groups: int = 8,
+        prior_mu_init_local_radius: float = 0.5,
+        hierarchy_groups: int = 8,
         num_cell_types: int = 0,
         conditional_prior_on_tissue: bool = False,
         num_tissues: int = 0,
         num_batches: int = 0,
         batch_emb_dim: int = 0,
-        tissue_emb_dim: int = 0,
         batch_cond_drop_prob: float = 0.0,
         recon_loss_type: str = "poisson",
-        gmm_latent_dim: int = 64,
-        num_prior_groups: int = 8,
-        group_latent_dim: int = 64,
     ):
         super().__init__()
         if prior_type not in ("gmm", "gaussian"):
             raise ValueError(f"Unsupported prior_type: {prior_type}")
         self.prior_type = prior_type
-        self.latent_dim = int(latent_dim)
-        self.num_prior_groups = max(1, min(int(num_prior_groups), int(num_components)))
-        if self.prior_type == "gmm":
-            if self.num_prior_groups > 1:
-                self.gmm_latent_dim = self.latent_dim
-            elif int(gmm_latent_dim) <= 0:
-                self.gmm_latent_dim = self.latent_dim
-            else:
-                self.gmm_latent_dim = min(int(gmm_latent_dim), self.latent_dim)
-        else:
-            self.gmm_latent_dim = self.latent_dim
-        self.free_latent_dim = 0 if self.num_prior_groups > 1 else max(0, self.latent_dim - self.gmm_latent_dim)
-        self.group_latent_dim = min(max(1, int(group_latent_dim)), self.gmm_latent_dim - 1) if self.num_prior_groups > 1 else self.gmm_latent_dim
-        self.sub_latent_dim = self.gmm_latent_dim - self.group_latent_dim if self.num_prior_groups > 1 else 0
         self.encoder = FiLMMaskEncoder(
             num_genes=num_genes,
             latent_dim=latent_dim,
@@ -506,42 +475,40 @@ class MaskFiLMGMMVAE(nn.Module):
         )
         self.prior = GaussianMixturePrior(
             num_components=num_components,
-            latent_dim=self.gmm_latent_dim,
+            latent_dim=latent_dim,
             cov_rank=prior_cov_rank,
             conditional_on_tissue=conditional_prior_on_tissue,
             num_tissues=num_tissues,
             shared_covariance=prior_shared_covariance,
-            num_groups=self.num_prior_groups,
-            group_latent_dim=self.group_latent_dim,
+            mu_init=prior_mu_init,
+            mu_init_radius=prior_mu_init_radius,
+            mu_init_groups=prior_mu_init_groups,
+            mu_init_local_radius=prior_mu_init_local_radius,
+            hierarchy_groups=hierarchy_groups,
         )
         self.num_batches = max(0, int(num_batches))
         self.batch_emb_dim = max(0, int(batch_emb_dim))
-        self.num_tissues = max(0, int(num_tissues))
-        self.tissue_emb_dim = max(0, int(tissue_emb_dim))
         self.batch_cond_drop_prob = max(0.0, min(1.0, float(batch_cond_drop_prob)))
         if self.num_batches > 0 and self.batch_emb_dim > 0:
             self.batch_embedding = nn.Embedding(self.num_batches, self.batch_emb_dim)
         else:
             self.batch_embedding = None
-        if self.num_tissues > 0 and self.tissue_emb_dim > 0:
-            self.tissue_embedding = nn.Embedding(self.num_tissues, self.tissue_emb_dim)
-        else:
-            self.tissue_embedding = None
-        decoder_cond_dim = 0
-        if self.batch_embedding is not None:
-            decoder_cond_dim += self.batch_emb_dim
-        if self.tissue_embedding is not None:
-            decoder_cond_dim += self.tissue_emb_dim
-        self.decoder_cond_dim = decoder_cond_dim
         self.decoder = PoissonDecoder(
             latent_dim=latent_dim,
             num_genes=num_genes,
             hidden_dim=dec_hidden_dim,
             dropout=dropout,
-            cond_dim=decoder_cond_dim,
+            cond_dim=self.batch_emb_dim if self.batch_embedding is not None else 0,
         )
-        self.nb_log_theta = nn.Parameter(torch.zeros(num_genes))
+        self.nb_theta_decoder = PoissonDecoder(
+            latent_dim=latent_dim,
+            num_genes=num_genes,
+            hidden_dim=dec_hidden_dim,
+            dropout=dropout,
+            cond_dim=self.batch_emb_dim if self.batch_embedding is not None else 0,
+        )
         self.num_components = int(num_components)
+        self.latent_dim = int(latent_dim)
         self.posterior_cov_rank = max(0, int(posterior_cov_rank))
         self.recon_loss_type = str(recon_loss_type).lower()
         if self.recon_loss_type not in ("poisson", "nb"):
@@ -551,98 +518,41 @@ class MaskFiLMGMMVAE(nn.Module):
         self.register_buffer("recon_gene_sq_mean_ema", torch.zeros(num_genes), persistent=True)
         if self.prior_type == "gmm":
             post_hidden = max(64, int(expr_hidden_dim) // 2)
-            if self.num_prior_groups > 1:
-                self.post_g_logits = MLP(
+            self.mfa_factor_dim = int(self.prior.R)
+            self.post_c_logits = MLP(
+                input_dim=expr_hidden_dim,
+                hidden_dims=[post_hidden],
+                output_dim=num_components,
+                dropout=dropout,
+            )
+            if self.mfa_factor_dim > 0:
+                self.post_u_mu = MLP(
                     input_dim=expr_hidden_dim,
                     hidden_dims=[post_hidden],
-                    output_dim=self.num_prior_groups,
+                    output_dim=num_components * self.mfa_factor_dim,
                     dropout=dropout,
                 )
-                self.post_c_logits = MLP(
+                self.post_u_logvar = MLP(
                     input_dim=expr_hidden_dim,
                     hidden_dims=[post_hidden],
-                    output_dim=num_components,
+                    output_dim=num_components * self.mfa_factor_dim,
                     dropout=dropout,
                 )
-                self.post_group_mu = MLP(
-                    input_dim=expr_hidden_dim,
-                    hidden_dims=[post_hidden],
-                    output_dim=self.num_prior_groups * self.group_latent_dim,
-                    dropout=dropout,
-                )
-                self.post_group_logvar = MLP(
-                    input_dim=expr_hidden_dim,
-                    hidden_dims=[post_hidden],
-                    output_dim=self.num_prior_groups * self.group_latent_dim,
-                    dropout=dropout,
-                )
-                self.post_sub_mu = MLP(
-                    input_dim=expr_hidden_dim,
-                    hidden_dims=[post_hidden],
-                    output_dim=num_components * self.sub_latent_dim,
-                    dropout=dropout,
-                )
-                self.post_sub_logvar = MLP(
-                    input_dim=expr_hidden_dim,
-                    hidden_dims=[post_hidden],
-                    output_dim=num_components * self.sub_latent_dim,
-                    dropout=dropout,
-                )
-                self.post_mu = None
-                self.post_logvar = None
-                self.post_factor = None
             else:
-                self.post_g_logits = None
-                self.post_group_mu = None
-                self.post_group_logvar = None
-                self.post_sub_mu = None
-                self.post_sub_logvar = None
-                self.post_c_logits = MLP(
-                    input_dim=expr_hidden_dim,
-                    hidden_dims=[post_hidden],
-                    output_dim=num_components,
-                    dropout=dropout,
-                )
-                self.post_mu = MLP(
-                    input_dim=expr_hidden_dim,
-                    hidden_dims=[post_hidden],
-                    output_dim=num_components * self.gmm_latent_dim,
-                    dropout=dropout,
-                )
-                self.post_logvar = MLP(
-                    input_dim=expr_hidden_dim,
-                    hidden_dims=[post_hidden],
-                    output_dim=num_components * self.gmm_latent_dim,
-                    dropout=dropout,
-                )
-                if self.posterior_cov_rank > 0:
-                    self.post_factor = MLP(
-                        input_dim=expr_hidden_dim,
-                        hidden_dims=[post_hidden],
-                        output_dim=num_components * self.gmm_latent_dim * self.posterior_cov_rank,
-                        dropout=dropout,
-                    )
-                else:
-                    self.post_factor = None
-                if self.free_latent_dim > 0:
-                    self.free_mu = MLP(
-                        input_dim=expr_hidden_dim,
-                        hidden_dims=[post_hidden],
-                        output_dim=self.free_latent_dim,
-                        dropout=dropout,
-                    )
-                    self.free_logvar = MLP(
-                        input_dim=expr_hidden_dim,
-                        hidden_dims=[post_hidden],
-                        output_dim=self.free_latent_dim,
-                        dropout=dropout,
-                    )
-                else:
-                    self.free_mu = None
-                    self.free_logvar = None
-            if self.num_prior_groups > 1:
-                self.free_mu = None
-                self.free_logvar = None
+                self.post_u_mu = None
+                self.post_u_logvar = None
+            self.post_eps_mu = MLP(
+                input_dim=expr_hidden_dim,
+                hidden_dims=[post_hidden],
+                output_dim=num_components * latent_dim,
+                dropout=dropout,
+            )
+            self.post_eps_logvar = MLP(
+                input_dim=expr_hidden_dim,
+                hidden_dims=[post_hidden],
+                output_dim=num_components * latent_dim,
+                dropout=dropout,
+            )
         # Library-size head from latent z.
         lib_hidden = max(32, int(latent_dim) // 2)
         self.library_head = nn.Sequential(
@@ -673,7 +583,6 @@ class MaskFiLMGMMVAE(nn.Module):
         x_expr: torch.Tensor = None,
         force_base_posterior: bool = False,
         use_batch_condition: bool = True,
-        use_tissue_condition: bool = True,
     ) -> Dict[str, torch.Tensor]:
         if x_expr is None:
             x_expr = torch.log1p(x_count.float())
@@ -682,120 +591,47 @@ class MaskFiLMGMMVAE(nn.Module):
         if use_mixture_post:
             bsz = h.size(0)
             k = self.num_components
-            if self.num_prior_groups > 1:
-                g = self.num_prior_groups
-                dg = self.group_latent_dim
-                ds = self.sub_latent_dim
-                q_g_logits = self.post_g_logits(h)
-                q_g = torch.softmax(q_g_logits, dim=-1)
-                q_c_raw_logits = self.post_c_logits(h)
-                q_c_given_g = torch.zeros((bsz, k), device=h.device, dtype=h.dtype)
-                log_q_c_given_g = torch.empty((bsz, k), device=h.device, dtype=h.dtype)
-                for gi in range(g):
-                    idx = torch.where(self.prior.component_group == gi)[0].to(h.device)
-                    group_logits = q_c_raw_logits[:, idx]
-                    q_c_given_g[:, idx] = torch.softmax(group_logits, dim=-1)
-                    log_q_c_given_g[:, idx] = F.log_softmax(group_logits, dim=-1)
-                q_c = q_c_given_g * q_g[:, self.prior.component_group.to(h.device)]
-                q_c_logits = torch.log(torch.clamp(q_c, min=1e-12))
-
-                mu_group_comp = self.post_group_mu(h).view(bsz, g, dg)
-                logvar_group_comp = torch.clamp(self.post_group_logvar(h).view(bsz, g, dg), min=-8.0, max=8.0)
-                z_group_comp = reparameterize(mu_group_comp, logvar_group_comp)
-                mu_sub_comp = self.post_sub_mu(h).view(bsz, k, ds)
-                logvar_sub_comp = torch.clamp(self.post_sub_logvar(h).view(bsz, k, ds), min=-8.0, max=8.0)
-                z_sub_comp = reparameterize(mu_sub_comp, logvar_sub_comp)
-
-                if self.training:
-                    c_sel = F.gumbel_softmax(q_c_logits, tau=1.0, hard=False, dim=-1)
-                    g_sel = torch.zeros((bsz, g), device=h.device, dtype=h.dtype)
-                    g_sel.scatter_add_(1, self.prior.component_group.to(h.device).view(1, k).expand(bsz, k), c_sel)
-                else:
-                    c_idx = torch.argmax(q_c, dim=-1)
-                    g_idx = self.prior.component_group.to(h.device)[c_idx]
-                    g_sel = F.one_hot(g_idx, num_classes=g).to(h.dtype)
-                    c_sel = F.one_hot(c_idx, num_classes=k).to(h.dtype)
-                z_group = torch.sum(g_sel.unsqueeze(-1) * z_group_comp, dim=1)
-                z_sub = torch.sum(c_sel.unsqueeze(-1) * z_sub_comp, dim=1)
-                z = torch.cat([z_group, z_sub], dim=-1)
-
-                mu_group = torch.sum(q_g.unsqueeze(-1) * mu_group_comp, dim=1)
-                second_group = torch.sum(q_g.unsqueeze(-1) * (torch.exp(logvar_group_comp) + mu_group_comp * mu_group_comp), dim=1)
-                logvar_group = torch.log(torch.clamp(second_group - mu_group * mu_group, min=1e-8))
-                mu_sub = torch.sum(q_c.unsqueeze(-1) * mu_sub_comp, dim=1)
-                second_sub = torch.sum(q_c.unsqueeze(-1) * (torch.exp(logvar_sub_comp) + mu_sub_comp * mu_sub_comp), dim=1)
-                logvar_sub = torch.log(torch.clamp(second_sub - mu_sub * mu_sub, min=1e-8))
-                mu = torch.cat([mu_group, mu_sub], dim=-1)
-                logvar = torch.cat([logvar_group, logvar_sub], dim=-1)
-                mu_comp = torch.cat(
-                    [mu_group_comp[:, self.prior.component_group.to(h.device), :], mu_sub_comp],
-                    dim=-1,
-                )
-                logvar_comp = torch.cat(
-                    [logvar_group_comp[:, self.prior.component_group.to(h.device), :], logvar_sub_comp],
-                    dim=-1,
-                )
-                z_comp = torch.cat(
-                    [z_group_comp[:, self.prior.component_group.to(h.device), :], z_sub_comp],
-                    dim=-1,
-                )
-                z_gmm = z
-                factor_comp = None
-                free_mu = None
-                free_logvar = None
-                z_free = None
+            d = self.latent_dim
+            q_c_logits = self.post_c_logits(h)  # (B, K)
+            q_c = torch.softmax(q_c_logits, dim=-1)
+            prior_mu = self.prior.prior_mu.to(device=h.device, dtype=h.dtype)  # (K, D)
+            prior_factor = self.prior._expanded_factor()
+            if prior_factor is not None:
+                prior_factor = prior_factor.to(device=h.device, dtype=h.dtype)  # (K, D, R)
+            eps_mu = self.post_eps_mu(h).view(bsz, k, d)
+            eps_logvar = torch.clamp(self.post_eps_logvar(h).view(bsz, k, d), min=-8.0, max=8.0)
+            eps_comp = eps_mu + torch.randn_like(eps_mu) * torch.exp(0.5 * eps_logvar)
+            if self.mfa_factor_dim > 0 and self.post_u_mu is not None and prior_factor is not None:
+                r = self.mfa_factor_dim
+                u_mu = self.post_u_mu(h).view(bsz, k, r)
+                u_logvar = torch.clamp(self.post_u_logvar(h).view(bsz, k, r), min=-8.0, max=8.0)
+                u_comp = u_mu + torch.randn_like(u_mu) * torch.exp(0.5 * u_logvar)
+                factor_shift = torch.einsum("kdr,bkr->bkd", prior_factor, u_comp)
+                factor_mean_shift = torch.einsum("kdr,bkr->bkd", prior_factor, u_mu)
+                factor_var_diag = torch.einsum("kdr,bkr,kdr->bkd", prior_factor, torch.exp(u_logvar), prior_factor)
             else:
-                d = self.gmm_latent_dim
-                q_c_logits = self.post_c_logits(h)  # (B, K)
-                q_c = torch.softmax(q_c_logits, dim=-1)
-                mu_comp = self.post_mu(h).view(bsz, k, d)
-                logvar_comp = torch.clamp(self.post_logvar(h).view(bsz, k, d), min=-8.0, max=8.0)
-                std_comp = torch.exp(0.5 * logvar_comp)
-                eps_d = torch.randn_like(std_comp)
-                z_comp = mu_comp + eps_d * std_comp  # (B, K, D)
-                factor_comp = None
-                if self.posterior_cov_rank > 0 and self.post_factor is not None:
-                    r = self.posterior_cov_rank
-                    # Keep factor bounded for stability.
-                    factor_comp = 0.1 * torch.tanh(self.post_factor(h).view(bsz, k, d, r))
-                    eps_r = torch.randn((bsz, k, r), device=h.device, dtype=h.dtype)
-                    z_comp = z_comp + torch.einsum("bkdr,bkr->bkd", factor_comp, eps_r)
-                if self.training:
-                    c_sel = F.gumbel_softmax(q_c_logits, tau=1.0, hard=False, dim=-1)  # (B, K)
-                else:
-                    hard_idx = torch.argmax(q_c, dim=-1)
-                    c_sel = F.one_hot(hard_idx, num_classes=k).to(z_comp.dtype)
-                z_gmm = torch.sum(c_sel.unsqueeze(-1) * z_comp, dim=1)  # (B, D_gmm)
+                u_mu = None
+                u_logvar = None
+                u_comp = None
+                factor_shift = torch.zeros((bsz, k, d), device=h.device, dtype=h.dtype)
+                factor_mean_shift = factor_shift
+                factor_var_diag = torch.zeros_like(factor_shift)
+            mu_comp = prior_mu.unsqueeze(0) + factor_mean_shift + eps_mu
+            z_comp = prior_mu.unsqueeze(0) + factor_shift + eps_comp  # (B, K, D)
+            var_comp = torch.clamp(factor_var_diag + torch.exp(eps_logvar), min=1e-8)
+            logvar_comp = torch.log(var_comp)
+            if self.training:
+                c_sel = F.gumbel_softmax(q_c_logits, tau=1.0, hard=False, dim=-1)  # (B, K)
+            else:
+                hard_idx = torch.argmax(q_c, dim=-1)
+                c_sel = F.one_hot(hard_idx, num_classes=k).to(z_comp.dtype)
+            z = torch.sum(c_sel.unsqueeze(-1) * z_comp, dim=1)  # (B, D)
 
-                # Moment-matched aggregate posterior stats for compatibility logging.
-                mu_gmm = torch.sum(q_c.unsqueeze(-1) * mu_comp, dim=1)
-                second = torch.sum(q_c.unsqueeze(-1) * (torch.exp(logvar_comp) + mu_comp * mu_comp), dim=1)
-                var_gmm = torch.clamp(second - mu_gmm * mu_gmm, min=1e-8)
-                logvar_gmm = torch.log(var_gmm)
-                if self.free_latent_dim > 0:
-                    free_mu = self.free_mu(h)
-                    free_logvar = torch.clamp(self.free_logvar(h), min=-8.0, max=8.0)
-                    z_free = reparameterize(free_mu, free_logvar)
-                    z = torch.cat([z_gmm, z_free], dim=-1)
-                    mu = torch.cat([mu_gmm, free_mu], dim=-1)
-                    logvar = torch.cat([logvar_gmm, free_logvar], dim=-1)
-                else:
-                    free_mu = None
-                    free_logvar = None
-                    z_free = None
-                    z = z_gmm
-                    mu = mu_gmm
-                    logvar = logvar_gmm
-                q_g_logits = None
-                q_g = None
-                q_c_given_g = None
-                log_q_c_given_g = None
-                mu_group_comp = None
-                logvar_group_comp = None
-                z_group_comp = None
-                mu_sub_comp = None
-                logvar_sub_comp = None
-                z_sub_comp = None
+            # Moment-matched aggregate posterior stats for compatibility logging.
+            mu = torch.sum(q_c.unsqueeze(-1) * mu_comp, dim=1)
+            second = torch.sum(q_c.unsqueeze(-1) * (torch.exp(logvar_comp) + mu_comp * mu_comp), dim=1)
+            var = torch.clamp(second - mu * mu, min=1e-8)
+            logvar = torch.log(var)
         else:
             mu = mu_enc
             logvar = logvar_enc
@@ -805,37 +641,24 @@ class MaskFiLMGMMVAE(nn.Module):
             mu_comp = None
             logvar_comp = None
             z_comp = None
-            factor_comp = None
-            free_mu = None
-            free_logvar = None
-            z_free = None
-            q_g_logits = None
-            q_g = None
-            q_c_given_g = None
-            log_q_c_given_g = None
-            mu_group_comp = None
-            logvar_group_comp = None
-            z_group_comp = None
-            mu_sub_comp = None
-            logvar_sub_comp = None
-            z_sub_comp = None
-        decoder_cond = self._decoder_condition(
-            sample_id=sample_id,
-            tissue_id=tissue_id,
-            use_batch_condition=use_batch_condition,
-            use_tissue_condition=use_tissue_condition,
-        )
-        gene_logits = self.decoder(z, cond=decoder_cond)
+            eps_mu = None
+            eps_logvar = None
+            eps_comp = None
+            u_mu = None
+            u_logvar = None
+            u_comp = None
+        batch_cond = self._batch_condition(sample_id=sample_id, use_batch_condition=use_batch_condition)
+        gene_logits = self.decoder(z, cond=batch_cond)
+        nb_theta_logits = self.nb_theta_decoder(z, cond=batch_cond)
         library_size = F.softplus(self.library_head(z)) + 1e-8
         gene_probs = F.softmax(gene_logits, dim=-1)
         rate = gene_probs * library_size
-        nb_theta = F.softplus(self.nb_log_theta).view(1, -1) + 1e-8
+        nb_theta = F.softplus(nb_theta_logits) + 1e-8
         out = {
             "mu": mu,
             "mu_base": mu_enc,
             "logvar": logvar,
             "z": z,
-            "encoder_hidden": h,
             "library_size": library_size,
             "gene_logits": gene_logits,
             "rate": rate,
@@ -851,68 +674,27 @@ class MaskFiLMGMMVAE(nn.Module):
                     "mu_comp": mu_comp,
                     "logvar_comp": logvar_comp,
                     "z_comp": z_comp,
-                    "factor_comp": factor_comp,
-                    "z_gmm": z_gmm,
-                    "mu_gmm": mu,
-                    "logvar_gmm": logvar,
-                    "z_free": z_free,
-                    "free_mu": free_mu,
-                    "free_logvar": free_logvar,
-                    "q_g_logits": q_g_logits,
-                    "q_g": q_g,
-                    "q_c_given_g": q_c_given_g,
-                    "log_q_c_given_g": log_q_c_given_g,
-                    "mu_group_comp": mu_group_comp,
-                    "logvar_group_comp": logvar_group_comp,
-                    "z_group_comp": z_group_comp,
-                    "mu_sub_comp": mu_sub_comp,
-                    "logvar_sub_comp": logvar_sub_comp,
-                    "z_sub_comp": z_sub_comp,
+                    "eps_mu": eps_mu,
+                    "eps_logvar": eps_logvar,
+                    "eps_comp": eps_comp,
+                    "u_mu": u_mu,
+                    "u_logvar": u_logvar,
+                    "u_comp": u_comp,
                 }
             )
         return out
 
-    def _decoder_condition(
-        self,
-        sample_id: torch.Tensor = None,
-        tissue_id: torch.Tensor = None,
-        use_batch_condition: bool = True,
-        use_tissue_condition: bool = True,
-    ) -> Optional[torch.Tensor]:
-        if self.decoder_cond_dim <= 0:
+    def _batch_condition(self, sample_id: torch.Tensor = None, use_batch_condition: bool = True) -> Optional[torch.Tensor]:
+        if self.batch_embedding is None or sample_id is None or not bool(use_batch_condition):
             return None
-        ref = sample_id if sample_id is not None else tissue_id
-        if ref is None:
-            return None
-        bsz = int(ref.view(-1).size(0))
-        if self.batch_embedding is not None:
-            device = self.batch_embedding.weight.device
-            dtype = self.batch_embedding.weight.dtype
-        else:
-            device = self.tissue_embedding.weight.device
-            dtype = self.tissue_embedding.weight.dtype
-        conds = []
-        if self.batch_embedding is not None and sample_id is not None and bool(use_batch_condition):
-            sid = sample_id.long().to(self.batch_embedding.weight.device)
-            sid = torch.where(sid < 0, torch.zeros_like(sid), sid)
-            sid = torch.where(sid >= self.num_batches, torch.zeros_like(sid), sid)
-            batch_emb = self.batch_embedding(sid)
-            if self.training and self.batch_cond_drop_prob > 0:
-                keep = (torch.rand((batch_emb.size(0), 1), device=batch_emb.device) >= self.batch_cond_drop_prob).to(batch_emb.dtype)
-                batch_emb = batch_emb * keep
-            conds.append(batch_emb)
-        elif self.batch_embedding is not None:
-            conds.append(torch.zeros((bsz, self.batch_emb_dim), device=device, dtype=dtype))
-        if self.tissue_embedding is not None and tissue_id is not None and bool(use_tissue_condition):
-            tid = tissue_id.long().to(self.tissue_embedding.weight.device)
-            tid = torch.where(tid < 0, torch.zeros_like(tid), tid)
-            tid = torch.where(tid >= self.num_tissues, torch.zeros_like(tid), tid)
-            conds.append(self.tissue_embedding(tid))
-        elif self.tissue_embedding is not None:
-            conds.append(torch.zeros((bsz, self.tissue_emb_dim), device=device, dtype=dtype))
-        if not conds:
-            return None
-        return torch.cat(conds, dim=-1) if len(conds) > 1 else conds[0]
+        sid = sample_id.long().to(self.batch_embedding.weight.device)
+        sid = torch.where(sid < 0, torch.zeros_like(sid), sid)
+        sid = torch.where(sid >= self.num_batches, torch.zeros_like(sid), sid)
+        emb = self.batch_embedding(sid)
+        if self.training and self.batch_cond_drop_prob > 0:
+            keep = (torch.rand((emb.size(0), 1), device=emb.device) >= self.batch_cond_drop_prob).to(emb.dtype)
+            emb = emb * keep
+        return emb
 
     def loss(
         self,
@@ -925,7 +707,6 @@ class MaskFiLMGMMVAE(nn.Module):
         beta: float = 1.0,
         encoder_mask: torch.Tensor = None,
         use_batch_condition: bool = True,
-        use_tissue_condition: bool = True,
         recon_mask: torch.Tensor = None,
         lambda_score: float = 0.0,
         score_noise_std: float = 0.1,
@@ -961,9 +742,6 @@ class MaskFiLMGMMVAE(nn.Module):
         recon_cell_weight_eps: float = 1e-6,
         recon_cell_weight_clusters: int = 32,
         recon_cell_weight_kmeans_iters: int = 2,
-        lambda_rank_recon: float = 0.0,
-        rank_recon_gene_pairs: int = 256,
-        rank_recon_cell_pairs: int = 256,
     ) -> Dict[str, torch.Tensor]:
         if encoder_mask is None:
             encoder_mask = x_mask
@@ -974,7 +752,6 @@ class MaskFiLMGMMVAE(nn.Module):
             sample_id=sample_id,
             force_base_posterior=force_base_posterior,
             use_batch_condition=use_batch_condition,
-            use_tissue_condition=use_tissue_condition,
         )
 
         mu = out["mu"]
@@ -1022,8 +799,9 @@ class MaskFiLMGMMVAE(nn.Module):
             # Closed-form KL(q(z|x)||N(0,I)) for diagonal Gaussian posterior.
             kl_per_cell = 0.5 * torch.sum(torch.exp(logvar) + mu.pow(2) - 1.0 - logvar, dim=-1)
             kl_loss = kl_per_cell.mean()
-            kl_gmm_loss = kl_loss
-            kl_free_loss = torch.zeros((), device=z.device, dtype=z.dtype)
+            kl_c = torch.zeros((), device=z.device, dtype=z.dtype)
+            kl_u = torch.zeros((), device=z.device, dtype=z.dtype)
+            kl_eps = kl_loss
             log_q = gaussian_log_prob_diag(z=z, mu=mu, logvar=logvar)
             zero_mu = torch.zeros_like(z)
             zero_logvar = torch.zeros_like(z)
@@ -1031,102 +809,66 @@ class MaskFiLMGMMVAE(nn.Module):
         else:
             q_c_logits = out["q_c_logits"]  # (B, K)
             q_c = out["q_c"]  # (B, K)
-            mu_comp = out["mu_comp"]  # (B, K, D)
-            logvar_comp = out["logvar_comp"]  # (B, K, D)
-            z_comp = out["z_comp"]  # (B, K, D)
-            factor_comp = out.get("factor_comp", None)
+            eps_mu = out["eps_mu"]  # (B, K, D)
+            eps_logvar = out["eps_logvar"]  # (B, K, D)
+            eps_comp = out["eps_comp"]  # (B, K, D)
+            u_mu = out.get("u_mu", None)  # (B, K, R) or None
+            u_logvar = out.get("u_logvar", None)  # (B, K, R) or None
+            u_comp = out.get("u_comp", None)  # (B, K, R) or None
 
-            if getattr(self.prior, "is_hierarchical", False) and out.get("q_g", None) is not None:
-                q_g = out["q_g"]
-                log_q_g = F.log_softmax(out["q_g_logits"], dim=-1)
-                log_p_g = F.log_softmax(self.prior.group_pi_logits.float(), dim=0).to(q_g.device)
-                kl_g = (q_g * (log_q_g - log_p_g.unsqueeze(0))).sum(dim=1).mean()
-
-                log_q_c_given_g = out["log_q_c_given_g"]
-                log_p_c_given_g = self.prior._log_component_given_group().to(q_c.device)
-                kl_c = (q_c * (log_q_c_given_g - log_p_c_given_g.unsqueeze(0))).sum(dim=1).mean()
-
-                dg = self.group_latent_dim
-                mu_group_comp = out["mu_group_comp"]
-                logvar_group_comp = out["logvar_group_comp"]
-                z_group_comp = out["z_group_comp"]
-                mu_sub_comp = out["mu_sub_comp"]
-                logvar_sub_comp = out["logvar_sub_comp"]
-                z_sub_comp = out["z_sub_comp"]
-
-                prior_group_mu = self.prior.group_mu.float().to(q_g.device).unsqueeze(0)
-                prior_group_logvar = self.prior.group_logvar.float().to(q_g.device).unsqueeze(0)
-                prior_group_logvar = self.prior._clamp_logvar(prior_group_logvar, prior_logvar_min, prior_logvar_max)
-                log_q_z_group = gaussian_log_prob_diag(z=z_group_comp, mu=mu_group_comp, logvar=logvar_group_comp)
-                log_p_z_group = gaussian_log_prob_diag(z=z_group_comp, mu=prior_group_mu, logvar=prior_group_logvar)
-                kl_z_group = (q_g * (log_q_z_group - log_p_z_group)).sum(dim=1).mean()
-
-                prior_sub_mu = self.prior.component_mu.float().to(q_c.device).unsqueeze(0)
-                prior_sub_logvar = self.prior.component_logvar.float().to(q_c.device).unsqueeze(0)
-                prior_sub_logvar = self.prior._clamp_logvar(prior_sub_logvar, prior_logvar_min, prior_logvar_max)
-                log_q_z_sub = gaussian_log_prob_diag(z=z_sub_comp, mu=mu_sub_comp, logvar=logvar_sub_comp)
-                log_p_z_sub = gaussian_log_prob_diag(z=z_sub_comp, mu=prior_sub_mu, logvar=prior_sub_logvar)
-                kl_z_sub = (q_c * (log_q_z_sub - log_p_z_sub)).sum(dim=1).mean()
-
-                kl_loss = kl_g + kl_c + kl_z_group + kl_z_sub
-                kl_gmm_loss = kl_loss
-                kl_free_loss = torch.zeros((), device=z.device, dtype=z.dtype)
-                log_q = (
-                    (q_g * (log_q_g + log_q_z_group)).sum(dim=1)
-                    + (q_c * (log_q_c_given_g + log_q_z_sub)).sum(dim=1)
-                )
-                log_p = (
-                    (q_g * (log_p_g.unsqueeze(0) + log_p_z_group)).sum(dim=1)
-                    + (q_c * (log_p_c_given_g.unsqueeze(0) + log_p_z_sub)).sum(dim=1)
-                )
+            log_q_c = F.log_softmax(q_c_logits, dim=-1)  # (B, K)
+            if getattr(self.prior, "conditional_on_tissue", False) and tissue_id is not None:
+                tid = self.prior._sanitize_tissue_id(tissue_id.to(mu.device))
+                log_p_c = F.log_softmax(self.prior.pi_logits_t[tid], dim=-1)  # (B, K)
             else:
-                log_q_c = F.log_softmax(q_c_logits, dim=-1)  # (B, K)
-                if getattr(self.prior, "conditional_on_tissue", False) and tissue_id is not None:
-                    tid = self.prior._sanitize_tissue_id(tissue_id.to(mu.device))
-                    log_p_c = F.log_softmax(self.prior.pi_logits_t[tid], dim=-1)  # (B, K)
-                else:
-                    log_p_c = self.prior._log_weights().to(q_c_logits.device)  # (1, K)
-                kl_c = (q_c * (log_q_c - log_p_c)).sum(dim=1).mean()
+                log_p_c = F.log_softmax(self.prior.pi_logits, dim=0).unsqueeze(0)  # (1, K)
+            kl_c = (q_c * (log_q_c - log_p_c)).sum(dim=1).mean()
 
-                if factor_comp is not None:
-                    log_q_z_given_c = gaussian_log_prob_lowrank(
-                        z=z_comp,
-                        mu=mu_comp,
-                        logvar=logvar_comp,
-                        factor=factor_comp,
-                    )  # (B, K)
-                else:
-                    log_q_z_given_c = gaussian_log_prob_diag(z=z_comp, mu=mu_comp, logvar=logvar_comp)  # (B, K)
-                log_p_z_given_c = self.prior.component_log_prob_aligned(
-                    z_comp,
-                    logvar_min=prior_logvar_min,
-                    logvar_max=prior_logvar_max,
-                    tissue_id=tissue_id,
+            if u_mu is not None and u_logvar is not None and u_comp is not None:
+                kl_u_per_comp = 0.5 * torch.sum(
+                    torch.exp(u_logvar.float()) + u_mu.float().pow(2) - 1.0 - u_logvar.float(),
+                    dim=-1,
                 )  # (B, K)
-                kl_z = (q_c * (log_q_z_given_c - log_p_z_given_c)).sum(dim=1).mean()
+                zero_u = torch.zeros_like(u_comp)
+                zero_u_logvar = torch.zeros_like(u_comp)
+                log_q_u = gaussian_log_prob_diag(z=u_comp, mu=u_mu, logvar=u_logvar)
+                log_p_u = gaussian_log_prob_diag(z=u_comp, mu=zero_u, logvar=zero_u_logvar)
+            else:
+                kl_u_per_comp = torch.zeros_like(q_c.float())
+                log_q_u = torch.zeros_like(q_c)
+                log_p_u = torch.zeros_like(q_c)
 
-                kl_loss = kl_c + kl_z
-                kl_gmm_loss = kl_loss
-                kl_free_loss = torch.zeros((), device=z.device, dtype=z.dtype)
-                log_q = (q_c * (log_q_c + log_q_z_given_c)).sum(dim=1)
-                log_p = (q_c * (log_p_c + log_p_z_given_c)).sum(dim=1)
-                free_mu = out.get("free_mu", None)
-                free_logvar = out.get("free_logvar", None)
-                z_free = out.get("z_free", None)
-                if free_mu is not None and free_logvar is not None and z_free is not None:
-                    kl_free_per_cell = 0.5 * torch.sum(
-                        torch.exp(free_logvar) + free_mu.pow(2) - 1.0 - free_logvar,
-                        dim=-1,
-                    )
-                    kl_free = kl_free_per_cell.mean()
-                    zero_mu_free = torch.zeros_like(z_free)
-                    zero_logvar_free = torch.zeros_like(z_free)
-                    log_q_free = gaussian_log_prob_diag(z=z_free, mu=free_mu, logvar=free_logvar)
-                    log_p_free = gaussian_log_prob_diag(z=z_free, mu=zero_mu_free, logvar=zero_logvar_free)
-                    kl_loss = kl_loss + kl_free
-                    kl_free_loss = kl_free
-                    log_q = log_q + log_q_free
-                    log_p = log_p + log_p_free
+            prior_eps_logvar = self.prior._expanded_logvar(
+                logvar_min=prior_logvar_min,
+                logvar_max=prior_logvar_max,
+            ).to(device=eps_mu.device, dtype=eps_mu.dtype)  # (K, D)
+            prior_eps_logvar_b = prior_eps_logvar.unsqueeze(0)
+            kl_eps_per_comp = 0.5 * torch.sum(
+                (
+                    torch.exp(eps_logvar.float())
+                    + eps_mu.float().pow(2)
+                )
+                * torch.exp(-prior_eps_logvar_b.float())
+                - 1.0
+                + prior_eps_logvar_b.float()
+                - eps_logvar.float(),
+                dim=-1,
+            )  # (B, K)
+            zero_eps = torch.zeros_like(eps_comp)
+            log_q_eps = gaussian_log_prob_diag(z=eps_comp, mu=eps_mu, logvar=eps_logvar)
+            log_p_eps = gaussian_log_prob_diag(
+                z=eps_comp,
+                mu=zero_eps,
+                logvar=prior_eps_logvar_b.expand_as(eps_comp),
+            )
+
+            kl_u = (q_c.float() * kl_u_per_comp).sum(dim=1).mean().to(z.dtype)
+            kl_eps = (q_c.float() * kl_eps_per_comp).sum(dim=1).mean().to(z.dtype)
+            kl_z = kl_u + kl_eps
+
+            kl_loss = kl_c + kl_z
+            log_q = (q_c * (log_q_c + log_q_u + log_q_eps)).sum(dim=1)
+            log_p = (q_c * (log_p_c + log_p_u + log_p_eps)).sum(dim=1)
         score_loss = torch.zeros((), device=z.device, dtype=z.dtype)
         score_norm_pred = torch.zeros((), device=z.device, dtype=z.dtype)
         score_norm_tgt = torch.zeros((), device=z.device, dtype=z.dtype)
@@ -1145,27 +887,15 @@ class MaskFiLMGMMVAE(nn.Module):
         post_c_balance_loss = torch.zeros((), device=z.device, dtype=z.dtype)
         celltype_cls_loss = torch.zeros((), device=z.device, dtype=z.dtype)
         prior_logvar_l2_loss = torch.zeros((), device=z.device, dtype=z.dtype)
-        rank_recon_loss = torch.zeros((), device=z.device, dtype=z.dtype)
-        rank_gene_loss = torch.zeros((), device=z.device, dtype=z.dtype)
-        rank_cell_loss = torch.zeros((), device=z.device, dtype=z.dtype)
 
         # score / covariance alignment / posterior-balance constraints are removed.
-        if float(lambda_rank_recon) > 0.0:
-            rank_mask = recon_mask if recon_mask is not None else x_mask
-            rank_recon_loss, rank_gene_loss, rank_cell_loss = pairwise_rank_recon_loss(
-                x_count=x_count,
-                rate=rate,
-                mask=rank_mask,
-                gene_pairs=rank_recon_gene_pairs,
-                cell_pairs=rank_recon_cell_pairs,
-            )
 
         if self.prior_type == "gmm" and (lambda_prior_mu_l2 > 0 or lambda_prior_factor_l2 > 0):
             if lambda_prior_mu_l2 > 0:
                 if getattr(self.prior, "conditional_on_tissue", False) and getattr(self.prior, "prior_mu_t", None) is not None:
                     prior_mu_l2_loss = self.prior.prior_mu_t.float().pow(2).mean().to(z.dtype)
                 else:
-                    prior_mu_l2_loss = self.prior.effective_prior_mu().pow(2).mean().to(z.dtype)
+                    prior_mu_l2_loss = self.prior.prior_mu.float().pow(2).mean().to(z.dtype)
             if lambda_prior_factor_l2 > 0 and getattr(self.prior, "prior_factor", None) is not None:
                 if getattr(self.prior, "conditional_on_tissue", False) and getattr(self.prior, "prior_factor_t", None) is not None:
                     prior_factor_l2_loss = self.prior.prior_factor_t.float().pow(2).mean().to(z.dtype)
@@ -1175,7 +905,7 @@ class MaskFiLMGMMVAE(nn.Module):
             if getattr(self.prior, "conditional_on_tissue", False) and getattr(self.prior, "pi_logits_t", None) is not None:
                 pi = torch.softmax(self.prior.pi_logits_t.float(), dim=-1).mean(dim=0)
             else:
-                pi = torch.exp(self.prior._log_weights().squeeze(0))
+                pi = torch.softmax(self.prior.pi_logits.float(), dim=0)
             target = torch.full_like(pi, 1.0 / float(pi.numel()))
             prior_pi_balance_loss = F.kl_div(
                 torch.log(torch.clamp(pi, min=1e-12)),
@@ -1186,7 +916,7 @@ class MaskFiLMGMMVAE(nn.Module):
             if getattr(self.prior, "conditional_on_tissue", False) and getattr(self.prior, "prior_mu_t", None) is not None:
                 prior_mu_for_spread = self.prior.prior_mu_t.float().reshape(-1, self.prior.prior_mu_t.size(-1))
             else:
-                prior_mu_for_spread = self.prior.effective_prior_mu()
+                prior_mu_for_spread = self.prior.prior_mu.float()
             if prior_mu_for_spread.size(0) > 1:
                 d2 = torch.cdist(prior_mu_for_spread, prior_mu_for_spread, p=2).pow(2)
                 eye = torch.eye(d2.size(0), device=d2.device, dtype=torch.bool)
@@ -1207,10 +937,6 @@ class MaskFiLMGMMVAE(nn.Module):
             if getattr(self.prior, "conditional_on_tissue", False) and getattr(self.prior, "prior_logvar_t", None) is not None:
                 tgt = torch.full_like(self.prior.prior_logvar_t, float(prior_logvar_target)).float()
                 prior_logvar_l2_loss = F.mse_loss(self.prior.prior_logvar_t.float(), tgt).to(z.dtype)
-            elif getattr(self.prior, "is_hierarchical", False):
-                prior_lv = self.prior._expanded_logvar()
-                tgt = torch.full_like(prior_lv, float(prior_logvar_target)).float()
-                prior_logvar_l2_loss = F.mse_loss(prior_lv.float(), tgt).to(z.dtype)
             else:
                 tgt = torch.full_like(self.prior.prior_logvar, float(prior_logvar_target)).float()
                 prior_logvar_l2_loss = F.mse_loss(self.prior.prior_logvar.float(), tgt).to(z.dtype)
@@ -1248,15 +974,14 @@ class MaskFiLMGMMVAE(nn.Module):
             total_loss = total_loss + float(lambda_celltype_cls) * celltype_cls_loss
         if float(lambda_prior_logvar_l2) != 0.0:
             total_loss = total_loss + float(lambda_prior_logvar_l2) * prior_logvar_l2_loss
-        if float(lambda_rank_recon) != 0.0:
-            total_loss = total_loss + float(lambda_rank_recon) * rank_recon_loss
 
         return {
             "loss": total_loss,
             "recon_loss": recon_loss,
             "kl_loss": kl_loss,
-            "kl_gmm_loss": kl_gmm_loss,
-            "kl_free_loss": kl_free_loss,
+            "kl_c_loss": kl_c.to(z.dtype),
+            "kl_u_loss": kl_u.to(z.dtype),
+            "kl_eps_loss": kl_eps.to(z.dtype),
             "score_loss": score_loss,
             "cov_loss": cov_loss,
             "cov_offdiag_post": cov_offdiag_post,
@@ -1273,9 +998,6 @@ class MaskFiLMGMMVAE(nn.Module):
             "post_c_balance_loss": post_c_balance_loss,
             "celltype_cls_loss": celltype_cls_loss,
             "prior_logvar_l2_loss": prior_logvar_l2_loss,
-            "rank_recon_loss": rank_recon_loss,
-            "rank_gene_loss": rank_gene_loss,
-            "rank_cell_loss": rank_cell_loss,
             "score_norm_pred": score_norm_pred,
             "score_norm_tgt": score_norm_tgt,
             "log_q_mean": log_q.mean(),
@@ -1466,16 +1188,19 @@ def poisson_nll(
     gene_weight: torch.Tensor = None,
     cell_weight: torch.Tensor = None,
 ) -> torch.Tensor:
-    x = x_count.float()
-    r = torch.clamp(rate, min=1e-8)
-    nll = r - x * torch.log(r)
-    if gene_weight is not None:
-        nll = nll * gene_weight.view(1, -1).to(device=nll.device, dtype=nll.dtype)
-    loss_cell = nll.mean(dim=1)
-    if cell_weight is not None:
-        loss_cell = loss_cell * cell_weight.view(-1).to(device=loss_cell.device, dtype=loss_cell.dtype)
-        return loss_cell.sum() / torch.clamp(cell_weight.sum().to(loss_cell.dtype), min=1e-8)
-    return loss_cell.mean()
+    device_type = x_count.device.type
+    with torch.amp.autocast(device_type=device_type, enabled=False):
+        x = x_count.float()
+        r = torch.clamp(rate.float(), min=1e-8, max=1e8)
+        nll = r - x * torch.log(r)
+        if gene_weight is not None:
+            nll = nll * gene_weight.view(1, -1).to(device=nll.device, dtype=nll.dtype)
+        loss_cell = nll.mean(dim=1)
+        if cell_weight is not None:
+            cw = cell_weight.view(-1).to(device=loss_cell.device, dtype=loss_cell.dtype)
+            loss_cell = loss_cell * cw
+            return loss_cell.sum() / torch.clamp(cw.sum(), min=1e-8)
+        return loss_cell.mean()
 
 
 def poisson_nll_masked(
@@ -1485,19 +1210,22 @@ def poisson_nll_masked(
     gene_weight: torch.Tensor = None,
     cell_weight: torch.Tensor = None,
 ) -> torch.Tensor:
-    x = x_count.float()
-    r = torch.clamp(rate, min=1e-8)
-    m = mask.float()
-    nll = r - x * torch.log(r)
-    if gene_weight is not None:
-        nll = nll * gene_weight.view(1, -1).to(device=nll.device, dtype=nll.dtype)
-    nll = nll * m
-    denom_cell = torch.clamp(m.sum(dim=1), min=1.0)
-    loss_cell = nll.sum(dim=1) / denom_cell
-    if cell_weight is not None:
-        loss_cell = loss_cell * cell_weight.view(-1).to(device=loss_cell.device, dtype=loss_cell.dtype)
-        return loss_cell.sum() / torch.clamp(cell_weight.sum().to(loss_cell.dtype), min=1e-8)
-    return loss_cell.mean()
+    device_type = x_count.device.type
+    with torch.amp.autocast(device_type=device_type, enabled=False):
+        x = x_count.float()
+        r = torch.clamp(rate.float(), min=1e-8, max=1e8)
+        m = mask.float()
+        nll = r - x * torch.log(r)
+        if gene_weight is not None:
+            nll = nll * gene_weight.view(1, -1).to(device=nll.device, dtype=nll.dtype)
+        nll = nll * m
+        denom_cell = torch.clamp(m.sum(dim=1), min=1.0)
+        loss_cell = nll.sum(dim=1) / denom_cell
+        if cell_weight is not None:
+            cw = cell_weight.view(-1).to(device=loss_cell.device, dtype=loss_cell.dtype)
+            loss_cell = loss_cell * cw
+            return loss_cell.sum() / torch.clamp(cw.sum(), min=1e-8)
+        return loss_cell.mean()
 
 
 def nb_nll(
@@ -1511,25 +1239,28 @@ def nb_nll(
     Negative binomial NLL with mean mu and inverse-dispersion theta.
     log_theta is gene-wise parameter of shape (G,).
     """
-    x = x_count.float()
-    m = torch.clamp(mu, min=1e-8)
-    theta = torch.clamp(theta.float(), min=1e-8)
-    log_theta_mu = torch.log(theta + m)
-    log_prob = (
-        torch.lgamma(x + theta)
-        - torch.lgamma(theta)
-        - torch.lgamma(x + 1.0)
-        + theta * (torch.log(theta) - log_theta_mu)
-        + x * (torch.log(m) - log_theta_mu)
-    )
-    nll = -log_prob
-    if gene_weight is not None:
-        nll = nll * gene_weight.view(1, -1).to(device=nll.device, dtype=nll.dtype)
-    loss_cell = nll.mean(dim=1)
-    if cell_weight is not None:
-        loss_cell = loss_cell * cell_weight.view(-1).to(device=loss_cell.device, dtype=loss_cell.dtype)
-        return loss_cell.sum() / torch.clamp(cell_weight.sum().to(loss_cell.dtype), min=1e-8)
-    return loss_cell.mean()
+    device_type = x_count.device.type
+    with torch.amp.autocast(device_type=device_type, enabled=False):
+        x = x_count.float()
+        m = torch.clamp(mu.float(), min=1e-8, max=1e8)
+        theta = torch.clamp(theta.float(), min=1e-8, max=1e8)
+        log_theta_mu = torch.log(theta + m)
+        log_prob = (
+            torch.lgamma(x + theta)
+            - torch.lgamma(theta)
+            - torch.lgamma(x + 1.0)
+            + theta * (torch.log(theta) - log_theta_mu)
+            + x * (torch.log(m) - log_theta_mu)
+        )
+        nll = -log_prob
+        if gene_weight is not None:
+            nll = nll * gene_weight.view(1, -1).to(device=nll.device, dtype=nll.dtype)
+        loss_cell = nll.mean(dim=1)
+        if cell_weight is not None:
+            cw = cell_weight.view(-1).to(device=loss_cell.device, dtype=loss_cell.dtype)
+            loss_cell = loss_cell * cw
+            return loss_cell.sum() / torch.clamp(cw.sum(), min=1e-8)
+        return loss_cell.mean()
 
 
 def nb_nll_masked(
@@ -1540,74 +1271,31 @@ def nb_nll_masked(
     gene_weight: torch.Tensor = None,
     cell_weight: torch.Tensor = None,
 ) -> torch.Tensor:
-    x = x_count.float()
-    m = torch.clamp(mu, min=1e-8)
-    ms = mask.float()
-    theta = torch.clamp(theta.float(), min=1e-8)
-    log_theta_mu = torch.log(theta + m)
-    log_prob = (
-        torch.lgamma(x + theta)
-        - torch.lgamma(theta)
-        - torch.lgamma(x + 1.0)
-        + theta * (torch.log(theta) - log_theta_mu)
-        + x * (torch.log(m) - log_theta_mu)
-    )
-    nll = -log_prob
-    if gene_weight is not None:
-        nll = nll * gene_weight.view(1, -1).to(device=nll.device, dtype=nll.dtype)
-    nll = nll * ms
-    denom_cell = torch.clamp(ms.sum(dim=1), min=1.0)
-    loss_cell = nll.sum(dim=1) / denom_cell
-    if cell_weight is not None:
-        loss_cell = loss_cell * cell_weight.view(-1).to(device=loss_cell.device, dtype=loss_cell.dtype)
-        return loss_cell.sum() / torch.clamp(cell_weight.sum().to(loss_cell.dtype), min=1e-8)
-    return loss_cell.mean()
-
-
-def pairwise_rank_recon_loss(
-    x_count: torch.Tensor,
-    rate: torch.Tensor,
-    mask: torch.Tensor,
-    gene_pairs: int = 256,
-    cell_pairs: int = 256,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    device = rate.device
-    dtype = rate.dtype
-    x = torch.clamp(x_count.float(), min=0.0)
-    pred = torch.log1p(torch.clamp(rate.float(), min=0.0))
-    obs = mask.float() > 0
-    bsz, n_genes = x.shape
-    zero = torch.zeros((), device=device, dtype=dtype)
-
-    gene_loss = zero
-    gp = int(gene_pairs)
-    if gp > 0 and n_genes > 1:
-        g1 = torch.randint(0, n_genes, (bsz, gp), device=device)
-        g2 = torch.randint(0, n_genes, (bsz, gp), device=device)
-        rows = torch.arange(bsz, device=device).unsqueeze(1)
-        valid = obs[rows, g1] & obs[rows, g2] & (g1 != g2)
-        diff_true = x[rows, g1] - x[rows, g2]
-        sign = torch.sign(diff_true)
-        valid = valid & (sign != 0)
-        if bool(valid.any()):
-            diff_pred = pred[rows, g1] - pred[rows, g2]
-            gene_loss = F.softplus(-sign[valid] * diff_pred[valid]).mean().to(dtype)
-
-    cell_loss = zero
-    cp = int(cell_pairs)
-    if cp > 0 and bsz > 1:
-        c1 = torch.randint(0, bsz, (cp,), device=device)
-        c2 = torch.randint(0, bsz, (cp,), device=device)
-        g = torch.randint(0, n_genes, (cp,), device=device)
-        valid = obs[c1, g] & obs[c2, g] & (c1 != c2)
-        diff_true = x[c1, g] - x[c2, g]
-        sign = torch.sign(diff_true)
-        valid = valid & (sign != 0)
-        if bool(valid.any()):
-            diff_pred = pred[c1, g] - pred[c2, g]
-            cell_loss = F.softplus(-sign[valid] * diff_pred[valid]).mean().to(dtype)
-
-    return gene_loss + cell_loss, gene_loss, cell_loss
+    device_type = x_count.device.type
+    with torch.amp.autocast(device_type=device_type, enabled=False):
+        x = x_count.float()
+        m = torch.clamp(mu.float(), min=1e-8, max=1e8)
+        ms = mask.float()
+        theta = torch.clamp(theta.float(), min=1e-8, max=1e8)
+        log_theta_mu = torch.log(theta + m)
+        log_prob = (
+            torch.lgamma(x + theta)
+            - torch.lgamma(theta)
+            - torch.lgamma(x + 1.0)
+            + theta * (torch.log(theta) - log_theta_mu)
+            + x * (torch.log(m) - log_theta_mu)
+        )
+        nll = -log_prob
+        if gene_weight is not None:
+            nll = nll * gene_weight.view(1, -1).to(device=nll.device, dtype=nll.dtype)
+        nll = nll * ms
+        denom_cell = torch.clamp(ms.sum(dim=1), min=1.0)
+        loss_cell = nll.sum(dim=1) / denom_cell
+        if cell_weight is not None:
+            cw = cell_weight.view(-1).to(device=loss_cell.device, dtype=loss_cell.dtype)
+            loss_cell = loss_cell * cw
+            return loss_cell.sum() / torch.clamp(cw.sum(), min=1e-8)
+        return loss_cell.mean()
 
 
 def bidirectional_contrastive_loss(z_real: torch.Tensor, z_fake: torch.Tensor, temperature: float = 0.1) -> torch.Tensor:
@@ -1616,21 +1304,6 @@ def bidirectional_contrastive_loss(z_real: torch.Tensor, z_fake: torch.Tensor, t
     - z_real[i] <-> z_fake[i] is a positive pair
     - other samples in batch are negatives
     """
-    if z_real.dim() != 2 or z_fake.dim() != 2:
-        raise ValueError(
-            "bidirectional_contrastive_loss expects 2D embeddings [B, D], "
-            f"got z_real={tuple(z_real.shape)}, z_fake={tuple(z_fake.shape)}"
-        )
-    if z_real.size(0) != z_fake.size(0):
-        raise ValueError(
-            "bidirectional_contrastive_loss requires paired views with the same batch size, "
-            f"got z_real={tuple(z_real.shape)}, z_fake={tuple(z_fake.shape)}"
-        )
-    if z_real.size(1) != z_fake.size(1):
-        raise ValueError(
-            "bidirectional_contrastive_loss requires same embedding dim, "
-            f"got z_real={tuple(z_real.shape)}, z_fake={tuple(z_fake.shape)}"
-        )
     if z_real.size(0) <= 1:
         return torch.zeros((), device=z_real.device, dtype=z_real.dtype)
     z1 = F.normalize(z_real, dim=-1)
@@ -1642,49 +1315,10 @@ def bidirectional_contrastive_loss(z_real: torch.Tensor, z_fake: torch.Tensor, t
     return 0.5 * (loss_12 + loss_21)
 
 
-def deterministic_contrast_embedding(out: Dict[str, torch.Tensor], mode: str = "mixmu") -> torch.Tensor:
-    mode = str(mode).lower()
-    if mode in ("encoder_hidden", "hidden", "h") and "encoder_hidden" in out:
-        emb = out["encoder_hidden"]
-    elif mode in ("mu_base", "base_mu") and "mu_base" in out:
-        emb = out["mu_base"]
-    elif mode == "z":
-        emb = out["z"]
-    elif mode in ("mixmu", "mixture_mu") and "mu" in out:
-        emb = out["mu"]
-    elif ("q_c" in out) and ("mu_comp" in out):
-        emb = torch.sum(out["q_c"].unsqueeze(-1) * out["mu_comp"], dim=1)
-    else:
-        emb = out["mu"]
-    if emb.dim() != 2:
-        raise ValueError(f"Contrast embedding mode={mode} must return [B, D], got {tuple(emb.shape)}")
-    return emb
-
-
-def supervised_celltype_contrastive_loss(
-    emb: torch.Tensor,
-    celltype_id: torch.Tensor,
-    temperature: float = 0.2,
-) -> torch.Tensor:
-    if celltype_id is None or emb.size(0) <= 1:
-        return torch.zeros((), device=emb.device, dtype=emb.dtype)
-    labels = celltype_id.view(-1).to(device=emb.device).long()
-    valid = labels >= 0
-    if int(valid.sum().item()) <= 1:
-        return torch.zeros((), device=emb.device, dtype=emb.dtype)
-    z = F.normalize(emb[valid].float(), dim=-1)
-    y = labels[valid]
-    n = z.size(0)
-    logits = torch.matmul(z, z.transpose(0, 1)) / max(float(temperature), 1e-6)
-    eye = torch.eye(n, device=z.device, dtype=torch.bool)
-    pos = (y[:, None] == y[None, :]) & (~eye)
-    has_pos = pos.any(dim=1)
-    if not bool(has_pos.any().item()):
-        return torch.zeros((), device=emb.device, dtype=emb.dtype)
-    logits = logits.masked_fill(eye, float("-inf"))
-    log_prob = logits - torch.logsumexp(logits, dim=1, keepdim=True)
-    loss_i = -(log_prob.masked_fill(~pos, 0.0).sum(dim=1) / pos.sum(dim=1).clamp_min(1))
-    return loss_i[has_pos].mean().to(dtype=emb.dtype)
+def deterministic_contrast_embedding(out: Dict[str, torch.Tensor]) -> torch.Tensor:
+    if ("q_c" in out) and ("mu_comp" in out):
+        return torch.sum(out["q_c"].unsqueeze(-1) * out["mu_comp"], dim=1)
+    return out["mu"]
 
 
 def gmm_collapse_diagnostics(
@@ -1694,13 +1328,11 @@ def gmm_collapse_diagnostics(
     active_thresh: float = 1e-3,
 ) -> Dict[str, float]:
     with torch.no_grad():
-        if z.size(-1) != prior.D:
-            z = z[..., :prior.D]
         if getattr(prior, "conditional_on_tissue", False) and tissue_id is not None:
             tid = prior._sanitize_tissue_id(tissue_id.to(z.device))
             pi = torch.softmax(prior.pi_logits_t.float()[tid], dim=-1).mean(dim=0)  # (K,)
         else:
-            pi = torch.exp(prior._log_weights().squeeze(0)).to(z.device)  # (K,)
+            pi = torch.softmax(prior.pi_logits.float(), dim=0)  # (K,)
         pi_entropy = float((-(pi * torch.log(pi + 1e-12))).sum().item())
         k_eff = float(torch.exp(torch.tensor(pi_entropy, device=pi.device)).item())
 
@@ -1711,10 +1343,10 @@ def gmm_collapse_diagnostics(
         active_comp = int((usage > float(active_thresh)).sum().item())
         resp_top1 = float(resp.max(dim=1).values.mean().item())
 
-        prior_mu = prior.effective_prior_mu()  # (K, D)
-        mean_prior_mu_norm = float(prior_mu.norm(dim=1).mean().item())
-        if prior_mu.size(0) > 1:
-            dmat = torch.cdist(prior_mu, prior_mu, p=2)
+        mu = prior.prior_mu.float()  # (K, D)
+        mean_prior_mu_norm = float(mu.norm(dim=1).mean().item())
+        if mu.size(0) > 1:
+            dmat = torch.cdist(mu, mu, p=2)
             diag_mask = torch.eye(dmat.size(0), device=dmat.device, dtype=torch.bool)
             off_dmat = dmat.masked_fill(diag_mask, float("nan"))
             finite_dists = off_dmat[~torch.isnan(off_dmat)]
@@ -1728,23 +1360,85 @@ def gmm_collapse_diagnostics(
         mean_prior_var = float(prior_var.mean().item())
         max_prior_var = float(prior_var.max().item())
         mean_prior_std = float(torch.sqrt(prior_var).mean().item())
-        group_eff = 1.0
-        active_group = 1
-        min_group_dist = 0.0
-        mean_offset_norm = 0.0
-        if getattr(prior, "is_hierarchical", False):
-            group_pi = torch.softmax(prior.group_pi_logits.float(), dim=0)
-            group_entropy = -(group_pi * torch.log(group_pi + 1e-12)).sum()
-            group_eff = float(torch.exp(group_entropy).item())
-            active_group = int((group_pi > float(active_thresh)).sum().item())
-            group_mu = prior.group_mu.float()
-            if group_mu.size(0) > 1:
-                gd = torch.cdist(group_mu, group_mu, p=2)
-                gmask = torch.eye(gd.size(0), device=gd.device, dtype=torch.bool)
-                goff = gd.masked_fill(gmask, float("nan"))
-                gfinite = goff[~torch.isnan(goff)]
-                min_group_dist = float(gfinite.min().item()) if gfinite.numel() > 0 else 0.0
-            mean_offset_norm = float(prior.component_mu.float().norm(dim=1).mean().item())
+        factor = prior._expanded_factor()
+        if factor is not None:
+            factor = factor.float()
+            factor_var_diag = torch.sum(factor * factor, dim=-1)  # diag(A A^T), (K, D)
+            mean_factor_var = float(factor_var_diag.mean().item())
+            max_factor_var = float(factor_var_diag.max().item())
+            mean_factor_norm = float(factor.norm(dim=(1, 2)).mean().item())
+            total_var = prior_var + factor_var_diag
+            mean_total_var = float(total_var.mean().item())
+            max_total_var = float(total_var.max().item())
+            mean_total_std = float(torch.sqrt(total_var).mean().item())
+        else:
+            mean_factor_var = 0.0
+            max_factor_var = 0.0
+            mean_factor_norm = 0.0
+            mean_total_var = mean_prior_var
+            max_total_var = max_prior_var
+            mean_total_std = mean_prior_std
+
+        group_k_eff = 0.0
+        group_active = 0
+        group_resp_top1 = 0.0
+        sub_k_eff_mean = 0.0
+        sub_active_mean = 0.0
+        sub_active_min = 0.0
+        sub_active_max = 0.0
+        group_mu_min_dist = 0.0
+        group_mu_mean_dist = 0.0
+        sub_delta_norm_mean = 0.0
+        sub_delta_norm_max = 0.0
+        if hasattr(prior, "component_group") and hasattr(prior, "component_sub"):
+            comp_group = prior.component_group.to(usage.device)
+            comp_sub = prior.component_sub.to(usage.device)
+            g_count = int(getattr(prior, "G", int(comp_group.max().item()) + 1))
+            s_count = int(getattr(prior, "S", int(comp_sub.max().item()) + 1))
+            group_usage = torch.zeros((g_count,), device=usage.device, dtype=usage.dtype)
+            group_usage.scatter_add_(0, comp_group, usage)
+            group_entropy = -(group_usage * torch.log(group_usage + 1e-12)).sum()
+            group_k_eff = float(torch.exp(group_entropy).item())
+            group_active = int((group_usage > float(active_thresh)).sum().item())
+            resp_group = torch.zeros((resp.size(0), g_count), device=resp.device, dtype=resp.dtype)
+            resp_group.scatter_add_(1, comp_group.view(1, -1).expand(resp.size(0), -1), resp)
+            group_resp_top1 = float(resp_group.max(dim=1).values.mean().item())
+
+            sub_eff_rows = []
+            sub_active_rows = []
+            for gg in range(g_count):
+                mask_g = comp_group == gg
+                if not bool(mask_g.any()):
+                    continue
+                sub_usage = torch.zeros((s_count,), device=usage.device, dtype=usage.dtype)
+                sub_usage.scatter_add_(0, comp_sub[mask_g], usage[mask_g])
+                mass = torch.clamp(sub_usage.sum(), min=1e-12)
+                sub_usage = sub_usage / mass
+                sub_entropy = -(sub_usage * torch.log(sub_usage + 1e-12)).sum()
+                sub_eff_rows.append(torch.exp(sub_entropy))
+                sub_active_rows.append((sub_usage > float(active_thresh)).sum().float())
+            if sub_eff_rows:
+                sub_eff = torch.stack(sub_eff_rows)
+                sub_act = torch.stack(sub_active_rows)
+                sub_k_eff_mean = float(sub_eff.mean().item())
+                sub_active_mean = float(sub_act.mean().item())
+                sub_active_min = float(sub_act.min().item())
+                sub_active_max = float(sub_act.max().item())
+
+            if hasattr(prior, "group_mu"):
+                group_mu = prior.group_mu.float()
+                if group_mu.size(0) > 1:
+                    gd = torch.cdist(group_mu, group_mu, p=2)
+                    eye_g = torch.eye(gd.size(0), device=gd.device, dtype=torch.bool)
+                    goff = gd.masked_fill(eye_g, float("nan"))
+                    gfinite = goff[~torch.isnan(goff)]
+                    if gfinite.numel() > 0:
+                        group_mu_min_dist = float(gfinite.min().item())
+                        group_mu_mean_dist = float(gfinite.mean().item())
+            if hasattr(prior, "sub_delta"):
+                sd_norm = prior.sub_delta.float().norm(dim=-1)
+                sub_delta_norm_mean = float(sd_norm.mean().item())
+                sub_delta_norm_max = float(sd_norm.max().item())
 
     return {
         "pi_entropy": pi_entropy,
@@ -1757,63 +1451,24 @@ def gmm_collapse_diagnostics(
         "mean_prior_var": mean_prior_var,
         "max_prior_var": max_prior_var,
         "mean_prior_std": mean_prior_std,
-        "group_eff": group_eff,
-        "active_group": active_group,
-        "min_group_dist": min_group_dist,
-        "mean_offset_norm": mean_offset_norm,
+        "mean_factor_var": mean_factor_var,
+        "max_factor_var": max_factor_var,
+        "mean_factor_norm": mean_factor_norm,
+        "mean_total_var": mean_total_var,
+        "max_total_var": max_total_var,
+        "mean_total_std": mean_total_std,
+        "group_k_eff": group_k_eff,
+        "group_active": group_active,
+        "group_resp_top1": group_resp_top1,
+        "sub_k_eff_mean": sub_k_eff_mean,
+        "sub_active_mean": sub_active_mean,
+        "sub_active_min": sub_active_min,
+        "sub_active_max": sub_active_max,
+        "group_mu_min_dist": group_mu_min_dist,
+        "group_mu_mean_dist": group_mu_mean_dist,
+        "sub_delta_norm_mean": sub_delta_norm_mean,
+        "sub_delta_norm_max": sub_delta_norm_max,
     }
-
-
-def hierarchy_posterior_diagnostics(
-    out: Dict[str, torch.Tensor],
-    active_thresh: float = 1e-3,
-) -> Dict[str, float]:
-    with torch.no_grad():
-        q_g = out.get("q_g", None)
-        q_c = out.get("q_c", None)
-        q_c_given_g = out.get("q_c_given_g", None)
-        if q_g is None:
-            return {
-                "post_group_eff": 0.0,
-                "post_active_group": 0,
-                "post_group_top1": 0.0,
-                "post_comp_eff": 0.0,
-                "post_active_comp": 0,
-                "post_comp_top1": 0.0,
-                "within_group_top1": 0.0,
-            }
-        g_usage = q_g.float().mean(dim=0)
-        g_entropy = -(g_usage * torch.log(g_usage.clamp_min(1e-12))).sum()
-        post_group_eff = float(torch.exp(g_entropy).item())
-        post_active_group = int((g_usage > float(active_thresh)).sum().item())
-        post_group_top1 = float(q_g.float().max(dim=1).values.mean().item())
-        if q_c is None:
-            return {
-                "post_group_eff": post_group_eff,
-                "post_active_group": post_active_group,
-                "post_group_top1": post_group_top1,
-                "post_comp_eff": 0.0,
-                "post_active_comp": 0,
-                "post_comp_top1": 0.0,
-                "within_group_top1": 0.0,
-            }
-        c_usage = q_c.float().mean(dim=0)
-        c_entropy = -(c_usage * torch.log(c_usage.clamp_min(1e-12))).sum()
-        post_comp_eff = float(torch.exp(c_entropy).item())
-        post_active_comp = int((c_usage > float(active_thresh)).sum().item())
-        post_comp_top1 = float(q_c.float().max(dim=1).values.mean().item())
-        within_group_top1 = 0.0
-        if q_c_given_g is not None:
-            within_group_top1 = float(q_c_given_g.float().max(dim=1).values.mean().item())
-        return {
-            "post_group_eff": post_group_eff,
-            "post_active_group": post_active_group,
-            "post_group_top1": post_group_top1,
-            "post_comp_eff": post_comp_eff,
-            "post_active_comp": post_active_comp,
-            "post_comp_top1": post_comp_top1,
-            "within_group_top1": within_group_top1,
-        }
 
 
 def batch_kmeans_usage_diagnostics(
@@ -1852,65 +1507,8 @@ def batch_kmeans_usage_diagnostics(
         }
 
 
-def recon_gene_weight_diagnostics(
-    model,
-    mode: str,
-    alpha: float,
-    w_min: float,
-    w_max: float,
-    eps: float,
-) -> Dict[str, float]:
-    base_model = model.module if hasattr(model, "module") else model
-    mean_ema = getattr(base_model, "recon_gene_mean_ema", None)
-    if mean_ema is None or mean_ema.numel() == 0 or not torch.any(mean_ema > 0):
-        return {}
-    with torch.no_grad():
-        mode = str(mode).lower()
-        mean_g = mean_ema.detach().float()
-        if mode == "cv_ema":
-            sq_ema = getattr(base_model, "recon_gene_sq_mean_ema", None)
-            if sq_ema is None or sq_ema.numel() == 0 or not torch.any(sq_ema > 0):
-                return {}
-            sq_g = sq_ema.detach().float()
-            var_g = torch.clamp(sq_g - mean_g.square(), min=0.0)
-            cv_g = torch.sqrt(var_g + float(eps)) / (mean_g + float(eps))
-            w = 1.0 + torch.log1p(cv_g)
-        else:
-            w = 1.0 / torch.log1p(torch.clamp(mean_g, min=float(eps)) + float(eps))
-        w = w / torch.clamp(w.mean(), min=float(eps))
-        w = torch.clamp(w, min=float(w_min), max=float(w_max))
-        w = (1.0 - float(alpha)) + float(alpha) * w
-        q = torch.quantile(w, torch.tensor([0.01, 0.10, 0.50, 0.90, 0.99], device=w.device))
-        mean_q = torch.quantile(mean_g, torch.tensor([0.10, 0.90], device=mean_g.device))
-        low_expr = mean_g <= mean_q[0]
-        high_expr = mean_g >= mean_q[1]
-        out = {
-            "gw_min": float(w.min().item()),
-            "gw_p01": float(q[0].item()),
-            "gw_p10": float(q[1].item()),
-            "gw_p50": float(q[2].item()),
-            "gw_p90": float(q[3].item()),
-            "gw_p99": float(q[4].item()),
-            "gw_max": float(w.max().item()),
-            "gw_lowExprMean": float(w[low_expr].mean().item()) if bool(low_expr.any()) else 0.0,
-            "gw_highExprMean": float(w[high_expr].mean().item()) if bool(high_expr.any()) else 0.0,
-            "gw_lowExprCountMean": float(mean_g[low_expr].mean().item()) if bool(low_expr.any()) else 0.0,
-            "gw_highExprCountMean": float(mean_g[high_expr].mean().item()) if bool(high_expr.any()) else 0.0,
-        }
-        if mode == "cv_ema":
-            cv_q = torch.quantile(cv_g, torch.tensor([0.10, 0.50, 0.90], device=cv_g.device))
-            out.update(
-                {
-                    "gw_cv_p10": float(cv_q[0].item()),
-                    "gw_cv_p50": float(cv_q[1].item()),
-                    "gw_cv_p90": float(cv_q[2].item()),
-                }
-            )
-        return out
-
-
 # =========================
-# Training / evaluation (for GMM-VAE)
+# Training / evaluation (for MFA-VAE)
 # =========================
 def _build_vae_inputs(value: torch.Tensor):
     x_mask = (value != -1).float()
@@ -2034,9 +1632,6 @@ def train_gmm_vae_one_epoch(
     score_detach_z=True,
     lambda_contrast=0.0,
     contrast_temp=0.1,
-    contrast_embedding="encoder_hidden",
-    lambda_celltype_contrast=0.0,
-    celltype_contrast_temp=0.2,
     lambda_real_recon=0.0,
     lambda_cov=0.0,
     cov_use_mu=True,
@@ -2070,21 +1665,13 @@ def train_gmm_vae_one_epoch(
     recon_cell_weight_clusters=32,
     recon_cell_weight_kmeans_iters=2,
     lambda_batchless_recon=0.0,
-    lambda_tissueless_recon=0.0,
-    lambda_rank_recon=0.0,
-    rank_recon_gene_pairs=256,
-    rank_recon_cell_pairs=256,
     force_base_posterior=False,
 ):
     model.train()
     loss_fn = model.module.loss if hasattr(model, "module") else model.loss
     prior_ref = model.module.prior if hasattr(model, "module") else model.prior
     total_loss = total_recon = total_kl = total_score = total_contrast = total_cov = total_prior_pi_balance = total_celltype_cls = 0.0
-    total_celltype_contrast = 0.0
-    total_real_recon = 0.0
     total_batchless_recon = 0.0
-    total_tissueless_recon = 0.0
-    total_rank_recon = total_rank_gene = total_rank_cell = 0.0
     n_cells = 0
     is_rank0 = (not dist.is_available()) or (not dist.is_initialized()) or (dist.get_rank() == 0)
 
@@ -2144,9 +1731,6 @@ def train_gmm_vae_one_epoch(
                 recon_cell_weight_eps=recon_cell_weight_eps,
                 recon_cell_weight_clusters=recon_cell_weight_clusters,
                 recon_cell_weight_kmeans_iters=recon_cell_weight_kmeans_iters,
-                lambda_rank_recon=lambda_rank_recon,
-                rank_recon_gene_pairs=rank_recon_gene_pairs,
-                rank_recon_cell_pairs=rank_recon_cell_pairs,
             )
             need_real_view = (lambda_contrast > 0) or (lambda_real_recon > 0)
             real_recon = torch.zeros((), device=x_count.device, dtype=out_fake["z"].dtype)
@@ -2246,101 +1830,88 @@ def train_gmm_vae_one_epoch(
                     recon_cell_weight_kmeans_iters=recon_cell_weight_kmeans_iters,
                 )
                 batchless_recon = out_batchless["recon_loss"]
-            tissueless_recon = torch.zeros((), device=x_count.device, dtype=out_fake["z"].dtype)
-            if float(lambda_tissueless_recon) != 0.0:
-                out_tissueless = loss_fn(
-                    x_count=x_count,
-                    x_mask=x_mask,
-                    tissue_id=tissue_id,
-                    sample_id=sample_id,
-                    celltype_id=celltype_id,
-                    force_base_posterior=force_base_posterior,
-                    beta=0.0,
-                    encoder_mask=x_mask_encoder,
-                    use_tissue_condition=False,
-                    recon_mask=x_mask if recon_observed_only else None,
-                    lambda_score=0.0,
-                    score_noise_std=score_noise_std,
-                    score_detach_z=score_detach_z,
-                    lambda_cov=0.0,
-                    cov_use_mu=cov_use_mu,
-                    lambda_resp_balance=0.0,
-                    lambda_resp_confidence=0.0,
-                    lambda_resp_anchor=0.0,
-                    resp_temperature=resp_temperature,
-                    resp_topk=0,
-                    prior_logvar_min=prior_logvar_min,
-                    prior_logvar_max=prior_logvar_max,
-                    lambda_prior_mu_l2=0.0,
-                    lambda_prior_factor_l2=0.0,
-                    lambda_prior_pi_balance=0.0,
-                    lambda_prior_mu_spread=0.0,
-                    prior_mu_spread_tau=prior_mu_spread_tau,
-                    lambda_post_c_balance=0.0,
-                    lambda_celltype_cls=0.0,
-                    lambda_prior_logvar_l2=0.0,
-                    prior_logvar_target=prior_logvar_target,
-                    recon_gene_weight_mode=recon_gene_weight_mode,
-                    recon_gene_weight_alpha=recon_gene_weight_alpha,
-                    recon_gene_weight_ema_momentum=recon_gene_weight_ema_momentum,
-                    recon_gene_weight_min=recon_gene_weight_min,
-                    recon_gene_weight_max=recon_gene_weight_max,
-                    recon_gene_weight_eps=recon_gene_weight_eps,
-                    recon_cell_weight_mode=recon_cell_weight_mode,
-                    recon_cell_weight_alpha=recon_cell_weight_alpha,
-                    recon_cell_weight_min=recon_cell_weight_min,
-                    recon_cell_weight_max=recon_cell_weight_max,
-                    recon_cell_weight_eps=recon_cell_weight_eps,
-                    recon_cell_weight_clusters=recon_cell_weight_clusters,
-                    recon_cell_weight_kmeans_iters=recon_cell_weight_kmeans_iters,
-                )
-                tissueless_recon = out_tissueless["recon_loss"]
             if lambda_contrast > 0:
                 contrast = bidirectional_contrastive_loss(
-                    z_real=deterministic_contrast_embedding(out_real, mode=contrast_embedding),
-                    z_fake=deterministic_contrast_embedding(out_fake, mode=contrast_embedding),
+                    z_real=deterministic_contrast_embedding(out_real),
+                    z_fake=deterministic_contrast_embedding(out_fake),
                     temperature=contrast_temp,
                 )
             else:
                 contrast = torch.zeros((), device=x_count.device, dtype=out_fake["z"].dtype)
-            if float(lambda_celltype_contrast) != 0.0:
-                celltype_contrast = supervised_celltype_contrastive_loss(
-                    emb=deterministic_contrast_embedding(out_fake, mode=contrast_embedding),
-                    celltype_id=celltype_id,
-                    temperature=celltype_contrast_temp,
-                )
-            else:
-                celltype_contrast = torch.zeros((), device=x_count.device, dtype=out_fake["z"].dtype)
 
             loss = out_fake["loss"]
             if float(lambda_contrast) != 0.0:
                 loss = loss + float(lambda_contrast) * contrast
-            if float(lambda_celltype_contrast) != 0.0:
-                loss = loss + float(lambda_celltype_contrast) * celltype_contrast
             if float(lambda_real_recon) != 0.0:
                 loss = loss + float(lambda_real_recon) * real_recon
             if float(lambda_batchless_recon) != 0.0:
                 loss = loss + float(lambda_batchless_recon) * batchless_recon
-            if float(lambda_tissueless_recon) != 0.0:
-                loss = loss + float(lambda_tissueless_recon) * tissueless_recon
             recon = out_fake["recon_loss"]
             kl = out_fake["kl_loss"]
-            kl_gmm = out_fake.get("kl_gmm_loss", torch.zeros_like(kl))
-            kl_free = out_fake.get("kl_free_loss", torch.zeros_like(kl))
             score = out_fake["score_loss"]
             cov = out_fake["cov_loss"]
             prior_pi_balance = out_fake.get("prior_pi_balance_loss", torch.zeros_like(cov))
             post_c_balance = out_fake.get("post_c_balance_loss", torch.zeros_like(cov))
             celltype_cls = out_fake.get("celltype_cls_loss", torch.zeros_like(cov))
-            rank_recon = out_fake.get("rank_recon_loss", torch.zeros_like(cov))
-            rank_gene = out_fake.get("rank_gene_loss", torch.zeros_like(cov))
-            rank_cell = out_fake.get("rank_cell_loss", torch.zeros_like(cov))
 
         if not torch.isfinite(loss):
             if is_rank0:
+                kl_c_dbg = out_fake.get("kl_c_loss", torch.zeros_like(kl))
+                kl_u_dbg = out_fake.get("kl_u_loss", torch.zeros_like(kl))
+                kl_eps_dbg = out_fake.get("kl_eps_loss", torch.zeros_like(kl))
+                prior_factor_l2_dbg = out_fake.get("prior_factor_l2_loss", torch.zeros_like(kl))
+                prior_logvar_l2_dbg = out_fake.get("prior_logvar_l2_loss", torch.zeros_like(kl))
+                prior_mu_spread_dbg = out_fake.get("prior_mu_spread_loss", torch.zeros_like(kl))
+                post_c_balance_dbg = out_fake.get("post_c_balance_loss", torch.zeros_like(kl))
+                rate = out_fake.get("rate", torch.empty(0, device=x_count.device))
+                theta = out_fake.get("nb_theta", torch.empty(0, device=x_count.device))
+                z_cur = out_fake.get("z", torch.empty(0, device=x_count.device))
+                term_checks = {
+                    "loss": loss,
+                    "fake_loss": out_fake.get("loss", torch.zeros_like(kl)),
+                    "recon": recon,
+                    "kl": kl,
+                    "real_recon": real_recon,
+                    "batchless_recon": batchless_recon,
+                    "contrast": contrast,
+                    "cls": celltype_cls,
+                    "prior_factor_l2": prior_factor_l2_dbg,
+                    "prior_logvar_l2": prior_logvar_l2_dbg,
+                    "prior_mu_spread": prior_mu_spread_dbg,
+                    "post_c_balance": post_c_balance_dbg,
+                }
+                bad_terms = [
+                    name for name, val in term_checks.items()
+                    if torch.is_tensor(val) and val.numel() > 0 and (not torch.isfinite(val.detach()).all())
+                ]
+                diag_msg = ""
+                if rate.numel() > 0:
+                    rate_f = rate.detach().float()
+                    diag_msg += f", rate[min/max]={rate_f.nan_to_num().min().item():.3g}/{rate_f.nan_to_num().max().item():.3g}"
+                if theta.numel() > 0:
+                    theta_f = theta.detach().float()
+                    diag_msg += f", theta[min/max]={theta_f.nan_to_num().min().item():.3g}/{theta_f.nan_to_num().max().item():.3g}"
+                if z_cur.numel() > 0:
+                    z_f = z_cur.detach().float()
+                    diag_msg += f", zAbsMax={z_f.nan_to_num().abs().max().item():.3g}"
+                if getattr(model.module if hasattr(model, "module") else model, "prior_type", None) == "gmm":
+                    diag = gmm_collapse_diagnostics(prior=prior_ref, z=z_cur.detach() if z_cur.numel() > 0 else None, tissue_id=tissue_id)
+                    diag_msg += (
+                        f", K_eff={diag['k_eff']:.2f}, maxVar={diag['max_prior_var']:.3g}, "
+                        f"maxFactorVar={diag['max_factor_var']:.3g}, maxTotalVar={diag['max_total_var']:.3g}"
+                    )
                 print(
                     f"[WARN] Non-finite train loss at batch {batch_idx + 1}, skip step. "
-                    f"Recon={recon.item():.4f}, KL={kl.item():.4f}, Cov={cov.item():.4f}"
+                    f"Recon={recon.item():.4f}, KL={kl.item():.4f}, "
+                    f"KLc={kl_c_dbg.item():.4f}, KLu={kl_u_dbg.item():.4f}, KLeps={kl_eps_dbg.item():.4f}, "
+                    f"Contrast={contrast.item():.4f}, "
+                    f"cls={celltype_cls.item():.4f}, RealRecon={real_recon.item():.4f}, "
+                    f"BatchlessRecon={batchless_recon.item():.4f}, "
+                    f"priorFactorL2={prior_factor_l2_dbg.item():.4g}, "
+                    f"priorLogvarL2={prior_logvar_l2_dbg.item():.4g}, "
+                    f"priorMuSpread={prior_mu_spread_dbg.item():.4g}, "
+                    f"postCBal={post_c_balance_dbg.item():.4g}, "
+                    f"badTerms={bad_terms}{diag_msg}"
                 )
             optimizer.zero_grad(set_to_none=True)
             continue
@@ -2358,36 +1929,26 @@ def train_gmm_vae_one_epoch(
         total_kl += kl.item() * bsz
         total_score += score.item() * bsz
         total_contrast += contrast.item() * bsz
-        total_celltype_contrast += celltype_contrast.item() * bsz
         total_cov += cov.item() * bsz
         total_prior_pi_balance += prior_pi_balance.item() * bsz
         total_celltype_cls += celltype_cls.item() * bsz
         total_batchless_recon += batchless_recon.item() * bsz
-        total_tissueless_recon += tissueless_recon.item() * bsz
-        total_rank_recon += rank_recon.item() * bsz
-        total_rank_gene += rank_gene.item() * bsz
-        total_rank_cell += rank_cell.item() * bsz
 
         if (batch_idx + 1) % 1000 == 0 and is_rank0:
-            free_kl_frac = kl_free / torch.clamp(kl_gmm + kl_free, min=1e-8)
             msg = (
                 f"[Batch {batch_idx + 1}] "
                 f"Loss={loss.item():.4f}, Recon={recon.item():.4f}, KL={kl.item():.4f}, "
-                f"KLgmm={kl_gmm.item():.4f}, KLfree={kl_free.item():.4f}, "
-                f"freeKLFrac={free_kl_frac.item():.3f}, cls={celltype_cls.item():.4f}"
+                f"KLc={out_fake.get('kl_c_loss', torch.zeros_like(kl)).item():.4f}, "
+                f"KLu={out_fake.get('kl_u_loss', torch.zeros_like(kl)).item():.4f}, "
+                f"KLeps={out_fake.get('kl_eps_loss', torch.zeros_like(kl)).item():.4f}, "
+                f"cls={celltype_cls.item():.4f}"
             )
             if lambda_contrast > 0:
                 msg += f", Contrast={contrast.item():.4f}"
-            if lambda_celltype_contrast > 0:
-                msg += f", CtContrast={celltype_contrast.item():.4f}"
             if lambda_real_recon > 0:
                 msg += f", RealRecon={real_recon.item():.4f}"
             if lambda_batchless_recon > 0:
                 msg += f", BatchlessRecon={batchless_recon.item():.4f}"
-            if lambda_tissueless_recon > 0:
-                msg += f", TissuelessRecon={tissueless_recon.item():.4f}"
-            if lambda_rank_recon > 0:
-                msg += f", RankRecon={rank_recon.item():.4f}, RankGene={rank_gene.item():.4f}, RankCell={rank_cell.item():.4f}"
             if lambda_post_c_balance > 0:
                 msg += f", postCBal={post_c_balance.item():.4f}"
             if str(recon_cell_weight_mode).lower() == "batch_kmeans" and float(recon_cell_weight_alpha) > 0:
@@ -2400,24 +1961,6 @@ def train_gmm_vae_one_epoch(
                     f", kmKeff={km['km_eff']:.2f}, kmActive={km['km_active']}, "
                     f"kmMax={km['km_max']:.3f}, kmMin={km['km_min']:.3f}"
                 )
-            if str(recon_gene_weight_mode).lower() != "none" and float(recon_gene_weight_alpha) > 0:
-                gw = recon_gene_weight_diagnostics(
-                    model=model,
-                    mode=recon_gene_weight_mode,
-                    alpha=recon_gene_weight_alpha,
-                    w_min=recon_gene_weight_min,
-                    w_max=recon_gene_weight_max,
-                    eps=recon_gene_weight_eps,
-                )
-                if gw:
-                    msg += (
-                        f", geneW[min/p50/max]={gw['gw_min']:.2f}/{gw['gw_p50']:.2f}/{gw['gw_max']:.2f}, "
-                        f"p10/p90={gw['gw_p10']:.2f}/{gw['gw_p90']:.2f}, "
-                        f"lowExprW={gw['gw_lowExprMean']:.2f}, highExprW={gw['gw_highExprMean']:.2f}, "
-                        f"low/highMean={gw['gw_lowExprCountMean']:.3g}/{gw['gw_highExprCountMean']:.3g}"
-                    )
-                    if "gw_cv_p50" in gw:
-                        msg += f", cv[p10/p50/p90]={gw['gw_cv_p10']:.2f}/{gw['gw_cv_p50']:.2f}/{gw['gw_cv_p90']:.2f}"
             msg += (
                 f", respH={out_fake['resp_entropy'].item():.4f}"
             )
@@ -2426,20 +1969,28 @@ def train_gmm_vae_one_epoch(
                 msg += (
                     f", K_eff={diag['k_eff']:.2f}, activeK={diag['active_comp']}, "
                     f"respTop1={diag['resp_top1']:.3f}, "
+                    f"groupKeff={diag['group_k_eff']:.2f}, groupActive={diag['group_active']}, "
+                    f"groupTop1={diag['group_resp_top1']:.3f}, subKeffMean={diag['sub_k_eff_mean']:.2f}, "
+                    f"subActiveMean={diag['sub_active_mean']:.2f}, subActiveMinMax={diag['sub_active_min']:.0f}/{diag['sub_active_max']:.0f}, "
                     f"minMuDist={diag['min_mu_dist']:.3f}, meanMuDist={diag['mean_mu_dist']:.3f}, "
+                    f"groupMuMinDist={diag['group_mu_min_dist']:.3f}, groupMuMeanDist={diag['group_mu_mean_dist']:.3f}, "
+                    f"subDeltaNorm={diag['sub_delta_norm_mean']:.3f}/{diag['sub_delta_norm_max']:.3f}, "
                     f"meanPriorMuNorm={diag['mean_prior_mu_norm']:.3f}, meanVar={diag['mean_prior_var']:.3f}, "
-                    f"maxVar={diag['max_prior_var']:.3f}, meanStd={diag['mean_prior_std']:.3f}"
+                    f"maxVar={diag['max_prior_var']:.3f}, meanStd={diag['mean_prior_std']:.3f}, "
+                    f"factorVar={diag['mean_factor_var']:.3f}, maxFactorVar={diag['max_factor_var']:.3f}, "
+                    f"factorNorm={diag['mean_factor_norm']:.3f}, totalVar={diag['mean_total_var']:.3f}, "
+                    f"maxTotalVar={diag['max_total_var']:.3f}, totalStd={diag['mean_total_std']:.3f}"
                 )
             print(msg)
 
     if dist.is_available() and dist.is_initialized():
         stats = torch.tensor(
-            [total_loss, total_recon, total_kl, total_score, total_contrast, total_cov, total_prior_pi_balance, total_celltype_cls, total_batchless_recon, total_tissueless_recon, total_rank_recon, total_rank_gene, total_rank_cell, total_celltype_contrast, float(n_cells)],
+            [total_loss, total_recon, total_kl, total_score, total_contrast, total_cov, total_prior_pi_balance, total_celltype_cls, total_batchless_recon, float(n_cells)],
             device=device,
             dtype=torch.float64,
         )
         dist.all_reduce(stats, op=dist.ReduceOp.SUM)
-        total_loss, total_recon, total_kl, total_score, total_contrast, total_cov, total_prior_pi_balance, total_celltype_cls, total_batchless_recon, total_tissueless_recon, total_rank_recon, total_rank_gene, total_rank_cell, total_celltype_contrast, n_cells = stats.tolist()
+        total_loss, total_recon, total_kl, total_score, total_contrast, total_cov, total_prior_pi_balance, total_celltype_cls, total_batchless_recon, n_cells = stats.tolist()
         n_cells = max(float(n_cells), 1.0)
 
     return (
@@ -2452,11 +2003,6 @@ def train_gmm_vae_one_epoch(
         total_prior_pi_balance / n_cells,
         total_celltype_cls / n_cells,
         total_batchless_recon / n_cells,
-        total_tissueless_recon / n_cells,
-        total_rank_recon / n_cells,
-        total_rank_gene / n_cells,
-        total_rank_cell / n_cells,
-        total_celltype_contrast / n_cells,
     )
 
 
@@ -2471,9 +2017,6 @@ def evaluate_gmm_vae_one_epoch(
     score_detach_z=True,
     lambda_contrast=0.0,
     contrast_temp=0.1,
-    contrast_embedding="encoder_hidden",
-    lambda_celltype_contrast=0.0,
-    celltype_contrast_temp=0.2,
     lambda_real_recon=0.0,
     lambda_cov=0.0,
     cov_use_mu=True,
@@ -2511,21 +2054,13 @@ def evaluate_gmm_vae_one_epoch(
     recon_cell_weight_clusters=32,
     recon_cell_weight_kmeans_iters=2,
     lambda_batchless_recon=0.0,
-    lambda_tissueless_recon=0.0,
-    lambda_rank_recon=0.0,
-    rank_recon_gene_pairs=256,
-    rank_recon_cell_pairs=256,
     force_base_posterior=False,
 ):
     model.eval()
     loss_fn = model.module.loss if hasattr(model, "module") else model.loss
     prior_ref = model.module.prior if hasattr(model, "module") else model.prior
     total_loss = total_recon = total_kl = total_score = total_contrast = total_cov = total_prior_pi_balance = total_celltype_cls = 0.0
-    total_celltype_contrast = 0.0
-    total_real_recon = 0.0
     total_batchless_recon = 0.0
-    total_tissueless_recon = 0.0
-    total_rank_recon = total_rank_gene = total_rank_cell = 0.0
     n_cells = 0
     is_rank0 = (not dist.is_available()) or (not dist.is_initialized()) or (dist.get_rank() == 0)
 
@@ -2540,9 +2075,8 @@ def evaluate_gmm_vae_one_epoch(
             bsz = x_count.size(0)
             n_cells += bsz
 
-            out_fake = loss_fn(
-                # In validation, when contrastive term is enabled, build a fake-mask view
-                # on the fly while keeping reconstruction evaluated on the real observed mask.
+            out_real = loss_fn(
+                # Validation main metric uses the original observed mask, not random-mask augmentation.
                 x_count=x_count,
                 x_mask=x_mask,
                 tissue_id=tissue_id,
@@ -2551,17 +2085,7 @@ def evaluate_gmm_vae_one_epoch(
                 force_base_posterior=force_base_posterior,
                 beta=beta_kl,
                 use_batch_condition=False,
-                encoder_mask=(
-                    _random_hide_observed(
-                        x_mask=x_mask,
-                        apply_prob=mask_aug_prob,
-                        policy=mask_aug_policy,
-                        min_frac=mask_aug_min_frac,
-                        max_frac=mask_aug_max_frac,
-                    )
-                    if ((lambda_contrast > 0) or (lambda_real_recon > 0))
-                    else x_mask_encoder
-                ),
+                encoder_mask=x_mask,
                 recon_mask=x_mask if recon_observed_only else None,
                 lambda_score=lambda_score,
                 score_noise_std=score_noise_std,
@@ -2597,14 +2121,18 @@ def evaluate_gmm_vae_one_epoch(
                 recon_cell_weight_eps=recon_cell_weight_eps,
                 recon_cell_weight_clusters=recon_cell_weight_clusters,
                 recon_cell_weight_kmeans_iters=recon_cell_weight_kmeans_iters,
-                lambda_rank_recon=lambda_rank_recon,
-                rank_recon_gene_pairs=rank_recon_gene_pairs,
-                rank_recon_cell_pairs=rank_recon_cell_pairs,
             )
-            need_real_view = (lambda_contrast > 0) or (lambda_real_recon > 0)
-            real_recon = torch.zeros((), device=x_count.device, dtype=out_fake["z"].dtype)
-            if need_real_view:
-                out_real = loss_fn(
+            out_fake = out_real
+            real_recon = out_real["recon_loss"]
+            if lambda_contrast > 0:
+                fake_encoder_mask = _random_hide_observed(
+                    x_mask=x_mask,
+                    apply_prob=mask_aug_prob,
+                    policy=mask_aug_policy,
+                    min_frac=mask_aug_min_frac,
+                    max_frac=mask_aug_max_frac,
+                )
+                out_fake = loss_fn(
                     x_count=x_count,
                     x_mask=x_mask,
                     tissue_id=tissue_id,
@@ -2613,7 +2141,7 @@ def evaluate_gmm_vae_one_epoch(
                     force_base_posterior=force_base_posterior,
                     beta=0.0,
                     use_batch_condition=False,
-                    encoder_mask=x_mask,
+                    encoder_mask=fake_encoder_mask,
                     recon_mask=x_mask if recon_observed_only else None,
                     lambda_score=0.0,
                     score_noise_std=score_noise_std,
@@ -2650,194 +2178,76 @@ def evaluate_gmm_vae_one_epoch(
                     recon_cell_weight_clusters=recon_cell_weight_clusters,
                     recon_cell_weight_kmeans_iters=recon_cell_weight_kmeans_iters,
                 )
-                real_recon = out_real["recon_loss"]
-            batchless_recon = torch.zeros((), device=x_count.device, dtype=out_fake["z"].dtype)
+            batchless_recon = out_real["recon_loss"]
             if float(lambda_batchless_recon) != 0.0:
-                out_batchless = loss_fn(
-                    x_count=x_count,
-                    x_mask=x_mask,
-                    tissue_id=tissue_id,
-                    sample_id=sample_id,
-                    celltype_id=celltype_id,
-                    force_base_posterior=force_base_posterior,
-                    beta=0.0,
-                    encoder_mask=x_mask,
-                    use_batch_condition=False,
-                    recon_mask=x_mask if recon_observed_only else None,
-                    lambda_score=0.0,
-                    score_noise_std=score_noise_std,
-                    score_detach_z=score_detach_z,
-                    lambda_cov=0.0,
-                    cov_use_mu=cov_use_mu,
-                    lambda_resp_balance=0.0,
-                    lambda_resp_confidence=0.0,
-                    lambda_resp_anchor=0.0,
-                    resp_temperature=resp_temperature,
-                    resp_topk=0,
-                    prior_logvar_min=prior_logvar_min,
-                    prior_logvar_max=prior_logvar_max,
-                    lambda_prior_mu_l2=0.0,
-                    lambda_prior_factor_l2=0.0,
-                    lambda_prior_pi_balance=0.0,
-                    lambda_prior_mu_spread=0.0,
-                    prior_mu_spread_tau=prior_mu_spread_tau,
-                    lambda_post_c_balance=0.0,
-                    lambda_celltype_cls=0.0,
-                    lambda_prior_logvar_l2=0.0,
-                    prior_logvar_target=prior_logvar_target,
-                    recon_gene_weight_mode=recon_gene_weight_mode,
-                    recon_gene_weight_alpha=recon_gene_weight_alpha,
-                    recon_gene_weight_ema_momentum=recon_gene_weight_ema_momentum,
-                    recon_gene_weight_min=recon_gene_weight_min,
-                    recon_gene_weight_max=recon_gene_weight_max,
-                    recon_gene_weight_eps=recon_gene_weight_eps,
-                    recon_cell_weight_mode=recon_cell_weight_mode,
-                    recon_cell_weight_alpha=recon_cell_weight_alpha,
-                    recon_cell_weight_min=recon_cell_weight_min,
-                    recon_cell_weight_max=recon_cell_weight_max,
-                    recon_cell_weight_eps=recon_cell_weight_eps,
-                    recon_cell_weight_clusters=recon_cell_weight_clusters,
-                    recon_cell_weight_kmeans_iters=recon_cell_weight_kmeans_iters,
-                )
-                batchless_recon = out_batchless["recon_loss"]
-            tissueless_recon = torch.zeros((), device=x_count.device, dtype=out_fake["z"].dtype)
-            if float(lambda_tissueless_recon) != 0.0:
-                out_tissueless = loss_fn(
-                    x_count=x_count,
-                    x_mask=x_mask,
-                    tissue_id=tissue_id,
-                    sample_id=sample_id,
-                    celltype_id=celltype_id,
-                    force_base_posterior=force_base_posterior,
-                    beta=0.0,
-                    encoder_mask=x_mask,
-                    use_tissue_condition=False,
-                    recon_mask=x_mask if recon_observed_only else None,
-                    lambda_score=0.0,
-                    score_noise_std=score_noise_std,
-                    score_detach_z=score_detach_z,
-                    lambda_cov=0.0,
-                    cov_use_mu=cov_use_mu,
-                    lambda_resp_balance=0.0,
-                    lambda_resp_confidence=0.0,
-                    lambda_resp_anchor=0.0,
-                    resp_temperature=resp_temperature,
-                    resp_topk=0,
-                    prior_logvar_min=prior_logvar_min,
-                    prior_logvar_max=prior_logvar_max,
-                    lambda_prior_mu_l2=0.0,
-                    lambda_prior_factor_l2=0.0,
-                    lambda_prior_pi_balance=0.0,
-                    lambda_prior_mu_spread=0.0,
-                    prior_mu_spread_tau=prior_mu_spread_tau,
-                    lambda_post_c_balance=0.0,
-                    lambda_celltype_cls=0.0,
-                    lambda_prior_logvar_l2=0.0,
-                    prior_logvar_target=prior_logvar_target,
-                    recon_gene_weight_mode=recon_gene_weight_mode,
-                    recon_gene_weight_alpha=recon_gene_weight_alpha,
-                    recon_gene_weight_ema_momentum=recon_gene_weight_ema_momentum,
-                    recon_gene_weight_min=recon_gene_weight_min,
-                    recon_gene_weight_max=recon_gene_weight_max,
-                    recon_gene_weight_eps=recon_gene_weight_eps,
-                    recon_cell_weight_mode=recon_cell_weight_mode,
-                    recon_cell_weight_alpha=recon_cell_weight_alpha,
-                    recon_cell_weight_min=recon_cell_weight_min,
-                    recon_cell_weight_max=recon_cell_weight_max,
-                    recon_cell_weight_eps=recon_cell_weight_eps,
-                    recon_cell_weight_clusters=recon_cell_weight_clusters,
-                    recon_cell_weight_kmeans_iters=recon_cell_weight_kmeans_iters,
-                )
-                tissueless_recon = out_tissueless["recon_loss"]
+                # Validation main path is already batchless. Reuse it to avoid an extra
+                # stochastic forward pass that would make Recon and BatchlessRecon differ.
+                batchless_recon = out_real["recon_loss"]
             if lambda_contrast > 0:
                 contrast = bidirectional_contrastive_loss(
-                    z_real=deterministic_contrast_embedding(out_real, mode=contrast_embedding),
-                    z_fake=deterministic_contrast_embedding(out_fake, mode=contrast_embedding),
+                    z_real=deterministic_contrast_embedding(out_real),
+                    z_fake=deterministic_contrast_embedding(out_fake),
                     temperature=contrast_temp,
                 )
             else:
                 contrast = torch.zeros((), device=x_count.device, dtype=out_fake["z"].dtype)
-            if float(lambda_celltype_contrast) != 0.0:
-                celltype_contrast = supervised_celltype_contrastive_loss(
-                    emb=deterministic_contrast_embedding(out_fake, mode=contrast_embedding),
-                    celltype_id=celltype_id,
-                    temperature=celltype_contrast_temp,
-                )
-            else:
-                celltype_contrast = torch.zeros((), device=x_count.device, dtype=out_fake["z"].dtype)
-            loss = out_fake["loss"]
+            loss = out_real["loss"]
             if float(lambda_contrast) != 0.0:
                 loss = loss + float(lambda_contrast) * contrast
-            if float(lambda_celltype_contrast) != 0.0:
-                loss = loss + float(lambda_celltype_contrast) * celltype_contrast
             if float(lambda_real_recon) != 0.0:
                 loss = loss + float(lambda_real_recon) * real_recon
             if float(lambda_batchless_recon) != 0.0:
                 loss = loss + float(lambda_batchless_recon) * batchless_recon
-            if float(lambda_tissueless_recon) != 0.0:
-                loss = loss + float(lambda_tissueless_recon) * tissueless_recon
 
             total_loss += loss.item() * bsz
-            total_recon += out_fake["recon_loss"].item() * bsz
-            total_kl += out_fake["kl_loss"].item() * bsz
-            total_score += out_fake["score_loss"].item() * bsz
+            total_recon += out_real["recon_loss"].item() * bsz
+            total_kl += out_real["kl_loss"].item() * bsz
+            total_score += out_real["score_loss"].item() * bsz
             total_contrast += contrast.item() * bsz
-            total_celltype_contrast += celltype_contrast.item() * bsz
-            total_cov += out_fake["cov_loss"].item() * bsz
-            total_prior_pi_balance += out_fake.get("prior_pi_balance_loss", torch.zeros_like(out_fake["cov_loss"])).item() * bsz
-            total_celltype_cls += out_fake.get("celltype_cls_loss", torch.zeros_like(out_fake["cov_loss"])).item() * bsz
-            total_real_recon += real_recon.item() * bsz
+            total_cov += out_real["cov_loss"].item() * bsz
+            total_prior_pi_balance += out_real.get("prior_pi_balance_loss", torch.zeros_like(out_real["cov_loss"])).item() * bsz
+            total_celltype_cls += out_real.get("celltype_cls_loss", torch.zeros_like(out_real["cov_loss"])).item() * bsz
             total_batchless_recon += batchless_recon.item() * bsz
-            total_tissueless_recon += tissueless_recon.item() * bsz
-            total_rank_recon += out_fake.get("rank_recon_loss", torch.zeros_like(out_fake["cov_loss"])).item() * bsz
-            total_rank_gene += out_fake.get("rank_gene_loss", torch.zeros_like(out_fake["cov_loss"])).item() * bsz
-            total_rank_cell += out_fake.get("rank_cell_loss", torch.zeros_like(out_fake["cov_loss"])).item() * bsz
 
             if (batch_idx + 1) % 1000 == 0 and is_rank0:
-                kl_gmm = out_fake.get("kl_gmm_loss", torch.zeros_like(out_fake["kl_loss"]))
-                kl_free = out_fake.get("kl_free_loss", torch.zeros_like(out_fake["kl_loss"]))
-                free_kl_frac = kl_free / torch.clamp(kl_gmm + kl_free, min=1e-8)
                 msg = (
                     f"[Val Batch {batch_idx + 1}] "
-                    f"Loss={loss.item():.4f}, Recon={out_fake['recon_loss'].item():.4f}, "
-                    f"KL={out_fake['kl_loss'].item():.4f}, "
-                    f"KLgmm={kl_gmm.item():.4f}, KLfree={kl_free.item():.4f}, "
-                    f"freeKLFrac={free_kl_frac.item():.3f}, "
-                    f"cls={out_fake.get('celltype_cls_loss', torch.zeros_like(out_fake['cov_loss'])).item():.4f}"
+                    f"Loss={loss.item():.4f}, Recon={out_real['recon_loss'].item():.4f}, "
+                    f"KL={out_real['kl_loss'].item():.4f}, "
+                    f"KLc={out_real.get('kl_c_loss', torch.zeros_like(out_real['kl_loss'])).item():.4f}, "
+                    f"KLu={out_real.get('kl_u_loss', torch.zeros_like(out_real['kl_loss'])).item():.4f}, "
+                    f"KLeps={out_real.get('kl_eps_loss', torch.zeros_like(out_real['kl_loss'])).item():.4f}, "
+                    f"cls={out_real.get('celltype_cls_loss', torch.zeros_like(out_real['cov_loss'])).item():.4f}"
                 )
                 if lambda_batchless_recon > 0:
                     msg += f", BatchlessRecon={batchless_recon.item():.4f}"
-                if lambda_tissueless_recon > 0:
-                    msg += f", TissuelessRecon={tissueless_recon.item():.4f}"
-                if lambda_contrast > 0:
-                    msg += f", Contrast={contrast.item():.4f}"
-                if lambda_celltype_contrast > 0:
-                    msg += f", CtContrast={celltype_contrast.item():.4f}"
-                if lambda_rank_recon > 0:
-                    msg += (
-                        f", RankRecon={out_fake.get('rank_recon_loss', torch.zeros_like(out_fake['cov_loss'])).item():.4f}, "
-                        f"RankGene={out_fake.get('rank_gene_loss', torch.zeros_like(out_fake['cov_loss'])).item():.4f}, "
-                        f"RankCell={out_fake.get('rank_cell_loss', torch.zeros_like(out_fake['cov_loss'])).item():.4f}"
-                    )
                 if getattr(model.module if hasattr(model, "module") else model, "prior_type", None) == "gmm":
-                    diag = gmm_collapse_diagnostics(prior=prior_ref, z=out_fake["z"], tissue_id=tissue_id)
+                    diag = gmm_collapse_diagnostics(prior=prior_ref, z=out_real["z"], tissue_id=tissue_id)
                     msg += (
                         f", K_eff={diag['k_eff']:.2f}, activeK={diag['active_comp']}, "
                         f"respTop1={diag['resp_top1']:.3f}, "
+                        f"groupKeff={diag['group_k_eff']:.2f}, groupActive={diag['group_active']}, "
+                        f"groupTop1={diag['group_resp_top1']:.3f}, subKeffMean={diag['sub_k_eff_mean']:.2f}, "
+                        f"subActiveMean={diag['sub_active_mean']:.2f}, subActiveMinMax={diag['sub_active_min']:.0f}/{diag['sub_active_max']:.0f}, "
                         f"minMuDist={diag['min_mu_dist']:.3f}, meanMuDist={diag['mean_mu_dist']:.3f}, "
+                        f"groupMuMinDist={diag['group_mu_min_dist']:.3f}, groupMuMeanDist={diag['group_mu_mean_dist']:.3f}, "
+                        f"subDeltaNorm={diag['sub_delta_norm_mean']:.3f}/{diag['sub_delta_norm_max']:.3f}, "
                         f"meanPriorMuNorm={diag['mean_prior_mu_norm']:.3f}, meanVar={diag['mean_prior_var']:.3f}, "
-                        f"maxVar={diag['max_prior_var']:.3f}, meanStd={diag['mean_prior_std']:.3f}"
+                        f"maxVar={diag['max_prior_var']:.3f}, meanStd={diag['mean_prior_std']:.3f}, "
+                        f"factorVar={diag['mean_factor_var']:.3f}, maxFactorVar={diag['max_factor_var']:.3f}, "
+                        f"factorNorm={diag['mean_factor_norm']:.3f}, totalVar={diag['mean_total_var']:.3f}, "
+                        f"maxTotalVar={diag['max_total_var']:.3f}, totalStd={diag['mean_total_std']:.3f}"
                     )
                 print(msg)
 
     if dist.is_available() and dist.is_initialized():
         stats = torch.tensor(
-            [total_loss, total_recon, total_kl, total_score, total_contrast, total_cov, total_prior_pi_balance, total_celltype_cls, total_real_recon, total_batchless_recon, total_tissueless_recon, total_rank_recon, total_rank_gene, total_rank_cell, total_celltype_contrast, float(n_cells)],
+            [total_loss, total_recon, total_kl, total_score, total_contrast, total_cov, total_prior_pi_balance, total_celltype_cls, total_batchless_recon, float(n_cells)],
             device=device,
             dtype=torch.float64,
         )
         dist.all_reduce(stats, op=dist.ReduceOp.SUM)
-        total_loss, total_recon, total_kl, total_score, total_contrast, total_cov, total_prior_pi_balance, total_celltype_cls, total_real_recon, total_batchless_recon, total_tissueless_recon, total_rank_recon, total_rank_gene, total_rank_cell, total_celltype_contrast, n_cells = stats.tolist()
+        total_loss, total_recon, total_kl, total_score, total_contrast, total_cov, total_prior_pi_balance, total_celltype_cls, total_batchless_recon, n_cells = stats.tolist()
         n_cells = max(float(n_cells), 1.0)
 
     return (
@@ -2849,13 +2259,7 @@ def evaluate_gmm_vae_one_epoch(
         total_cov / n_cells,
         total_prior_pi_balance / n_cells,
         total_celltype_cls / n_cells,
-        total_real_recon / n_cells,
         total_batchless_recon / n_cells,
-        total_tissueless_recon / n_cells,
-        total_rank_recon / n_cells,
-        total_rank_gene / n_cells,
-        total_rank_cell / n_cells,
-        total_celltype_contrast / n_cells,
     )
 
 
