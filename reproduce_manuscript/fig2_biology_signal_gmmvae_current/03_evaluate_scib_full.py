@@ -18,6 +18,9 @@ import numpy as np
 import pandas as pd
 import scanpy as sc
 import scib
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 from sklearn.cluster import KMeans
 from sklearn.neighbors import NearestNeighbors
 from sklearn.metrics import adjusted_rand_score, normalized_mutual_info_score
@@ -73,6 +76,8 @@ SCIB_SCORE_TABLE = [
     ("iLISI", "Batch correction"),
     ("KBET", "Batch correction"),
     ("Graph connectivity", "Batch correction"),
+    ("Bio conservation", "Aggregate score"),
+    ("Batch correction", "Aggregate score"),
 ]
 
 SCIB_METRIC_COLUMNS = [name for name, _ in SCIB_SCORE_TABLE]
@@ -293,6 +298,81 @@ def write_score_table(df: pd.DataFrame, out_csv: str):
     cols = ["Embedding"] + metric_cols + ["Metric Type"]
     score_df = score_df[[c for c in cols if c in score_df.columns]]
     score_df.to_csv(out_csv, index=False)
+    write_score_table_png(score_df, out_csv.replace(".csv", ".png"))
+
+
+def _score_col_group(col: str) -> str:
+    parts = str(col).split("/")
+    if len(parts) >= 3:
+        return "/".join(parts[:2])
+    return "single"
+
+
+def write_score_table_png(score_df: pd.DataFrame, out_png: str):
+    if score_df.empty:
+        return
+    value_cols = [c for c in score_df.columns if c not in {"Embedding", "Metric Type"}]
+    if not value_cols:
+        return
+    cell_text = []
+    bold_cells = set()
+    for ridx, row in score_df.iterrows():
+        row_vals = []
+        for col in score_df.columns:
+            val = row.get(col, "")
+            if col in value_cols:
+                try:
+                    fval = float(val)
+                    row_vals.append("" if not np.isfinite(fval) else f"{fval:.4f}")
+                except Exception:
+                    row_vals.append("")
+            else:
+                row_vals.append(str(val))
+        for group in sorted({_score_col_group(c) for c in value_cols}):
+            cols_g = [c for c in value_cols if _score_col_group(c) == group]
+            vals = pd.to_numeric(row[cols_g], errors="coerce")
+            vals = vals[np.isfinite(vals)]
+            if vals.empty:
+                continue
+            best = float(vals.max())
+            for col in cols_g:
+                try:
+                    if np.isfinite(float(row[col])) and np.isclose(float(row[col]), best, rtol=1e-8, atol=1e-12):
+                        bold_cells.add((ridx + 1, score_df.columns.get_loc(col)))
+                except Exception:
+                    pass
+        cell_text.append(row_vals)
+
+    n_rows = len(score_df)
+    n_cols = len(score_df.columns)
+    fig_w = max(10.0, 1.15 * n_cols)
+    fig_h = max(3.5, 0.42 * (n_rows + 1))
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h), dpi=220)
+    ax.axis("off")
+    table = ax.table(
+        cellText=cell_text,
+        colLabels=list(score_df.columns),
+        cellLoc="center",
+        colLoc="center",
+        loc="center",
+    )
+    table.auto_set_font_size(False)
+    table.set_fontsize(8)
+    table.scale(1.0, 1.25)
+    for (row, col), cell in table.get_celld().items():
+        cell.set_edgecolor("#d0d0d0")
+        cell.set_linewidth(0.5)
+        if row == 0:
+            cell.set_facecolor("#f0f0f0")
+            cell.get_text().set_weight("bold")
+        elif col in (0, n_cols - 1):
+            cell.set_facecolor("#f8f8f8")
+        if (row, col) in bold_cells:
+            cell.get_text().set_weight("bold")
+            cell.set_facecolor("#fff2b3")
+    fig.tight_layout()
+    fig.savefig(out_png, bbox_inches="tight")
+    plt.close(fig)
 
 
 def _flatten_metric_output(obj):

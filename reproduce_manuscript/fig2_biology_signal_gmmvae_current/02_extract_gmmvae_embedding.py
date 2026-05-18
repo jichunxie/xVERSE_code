@@ -470,6 +470,7 @@ def visualize_prior(
         sample_df.to_csv(output_dir / f"{stem}_embedding.csv", index=False)
 
         fig, ax = plt.subplots(figsize=(8, 7), dpi=180)
+        kde_payload = None
         try:
             import scipy.stats as st
 
@@ -481,6 +482,7 @@ def visualize_prior(
             gy = np.linspace(sample_emb[:, 1].min() - pad_y_s, sample_emb[:, 1].max() + pad_y_s, int(grid_size))
             gxx, gyy = np.meshgrid(gx, gy)
             kde_z = kde(np.vstack([gxx.ravel(), gyy.ravel()])).reshape(gxx.shape)
+            kde_payload = (gxx, gyy, kde_z)
             ax.contourf(gxx, gyy, kde_z, levels=18, cmap="viridis", alpha=0.65)
             ax.contour(gxx, gyy, kde_z, levels=10, colors="black", alpha=0.18, linewidths=0.5)
         except Exception as exc:
@@ -511,6 +513,55 @@ def visualize_prior(
         fig.tight_layout()
         fig.savefig(output_dir / f"{stem}_kde.png")
         plt.close(fig)
+
+        if kde_payload is not None:
+            gxx, gyy, kde_z = kde_payload
+            finite_z = kde_z[np.isfinite(kde_z)]
+            if finite_z.size > 0:
+                top_threshold = float(np.quantile(finite_z, 0.90))
+                kde_top = np.where(kde_z >= top_threshold, kde_z, np.nan)
+                fig, ax = plt.subplots(figsize=(8, 7), dpi=180)
+                ax.contourf(gxx, gyy, kde_top, levels=12, cmap="inferno", alpha=0.8)
+                ax.contour(gxx, gyy, kde_z, levels=[top_threshold], colors="black", linewidths=1.0)
+                high_sample = kde(sample_emb.T) >= top_threshold
+                ax.scatter(
+                    sample_emb[~high_sample, 0],
+                    sample_emb[~high_sample, 1],
+                    c="lightgrey",
+                    s=1,
+                    alpha=0.08,
+                    linewidth=0,
+                )
+                ax.scatter(
+                    sample_emb[high_sample, 0],
+                    sample_emb[high_sample, 1],
+                    c=prior_sample_comp[high_sample],
+                    cmap="tab20",
+                    s=3,
+                    alpha=0.45,
+                    linewidth=0,
+                )
+                top_rows = []
+                for idx in component_idx:
+                    mask = prior_sample_comp == idx
+                    if not np.any(mask):
+                        continue
+                    frac_top = float(np.mean(high_sample[mask]))
+                    top_rows.append({"component": int(idx), "frac_samples_in_top10_kde": frac_top})
+                    if frac_top <= 0:
+                        continue
+                    cx = float(np.median(sample_emb[mask & high_sample, 0]))
+                    cy = float(np.median(sample_emb[mask & high_sample, 1]))
+                    ax.scatter([cx], [cy], c="white", s=70, edgecolor="black", linewidth=0.6, zorder=4)
+                    ax.text(cx, cy, str(idx), fontsize=7, ha="center", va="center", zorder=5)
+                pd.DataFrame(top_rows).to_csv(output_dir / f"{stem}_kde_top10_component_fraction.csv", index=False)
+                ax.set_xlabel(f"{sample_method.upper()}1")
+                ax.set_ylabel(f"{sample_method.upper()}2")
+                ax.set_title(f"Top 10% KDE density region ({title_suffix}, {sample_method})")
+                ax.set_aspect("equal", adjustable="datalim")
+                fig.tight_layout()
+                fig.savefig(output_dir / f"{stem}_kde_top10.png")
+                plt.close(fig)
 
     if int(sample_n) > 0:
         _plot_prior_sample_kde(active_idx, "prior_sample_active", "active components", seed=0)

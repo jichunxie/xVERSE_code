@@ -66,7 +66,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --weight-decay 1e-5 \
   --prior-type gmm \
   --recon-loss nb \
-  --latent-dim 256 \
+  --latent-dim 128 \
   --num-components 64 \
   --prior-mu-init sphere \
   --prior-mu-init-radius 4 \
@@ -83,13 +83,13 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --expr-hidden-dim 512 \
   --mask-hidden-dim 512 \
   --dec-hidden-dim 512 \
-  --beta-kl 0.0005 \
+  --beta-kl 0.0001 \
   --recon-observed-only \
   --mask-aug-prob 1.0 \
   --mask-aug-policy simple \
   --mask-aug-min-frac 0.1 \
   --mask-aug-max-frac 0.5 \
-  --lambda-celltype-cls 0.5 \
+  --lambda-celltype-cls 1 \
   --lambda-contrast 0.5 \
   --contrast-embedding encoder_hidden \
   --lambda-celltype-contrast 0 \
