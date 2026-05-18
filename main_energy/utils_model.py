@@ -1140,22 +1140,53 @@ def offdiag_part(m: torch.Tensor) -> torch.Tensor:
     return m - torch.diag_embed(torch.diagonal(m, dim1=-2, dim2=-1))
 
 
+RECON_RATE_MIN = 1e-8
+RECON_RATE_MAX = 1e6
+RECON_THETA_MIN = 1e-6
+RECON_THETA_MAX = 1e6
+
+
+def _safe_count_tensor(x: torch.Tensor) -> torch.Tensor:
+    return torch.nan_to_num(x.float(), nan=0.0, posinf=RECON_RATE_MAX, neginf=0.0).clamp_min(0.0)
+
+
+def _safe_positive_tensor(x: torch.Tensor, lower: float, upper: float) -> torch.Tensor:
+    return torch.nan_to_num(x.float(), nan=lower, posinf=upper, neginf=lower).clamp(min=lower, max=upper)
+
+
+def _safe_mask_tensor(mask: torch.Tensor) -> torch.Tensor:
+    return torch.nan_to_num(mask.float(), nan=0.0, posinf=1.0, neginf=0.0).clamp(min=0.0, max=1.0)
+
+
+def _safe_weight_vector(weight: torch.Tensor, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+    w = weight.view(-1).to(device=device, dtype=dtype)
+    return torch.nan_to_num(w, nan=0.0, posinf=0.0, neginf=0.0).clamp_min(0.0)
+
+
+def _safe_nll_tensor(nll: torch.Tensor) -> torch.Tensor:
+    return torch.nan_to_num(nll, nan=RECON_RATE_MAX, posinf=RECON_RATE_MAX, neginf=0.0)
+
+
 def poisson_nll(
     x_count: torch.Tensor,
     rate: torch.Tensor,
     gene_weight: torch.Tensor = None,
     cell_weight: torch.Tensor = None,
 ) -> torch.Tensor:
-    x = x_count.float()
-    r = torch.clamp(rate, min=1e-8)
-    nll = r - x * torch.log(r)
-    if gene_weight is not None:
-        nll = nll * gene_weight.view(1, -1).to(device=nll.device, dtype=nll.dtype)
-    loss_cell = nll.mean(dim=1)
-    if cell_weight is not None:
-        loss_cell = loss_cell * cell_weight.view(-1).to(device=loss_cell.device, dtype=loss_cell.dtype)
-        return loss_cell.sum() / torch.clamp(cell_weight.sum().to(loss_cell.dtype), min=1e-8)
-    return loss_cell.mean()
+    device_type = x_count.device.type
+    with torch.amp.autocast(device_type=device_type, enabled=False):
+        x = _safe_count_tensor(x_count)
+        r = _safe_positive_tensor(rate, RECON_RATE_MIN, RECON_RATE_MAX)
+        nll = _safe_nll_tensor(r - x * torch.log(r))
+        if gene_weight is not None:
+            gw = _safe_weight_vector(gene_weight, nll.device, nll.dtype)
+            nll = nll * gw.view(1, -1)
+        loss_cell = nll.mean(dim=1)
+        if cell_weight is not None:
+            cw = _safe_weight_vector(cell_weight, loss_cell.device, loss_cell.dtype)
+            loss_cell = loss_cell * cw
+            return loss_cell.sum() / torch.clamp(cw.sum(), min=1e-8)
+        return loss_cell.mean()
 
 
 def poisson_nll_masked(
@@ -1165,19 +1196,23 @@ def poisson_nll_masked(
     gene_weight: torch.Tensor = None,
     cell_weight: torch.Tensor = None,
 ) -> torch.Tensor:
-    x = x_count.float()
-    r = torch.clamp(rate, min=1e-8)
-    m = mask.float()
-    nll = r - x * torch.log(r)
-    if gene_weight is not None:
-        nll = nll * gene_weight.view(1, -1).to(device=nll.device, dtype=nll.dtype)
-    nll = nll * m
-    denom_cell = torch.clamp(m.sum(dim=1), min=1.0)
-    loss_cell = nll.sum(dim=1) / denom_cell
-    if cell_weight is not None:
-        loss_cell = loss_cell * cell_weight.view(-1).to(device=loss_cell.device, dtype=loss_cell.dtype)
-        return loss_cell.sum() / torch.clamp(cell_weight.sum().to(loss_cell.dtype), min=1e-8)
-    return loss_cell.mean()
+    device_type = x_count.device.type
+    with torch.amp.autocast(device_type=device_type, enabled=False):
+        x = _safe_count_tensor(x_count)
+        r = _safe_positive_tensor(rate, RECON_RATE_MIN, RECON_RATE_MAX)
+        m = _safe_mask_tensor(mask)
+        nll = _safe_nll_tensor(r - x * torch.log(r))
+        if gene_weight is not None:
+            gw = _safe_weight_vector(gene_weight, nll.device, nll.dtype)
+            nll = nll * gw.view(1, -1)
+        nll = nll * m
+        denom_cell = torch.clamp(m.sum(dim=1), min=1.0)
+        loss_cell = nll.sum(dim=1) / denom_cell
+        if cell_weight is not None:
+            cw = _safe_weight_vector(cell_weight, loss_cell.device, loss_cell.dtype)
+            loss_cell = loss_cell * cw
+            return loss_cell.sum() / torch.clamp(cw.sum(), min=1e-8)
+        return loss_cell.mean()
 
 
 def nb_nll(
@@ -1191,25 +1226,29 @@ def nb_nll(
     Negative binomial NLL with mean mu and inverse-dispersion theta.
     log_theta is gene-wise parameter of shape (G,).
     """
-    x = x_count.float()
-    m = torch.clamp(mu, min=1e-8)
-    theta = torch.clamp(theta.float(), min=1e-8)
-    log_theta_mu = torch.log(theta + m)
-    log_prob = (
-        torch.lgamma(x + theta)
-        - torch.lgamma(theta)
-        - torch.lgamma(x + 1.0)
-        + theta * (torch.log(theta) - log_theta_mu)
-        + x * (torch.log(m) - log_theta_mu)
-    )
-    nll = -log_prob
-    if gene_weight is not None:
-        nll = nll * gene_weight.view(1, -1).to(device=nll.device, dtype=nll.dtype)
-    loss_cell = nll.mean(dim=1)
-    if cell_weight is not None:
-        loss_cell = loss_cell * cell_weight.view(-1).to(device=loss_cell.device, dtype=loss_cell.dtype)
-        return loss_cell.sum() / torch.clamp(cell_weight.sum().to(loss_cell.dtype), min=1e-8)
-    return loss_cell.mean()
+    device_type = x_count.device.type
+    with torch.amp.autocast(device_type=device_type, enabled=False):
+        x = _safe_count_tensor(x_count)
+        m = _safe_positive_tensor(mu, RECON_RATE_MIN, RECON_RATE_MAX)
+        theta = _safe_positive_tensor(theta, RECON_THETA_MIN, RECON_THETA_MAX)
+        log_theta_mu = torch.log(theta + m)
+        log_prob = (
+            torch.lgamma(x + theta)
+            - torch.lgamma(theta)
+            - torch.lgamma(x + 1.0)
+            + theta * (torch.log(theta) - log_theta_mu)
+            + x * (torch.log(m) - log_theta_mu)
+        )
+        nll = _safe_nll_tensor(-log_prob)
+        if gene_weight is not None:
+            gw = _safe_weight_vector(gene_weight, nll.device, nll.dtype)
+            nll = nll * gw.view(1, -1)
+        loss_cell = nll.mean(dim=1)
+        if cell_weight is not None:
+            cw = _safe_weight_vector(cell_weight, loss_cell.device, loss_cell.dtype)
+            loss_cell = loss_cell * cw
+            return loss_cell.sum() / torch.clamp(cw.sum(), min=1e-8)
+        return loss_cell.mean()
 
 
 def nb_nll_masked(
@@ -1220,28 +1259,32 @@ def nb_nll_masked(
     gene_weight: torch.Tensor = None,
     cell_weight: torch.Tensor = None,
 ) -> torch.Tensor:
-    x = x_count.float()
-    m = torch.clamp(mu, min=1e-8)
-    ms = mask.float()
-    theta = torch.clamp(theta.float(), min=1e-8)
-    log_theta_mu = torch.log(theta + m)
-    log_prob = (
-        torch.lgamma(x + theta)
-        - torch.lgamma(theta)
-        - torch.lgamma(x + 1.0)
-        + theta * (torch.log(theta) - log_theta_mu)
-        + x * (torch.log(m) - log_theta_mu)
-    )
-    nll = -log_prob
-    if gene_weight is not None:
-        nll = nll * gene_weight.view(1, -1).to(device=nll.device, dtype=nll.dtype)
-    nll = nll * ms
-    denom_cell = torch.clamp(ms.sum(dim=1), min=1.0)
-    loss_cell = nll.sum(dim=1) / denom_cell
-    if cell_weight is not None:
-        loss_cell = loss_cell * cell_weight.view(-1).to(device=loss_cell.device, dtype=loss_cell.dtype)
-        return loss_cell.sum() / torch.clamp(cell_weight.sum().to(loss_cell.dtype), min=1e-8)
-    return loss_cell.mean()
+    device_type = x_count.device.type
+    with torch.amp.autocast(device_type=device_type, enabled=False):
+        x = _safe_count_tensor(x_count)
+        m = _safe_positive_tensor(mu, RECON_RATE_MIN, RECON_RATE_MAX)
+        ms = _safe_mask_tensor(mask)
+        theta = _safe_positive_tensor(theta, RECON_THETA_MIN, RECON_THETA_MAX)
+        log_theta_mu = torch.log(theta + m)
+        log_prob = (
+            torch.lgamma(x + theta)
+            - torch.lgamma(theta)
+            - torch.lgamma(x + 1.0)
+            + theta * (torch.log(theta) - log_theta_mu)
+            + x * (torch.log(m) - log_theta_mu)
+        )
+        nll = _safe_nll_tensor(-log_prob)
+        if gene_weight is not None:
+            gw = _safe_weight_vector(gene_weight, nll.device, nll.dtype)
+            nll = nll * gw.view(1, -1)
+        nll = nll * ms
+        denom_cell = torch.clamp(ms.sum(dim=1), min=1.0)
+        loss_cell = nll.sum(dim=1) / denom_cell
+        if cell_weight is not None:
+            cw = _safe_weight_vector(cell_weight, loss_cell.device, loss_cell.dtype)
+            loss_cell = loss_cell * cw
+            return loss_cell.sum() / torch.clamp(cw.sum(), min=1e-8)
+        return loss_cell.mean()
 
 
 def pairwise_rank_recon_loss(
