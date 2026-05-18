@@ -110,6 +110,14 @@ def parse_args():
                         help="Low-rank size R for each GMM component covariance: diag + U U^T.")
     parser.add_argument("--prior-shared-cov", action="store_true",
                         help="Share GMM prior log-variance and low-rank covariance factor across components.")
+    parser.add_argument("--prior-mu-init", choices=["normal", "sphere", "grouped_sphere", "zero"], default="normal",
+                        help="Initial placement of prior component means.")
+    parser.add_argument("--prior-mu-init-radius", type=float, default=1.0,
+                        help="Radius used by sphere/grouped_sphere prior mean initialization.")
+    parser.add_argument("--prior-mu-init-groups", type=int, default=8,
+                        help="Number of coarse groups for grouped_sphere prior mean initialization.")
+    parser.add_argument("--prior-mu-init-local-radius", type=float, default=0.5,
+                        help="Local radius around each coarse group for grouped_sphere prior mean initialization.")
     parser.add_argument("--posterior-cov-rank", type=int, default=0,
                         help="Low-rank size R for posterior q(z|x,c) covariance: diag + U U^T. 0 keeps diagonal posterior.")
     parser.add_argument("--expr-hidden-dim", type=int, default=1024, help="Expression encoder hidden dim.")
@@ -772,6 +780,10 @@ def main():
         num_components=args.num_components,
         prior_cov_rank=args.prior_cov_rank,
         prior_shared_covariance=args.prior_shared_cov,
+        prior_mu_init=args.prior_mu_init,
+        prior_mu_init_radius=args.prior_mu_init_radius,
+        prior_mu_init_groups=args.prior_mu_init_groups,
+        prior_mu_init_local_radius=args.prior_mu_init_local_radius,
         posterior_cov_rank=args.posterior_cov_rank,
         expr_hidden_dim=args.expr_hidden_dim,
         mask_hidden_dim=args.mask_hidden_dim,

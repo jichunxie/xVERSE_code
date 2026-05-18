@@ -19,7 +19,7 @@ export PYTHONUNBUFFERED=1
 
 COMPILED_ROOT="/hpc/group/xielab/xj58/xVerseAtlas/compiled_train_v1_all"
 CELLTYPE_CSV="/hpc/group/xielab/xj58/sparest_code/standard_type/cellxgene_cell_type_mapped.csv"
-RESULT_DIR="/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_all_tissue0515_nb"
+RESULT_DIR="/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_all_tissue0518_nb"
 
 NPROC_PER_NODE=$(python - <<'PY'
 import torch
@@ -68,10 +68,12 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --recon-loss nb \
   --latent-dim 256 \
   --num-components 64 \
+  --prior-mu-init sphere \
+  --prior-mu-init-radius 4 \
   --prior-cov-rank 0 \
   --posterior-cov-rank 0 \
-  --batch-emb-dim 32 \
-  --use-batch-condition \
+  --batch-emb-dim 0 \
+  --no-use-batch-condition \
   --no-use-tissue-condition \
   --tissue-emb-dim 0 \
   --batch-cond-drop-prob 0.0 \
@@ -87,12 +89,12 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --mask-aug-policy simple \
   --mask-aug-min-frac 0.1 \
   --mask-aug-max-frac 0.5 \
-  --lambda-celltype-cls 1 \
-  --lambda-contrast 50 \
+  --lambda-celltype-cls 0.5 \
+  --lambda-contrast 0.5 \
   --contrast-embedding encoder_hidden \
   --lambda-celltype-contrast 0 \
   --celltype-contrast-temp 0.1 \
-  --lambda-real-recon 0.01 \
+  --lambda-real-recon 0.5 \
   --lambda-prior-pi-balance 0 \
   --lambda-prior-mu-spread 0 \
   --prior-mu-spread-tau 0.5 \
@@ -101,11 +103,11 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --lambda-post-c-balance 0 \
   --prior-refresh-every 0 \
   --recon-gene-weight-mode cv_ema \
-  --recon-gene-weight-alpha 0.5 \
+  --recon-gene-weight-alpha 0 \
   --recon-gene-weight-min 0.2 \
   --recon-gene-weight-max 3.0 \
   --recon-cell-weight-mode batch_kmeans \
-  --recon-cell-weight-alpha 0.5 \
+  --recon-cell-weight-alpha 0 \
   --recon-cell-weight-clusters 32 \
   --recon-cell-weight-kmeans-iters 5 \
   --lambda-rank-recon 0 \
