@@ -334,12 +334,33 @@ def _flatten_metric_output(obj):
 def _make_scib_pair(adata, embed_key: str):
     adata_pre = adata.copy()
     adata_int = adata.copy()
-    adata_int.obsm[embed_key] = np.asarray(adata.obsm[embed_key], dtype=np.float32)
+    emb = np.asarray(adata.obsm[embed_key], dtype=np.float32)
+    if not np.isfinite(emb).all():
+        raise ValueError(f"{embed_key} contains non-finite values after filtering.")
+    adata_int.obsm[embed_key] = emb
     return adata_pre, adata_int
 
 
 def _ensure_neighbors(adata_int, embed_key: str, neighbors_k: int):
     sc.pp.neighbors(adata_int, use_rep=embed_key, n_neighbors=neighbors_k)
+
+
+def _drop_nonfinite_embedding_rows(adata, embed_key: str, context: str):
+    emb = np.asarray(adata.obsm[embed_key], dtype=np.float32)
+    finite_rows = np.isfinite(emb).all(axis=1)
+    if finite_rows.all():
+        return adata
+    n_bad = int((~finite_rows).sum())
+    bad_values = int((~np.isfinite(emb)).sum())
+    print(
+        f"[WARN] {context}: dropping {n_bad}/{adata.n_obs} cells with non-finite "
+        f"{embed_key} values ({bad_values} bad values)."
+    )
+    if int(finite_rows.sum()) < 2:
+        raise ValueError(f"{context}: fewer than 2 cells remain after dropping non-finite {embed_key}.")
+    out = adata[finite_rows].copy()
+    out.obsm[embed_key] = emb[finite_rows]
+    return out
 
 
 def _ensure_cluster(adata_int, cluster_key: str = "scib_leiden"):
@@ -372,6 +393,7 @@ def eval_one_embedding(
     if embed_key not in adata.obsm:
         return None
 
+    adata = _drop_nonfinite_embedding_rows(adata, embed_key, context=f"eval {embed_key}")
     adata_pre, adata_int = _make_scib_pair(adata, embed_key)
     _ensure_neighbors(adata_int, embed_key=embed_key, neighbors_k=neighbors_k)
 

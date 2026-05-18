@@ -10,6 +10,7 @@ from pathlib import Path
 
 import scanpy as sc
 import matplotlib.pyplot as plt
+import numpy as np
 
 
 def parse_args():
@@ -57,6 +58,20 @@ def maybe_subsample(adata, max_cells: int, seed: int):
 def plot_one(adata, tissue_name: str, embedding_key: str, out_dir: str, gene_set: str, neighbors_k: int, min_dist: float, seed: int):
     if embedding_key not in adata.obsm:
         raise KeyError(f"{embedding_key} not found in adata.obsm")
+
+    emb = np.asarray(adata.obsm[embedding_key], dtype=np.float32)
+    finite_rows = np.isfinite(emb).all(axis=1)
+    if not finite_rows.all():
+        n_bad = int((~finite_rows).sum())
+        bad_values = int((~np.isfinite(emb)).sum())
+        print(
+            f"[WARN] {tissue_name}/{gene_set}: dropping {n_bad}/{adata.n_obs} cells with "
+            f"non-finite {embedding_key} values ({bad_values} bad values) before UMAP."
+        )
+        if int(finite_rows.sum()) < 2:
+            raise ValueError(f"Fewer than 2 cells remain after dropping non-finite {embedding_key}.")
+        adata = adata[finite_rows].copy()
+        adata.obsm[embedding_key] = emb[finite_rows]
 
     celltype_col = pick_celltype_col(adata.obs)
     if celltype_col is None:
@@ -115,4 +130,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

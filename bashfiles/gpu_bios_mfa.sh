@@ -19,7 +19,7 @@ export PYTHONUNBUFFERED=1
 
 COMPILED_ROOT="/hpc/group/xielab/xj58/xVerseAtlas/compiled_train_v1_all"
 CELLTYPE_CSV="/hpc/group/xielab/xj58/sparest_code/standard_type/cellxgene_cell_type_mapped.csv"
-RESULT_DIR="/hpc/group/xielab/xj58/pretrain_model_celltype/mfa_all_tissue0517_64x4_nobatch_nobalance_klweighted_2"
+RESULT_DIR="/hpc/group/xielab/xj58/pretrain_model_celltype/mfa_all_tissue0517_64x4_nobatch_nobalance_klweighted_3"
 
 NPROC_PER_NODE=$(python - <<'PY'
 import torch
@@ -81,8 +81,8 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --mask-hidden-dim 512 \
   --dec-hidden-dim 512 \
   --beta-kl 1e-4 \
-  --beta-u-kl-multiplier 10.0 \
-  --beta-eps-kl-multiplier 50.0 \
+  --beta-u-kl-multiplier 2.0 \
+  --beta-eps-kl-multiplier 5.0 \
   --beta-kl-warmup-epochs 10 \
   --beta-kl-warmup-start 1e-4 \
   --recon-observed-only \
@@ -96,9 +96,9 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --lambda-prior-pi-balance 0 \
   --lambda-prior-mu-spread 0 \
   --prior-mu-spread-tau 0.5 \
-  --lambda-prior-logvar-l2 0 \
-  --lambda-prior-factor-l2 0\
-  --prior-logvar-target -0.5 \
+  --lambda-prior-logvar-l2 1e-4 \
+  --lambda-prior-factor-l2 1e-4\
+  --prior-logvar-target 0 \
   --prior-init-epoch 0 \
   --prior-init-samples 500000 \
   --prior-init-kmeans-iters 20 \

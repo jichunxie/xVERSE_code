@@ -665,6 +665,22 @@ def _extract_model_embedding(model, x_count, x_mask, embedding_mode: str, tissue
     raise ValueError(f"Unsupported embedding_mode: {embedding_mode}")
 
 
+def _require_finite_embedding(emb: np.ndarray, context: str) -> np.ndarray:
+    emb = np.asarray(emb, dtype=np.float32)
+    finite = np.isfinite(emb)
+    if finite.all():
+        return emb
+    bad = ~finite
+    bad_rows = np.where(bad.any(axis=1))[0]
+    bad_cols = np.where(bad.any(axis=0))[0]
+    first = np.argwhere(bad)[0]
+    raise ValueError(
+        f"Non-finite embedding in {context}: shape={emb.shape}, "
+        f"bad_values={int(bad.sum())}, bad_rows={len(bad_rows)}, bad_cols={len(bad_cols)}, "
+        f"first_bad=(row={int(first[0])}, col={int(first[1])}, value={emb[tuple(first)]})"
+    )
+
+
 def extract_embedding_for_file(
     model,
     h5ad_path: Path,
@@ -707,9 +723,9 @@ def extract_embedding_for_file(
                     embedding_mode=embedding_mode,
                     tissue_id=tissue_ids,
                 )
-            z_list.append(emb.detach().cpu().numpy())
+            z_list.append(_require_finite_embedding(emb.detach().cpu().numpy(), f"{h5ad_path.name} batch"))
 
-    return np.concatenate(z_list, axis=0)
+    return _require_finite_embedding(np.concatenate(z_list, axis=0), str(h5ad_path))
 
 
 def _gene_ids_from_adata(adata, gene_id_col: str):
@@ -773,8 +789,8 @@ def extract_embedding_from_adata(
                     embedding_mode=embedding_mode,
                     tissue_id=tissue_ids,
                 )
-            z_list.append(emb.detach().cpu().numpy())
-    return np.concatenate(z_list, axis=0)
+            z_list.append(_require_finite_embedding(emb.detach().cpu().numpy(), f"manifest batch {st}:{ed}"))
+    return _require_finite_embedding(np.concatenate(z_list, axis=0), "manifest h5ad")
 
 
 def _resolve_manifest_tissue_id(row, tissue_map):
@@ -819,6 +835,7 @@ def process_dataset_manifest(args, model, gene_ids, device: torch.device, timing
             embedding_mode=args.embedding_mode,
         )
         cost = time.time() - start
+        emb = _require_finite_embedding(emb, f"{fp} before write")
         adata.obsm[args.embedding_key] = emb
         adata.write(fp)
         print(f"[OK] wrote {args.embedding_key} to {fp} shape={emb.shape} time={cost:.2f}s")
@@ -862,6 +879,7 @@ def process_tissue_dir(args, model, gene_ids, tissue_name: str, tissue_dir: Path
             embedding_mode=args.embedding_mode,
         )
         cost = time.time() - start
+        emb = _require_finite_embedding(emb, f"{fp.name} before write")
         adata.obsm[args.embedding_key] = emb
         adata.write(fp)
         print(f"[OK] wrote {args.embedding_key} to {fp.name} shape={emb.shape} time={cost:.2f}s")
