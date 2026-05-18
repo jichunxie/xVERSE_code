@@ -761,6 +761,9 @@ class MaskFiLMGMMVAE(nn.Module):
         z = out["z"]
         rate = out["rate"]
         nb_theta = out["nb_theta"]
+        x_count_safe = _safe_count_tensor(x_count)
+        valid_cell_mask = _valid_cell_mask(x_count_safe, z.device)
+        valid_cell_weight = valid_cell_mask.to(dtype=z.dtype)
 
         gene_weight = self._build_recon_gene_weight(
             x_count=x_count,
@@ -800,7 +803,7 @@ class MaskFiLMGMMVAE(nn.Module):
         if self.prior_type == "gaussian" or (self.prior_type == "gmm" and force_base_posterior):
             # Closed-form KL(q(z|x)||N(0,I)) for diagonal Gaussian posterior.
             kl_per_cell = 0.5 * torch.sum(torch.exp(logvar) + mu.pow(2) - 1.0 - logvar, dim=-1)
-            kl_loss = kl_per_cell.mean()
+            kl_loss = _valid_cell_mean(kl_per_cell.to(z.dtype), x_count_safe)
             kl_c = torch.zeros((), device=z.device, dtype=z.dtype)
             kl_u = torch.zeros((), device=z.device, dtype=z.dtype)
             kl_eps = kl_loss
@@ -824,7 +827,8 @@ class MaskFiLMGMMVAE(nn.Module):
                 log_p_c = F.log_softmax(self.prior.pi_logits_t[tid], dim=-1)  # (B, K)
             else:
                 log_p_c = F.log_softmax(self.prior.pi_logits, dim=0).unsqueeze(0)  # (1, K)
-            kl_c = (q_c * (log_q_c - log_p_c)).sum(dim=1).mean()
+            kl_c_per_cell = (q_c * (log_q_c - log_p_c)).sum(dim=1)
+            kl_c = _valid_cell_mean(kl_c_per_cell.to(z.dtype), x_count_safe)
 
             if u_mu is not None and u_logvar is not None and u_comp is not None:
                 kl_u_per_comp = 0.5 * torch.sum(
@@ -864,8 +868,10 @@ class MaskFiLMGMMVAE(nn.Module):
                 logvar=prior_eps_logvar_b.expand_as(eps_comp),
             )
 
-            kl_u = (q_c.float() * kl_u_per_comp).sum(dim=1).mean().to(z.dtype)
-            kl_eps = (q_c.float() * kl_eps_per_comp).sum(dim=1).mean().to(z.dtype)
+            kl_u_per_cell = (q_c.float() * kl_u_per_comp).sum(dim=1).to(z.dtype)
+            kl_eps_per_cell = (q_c.float() * kl_eps_per_comp).sum(dim=1).to(z.dtype)
+            kl_u = _valid_cell_mean(kl_u_per_cell, x_count_safe)
+            kl_eps = _valid_cell_mean(kl_eps_per_cell, x_count_safe)
             u_kl_mult = max(float(beta_u_kl_multiplier), 0.0)
             eps_kl_mult = max(float(beta_eps_kl_multiplier), 0.0)
             kl_z = u_kl_mult * kl_u + eps_kl_mult * kl_eps
@@ -930,7 +936,8 @@ class MaskFiLMGMMVAE(nn.Module):
         if self.prior_type == "gmm" and lambda_post_c_balance > 0 and (not force_base_posterior):
             q_c_cur = out.get("q_c", None)
             if q_c_cur is not None:
-                q_mean = q_c_cur.float().mean(dim=0)
+                q_weight = valid_cell_weight.to(device=q_c_cur.device, dtype=q_c_cur.dtype).view(-1, 1)
+                q_mean = (q_c_cur.float() * q_weight.float()).sum(dim=0) / torch.clamp(q_weight.float().sum(), min=1e-8)
                 target = torch.full_like(q_mean, 1.0 / float(q_mean.numel()))
                 post_c_balance_loss = F.kl_div(
                     torch.log(torch.clamp(q_mean, min=1e-12)),
@@ -946,7 +953,7 @@ class MaskFiLMGMMVAE(nn.Module):
                 prior_logvar_l2_loss = F.mse_loss(self.prior.prior_logvar.float(), tgt).to(z.dtype)
         if lambda_celltype_cls > 0 and celltype_id is not None and self.celltype_head is not None:
             ct = celltype_id.view(-1).to(z.device).long()
-            valid = ct >= 0
+            valid = (ct >= 0) & valid_cell_mask
             if valid.any():
                 logits = out["celltype_logits"][valid]
                 tgt = ct[valid]
@@ -1004,8 +1011,9 @@ class MaskFiLMGMMVAE(nn.Module):
             "prior_logvar_l2_loss": prior_logvar_l2_loss,
             "score_norm_pred": score_norm_pred,
             "score_norm_tgt": score_norm_tgt,
-            "log_q_mean": log_q.mean(),
-            "log_p_mean": log_p.mean(),
+            "log_q_mean": _valid_cell_mean(log_q.to(z.dtype), x_count_safe),
+            "log_p_mean": _valid_cell_mean(log_p.to(z.dtype), x_count_safe),
+            "valid_cell_mask": valid_cell_mask,
             "mu": mu,
             "logvar": logvar,
             "z": z,
@@ -1190,6 +1198,7 @@ RECON_RATE_MIN = 1e-8
 RECON_RATE_MAX = 1e6
 RECON_THETA_MIN = 1e-6
 RECON_THETA_MAX = 1e6
+RECON_LIBRARY_SIZE_MAX = 50000.0
 
 
 def _safe_count_tensor(x: torch.Tensor) -> torch.Tensor:
@@ -1213,6 +1222,37 @@ def _safe_nll_tensor(nll: torch.Tensor) -> torch.Tensor:
     return torch.nan_to_num(nll, nan=RECON_RATE_MAX, posinf=RECON_RATE_MAX, neginf=0.0)
 
 
+def _library_valid_weight(x_count: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
+    if mask is None:
+        library_size = x_count.sum(dim=1)
+    else:
+        library_size = (x_count * mask).sum(dim=1)
+    return (library_size <= RECON_LIBRARY_SIZE_MAX).to(device=x_count.device, dtype=x_count.dtype)
+
+
+def _reduce_cell_loss(
+    loss_cell: torch.Tensor,
+    x_count: torch.Tensor,
+    mask: torch.Tensor = None,
+    cell_weight: torch.Tensor = None,
+) -> torch.Tensor:
+    valid = _library_valid_weight(x_count, mask=mask).to(device=loss_cell.device, dtype=loss_cell.dtype)
+    if cell_weight is not None:
+        weight = _safe_weight_vector(cell_weight, loss_cell.device, loss_cell.dtype) * valid
+    else:
+        weight = valid
+    return (loss_cell * weight).sum() / torch.clamp(weight.sum(), min=1e-8)
+
+
+def _valid_cell_mean(values: torch.Tensor, x_count: torch.Tensor) -> torch.Tensor:
+    valid = _library_valid_weight(x_count).to(device=values.device, dtype=values.dtype)
+    return (values * valid).sum() / torch.clamp(valid.sum(), min=1e-8)
+
+
+def _valid_cell_mask(x_count: torch.Tensor, device: torch.device) -> torch.Tensor:
+    return _library_valid_weight(x_count).to(device=device, dtype=torch.bool)
+
+
 def poisson_nll(
     x_count: torch.Tensor,
     rate: torch.Tensor,
@@ -1228,11 +1268,7 @@ def poisson_nll(
             gw = _safe_weight_vector(gene_weight, nll.device, nll.dtype)
             nll = nll * gw.view(1, -1)
         loss_cell = nll.mean(dim=1)
-        if cell_weight is not None:
-            cw = _safe_weight_vector(cell_weight, loss_cell.device, loss_cell.dtype)
-            loss_cell = loss_cell * cw
-            return loss_cell.sum() / torch.clamp(cw.sum(), min=1e-8)
-        return loss_cell.mean()
+        return _reduce_cell_loss(loss_cell, x_count=x, cell_weight=cell_weight)
 
 
 def poisson_nll_masked(
@@ -1254,11 +1290,7 @@ def poisson_nll_masked(
         nll = nll * m
         denom_cell = torch.clamp(m.sum(dim=1), min=1.0)
         loss_cell = nll.sum(dim=1) / denom_cell
-        if cell_weight is not None:
-            cw = _safe_weight_vector(cell_weight, loss_cell.device, loss_cell.dtype)
-            loss_cell = loss_cell * cw
-            return loss_cell.sum() / torch.clamp(cw.sum(), min=1e-8)
-        return loss_cell.mean()
+        return _reduce_cell_loss(loss_cell, x_count=x, mask=m, cell_weight=cell_weight)
 
 
 def nb_nll(
@@ -1290,11 +1322,7 @@ def nb_nll(
             gw = _safe_weight_vector(gene_weight, nll.device, nll.dtype)
             nll = nll * gw.view(1, -1)
         loss_cell = nll.mean(dim=1)
-        if cell_weight is not None:
-            cw = _safe_weight_vector(cell_weight, loss_cell.device, loss_cell.dtype)
-            loss_cell = loss_cell * cw
-            return loss_cell.sum() / torch.clamp(cw.sum(), min=1e-8)
-        return loss_cell.mean()
+        return _reduce_cell_loss(loss_cell, x_count=x, cell_weight=cell_weight)
 
 
 def nb_nll_masked(
@@ -1326,11 +1354,7 @@ def nb_nll_masked(
         nll = nll * ms
         denom_cell = torch.clamp(ms.sum(dim=1), min=1.0)
         loss_cell = nll.sum(dim=1) / denom_cell
-        if cell_weight is not None:
-            cw = _safe_weight_vector(cell_weight, loss_cell.device, loss_cell.dtype)
-            loss_cell = loss_cell * cw
-            return loss_cell.sum() / torch.clamp(cw.sum(), min=1e-8)
-        return loss_cell.mean()
+        return _reduce_cell_loss(loss_cell, x_count=x, mask=ms, cell_weight=cell_weight)
 
 
 def bidirectional_contrastive_loss(z_real: torch.Tensor, z_fake: torch.Tensor, temperature: float = 0.1) -> torch.Tensor:
@@ -1874,9 +1898,12 @@ def train_gmm_vae_one_epoch(
                 )
                 batchless_recon = out_batchless["recon_loss"]
             if lambda_contrast > 0:
+                valid_pair = out_fake.get("valid_cell_mask", torch.ones((bsz,), device=x_count.device, dtype=torch.bool))
+                if need_real_view:
+                    valid_pair = valid_pair & out_real.get("valid_cell_mask", valid_pair)
                 contrast = bidirectional_contrastive_loss(
-                    z_real=deterministic_contrast_embedding(out_real),
-                    z_fake=deterministic_contrast_embedding(out_fake),
+                    z_real=deterministic_contrast_embedding(out_real)[valid_pair],
+                    z_fake=deterministic_contrast_embedding(out_fake)[valid_pair],
                     temperature=contrast_temp,
                 )
             else:
@@ -2231,9 +2258,12 @@ def evaluate_gmm_vae_one_epoch(
                 # stochastic forward pass that would make Recon and BatchlessRecon differ.
                 batchless_recon = out_real["recon_loss"]
             if lambda_contrast > 0:
+                valid_pair = out_fake.get("valid_cell_mask", torch.ones((bsz,), device=x_count.device, dtype=torch.bool))
+                if "out_real" in locals():
+                    valid_pair = valid_pair & out_real.get("valid_cell_mask", valid_pair)
                 contrast = bidirectional_contrastive_loss(
-                    z_real=deterministic_contrast_embedding(out_real),
-                    z_fake=deterministic_contrast_embedding(out_fake),
+                    z_real=deterministic_contrast_embedding(out_real)[valid_pair],
+                    z_fake=deterministic_contrast_embedding(out_fake)[valid_pair],
                     temperature=contrast_temp,
                 )
             else:
