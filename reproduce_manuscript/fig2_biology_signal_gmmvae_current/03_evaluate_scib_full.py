@@ -105,6 +105,12 @@ def format_metric_output_df(df: pd.DataFrame) -> pd.DataFrame:
     for col in METRIC_OUTPUT_COLUMNS:
         if col not in df.columns:
             df[col] = np.nan
+    bio_cols = ["Isolated labels", "KMeans NMI", "KMeans ARI", "Silhouette label", "cLISI"]
+    batch_cols = ["Silhouette batch", "iLISI", "KBET", "Graph connectivity"]
+    bio = df[bio_cols].apply(pd.to_numeric, errors="coerce").mean(axis=1, skipna=True)
+    batch = df[batch_cols].apply(pd.to_numeric, errors="coerce").mean(axis=1, skipna=True)
+    df["Bio conservation"] = pd.to_numeric(df["Bio conservation"], errors="coerce").fillna(bio)
+    df["Batch correction"] = pd.to_numeric(df["Batch correction"], errors="coerce").fillna(batch)
     return df[METRIC_OUTPUT_COLUMNS]
 
 
