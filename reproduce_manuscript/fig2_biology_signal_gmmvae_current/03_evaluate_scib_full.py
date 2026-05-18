@@ -73,7 +73,6 @@ SCIB_SCORE_TABLE = [
     ("iLISI", "Batch correction"),
     ("KBET", "Batch correction"),
     ("Graph connectivity", "Batch correction"),
-    ("PCR comparison", "Batch correction"),
     ("Batch correction", "Aggregate score"),
     ("Bio conservation", "Aggregate score"),
     ("Total", "Aggregate score"),
@@ -164,34 +163,6 @@ def add_kmeans_metrics(metrics, errors, adata_int, embed_key: str, label_key: st
         errors["KMeans_ARI"] = str(e)
 
 
-def add_pcr_metrics(metrics, errors, adata_pre, adata_int, embed_key: str, batch_key: str):
-    try:
-        after_embed = None if embed_key == "X_pca" else embed_key
-        pcr_before = scib.metrics.pcr(adata_pre, covariate=batch_key, recompute_pca=False)
-        pcr_after = scib.metrics.pcr(adata_int, covariate=batch_key, embed=after_embed, recompute_pca=False)
-        pcr_delta = pcr_after - pcr_before
-        pcr_score = (pcr_before - pcr_after) / pcr_before if pcr_before > 0 else np.nan
-        if np.isfinite(pcr_score) and pcr_score < 0:
-            pcr_score = 0.0
-        metrics["PCR_batch"] = float(pcr_score)
-        metrics["PCR_before"] = float(pcr_before)
-        metrics["PCR_after"] = float(pcr_after)
-        metrics["PCR_delta_after_minus_before"] = float(pcr_delta)
-        errors["PCR_batch"] = ""
-        errors["PCR_before"] = ""
-        errors["PCR_after"] = ""
-        errors["PCR_delta_after_minus_before"] = ""
-    except Exception as e:
-        metrics["PCR_batch"] = np.nan
-        metrics["PCR_before"] = np.nan
-        metrics["PCR_after"] = np.nan
-        metrics["PCR_delta_after_minus_before"] = np.nan
-        errors["PCR_batch"] = str(e)
-        errors["PCR_before"] = str(e)
-        errors["PCR_after"] = str(e)
-        errors["PCR_delta_after_minus_before"] = str(e)
-
-
 def _kbet_python_fallback(adata_int, embed_key: str, batch_key: str, label_key: str, alpha: float = 0.05):
     emb_all = np.asarray(adata_int.obsm[embed_key], dtype=np.float32)
     labels = adata_int.obs[label_key].astype(str).values
@@ -263,13 +234,12 @@ def add_scib_score_aliases(metrics):
         "iLISI": "iLISI",
         "KBET": "kBET",
         "Graph connectivity": "graph_conn",
-        "PCR comparison": "PCR_batch",
     }
     for display_name, source_name in alias_map.items():
         metrics[display_name] = metrics.get(source_name, np.nan)
 
     bio_vals = [metrics.get(k, np.nan) for k, t in SCIB_SCORE_TABLE[:5]]
-    batch_vals = [metrics.get(k, np.nan) for k, t in SCIB_SCORE_TABLE[5:10]]
+    batch_vals = [metrics.get(k, np.nan) for k, t in SCIB_SCORE_TABLE[5:9]]
     metrics["Bio conservation"] = float(np.nanmean(bio_vals)) if np.isfinite(bio_vals).any() else np.nan
     metrics["Batch correction"] = float(np.nanmean(batch_vals)) if np.isfinite(batch_vals).any() else np.nan
     if np.isfinite(metrics["Bio conservation"]) and np.isfinite(metrics["Batch correction"]):
@@ -412,7 +382,7 @@ def eval_one_embedding(
                 ari_=True,
                 nmi_=True,
                 silhouette_=True,
-                pcr_=True,
+                pcr_=False,
                 cell_cycle_=True,
                 organism=scib_organism,
                 hvg_score_=True,
@@ -490,7 +460,6 @@ def eval_one_embedding(
             n_cores=scib_n_cores,
         ),
     )
-    add_pcr_metrics(metrics, errors, adata_pre, adata_int, embed_key=embed_key, batch_key=batch_col)
     add_kbet_metrics(metrics, errors, adata_int, embed_key=embed_key, batch_key=batch_col, label_key=celltype_col)
     add_kmeans_metrics(metrics, errors, adata_int, embed_key=embed_key, label_key=celltype_col, seed=seed)
     add_metric("NMI", lambda: scib.metrics.nmi(adata_int, _ensure_cluster(adata_int), celltype_col))
