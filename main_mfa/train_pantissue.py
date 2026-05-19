@@ -152,6 +152,8 @@ def parse_args():
                         help="For gmm_vae, compute Poisson NLL only on observed genes.")
     parser.add_argument("--recon-loss", choices=["poisson", "nb"], default="poisson",
                         help="Reconstruction loss type for count model.")
+    parser.add_argument("--nb-theta-mode", choices=["gene", "cell_gene"], default="gene",
+                        help="NB dispersion parameterization. 'gene' uses one global theta per gene; 'cell_gene' decodes theta per cell per gene.")
     parser.add_argument("--recon-gene-weight-mode", choices=["none", "inv_log1p_mean_ema", "cv_ema"], default="none",
                         help="Optional gene-wise reconstruction reweighting mode.")
     parser.add_argument("--recon-gene-weight-alpha", type=float, default=0.0,
@@ -944,6 +946,7 @@ def main():
         batch_emb_dim=args.batch_emb_dim,
         batch_cond_drop_prob=args.batch_cond_drop_prob,
         recon_loss_type=args.recon_loss,
+        nb_theta_mode=args.nb_theta_mode,
     ).to(device)
 
     total_params, trainable_params = count_parameters(model)

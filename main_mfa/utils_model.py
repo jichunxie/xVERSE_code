@@ -424,11 +424,16 @@ class MaskFiLMGMMVAE(nn.Module):
         batch_emb_dim: int = 0,
         batch_cond_drop_prob: float = 0.0,
         recon_loss_type: str = "poisson",
+        nb_theta_mode: str = "gene",
     ):
         super().__init__()
         if prior_type not in ("gmm", "gaussian"):
             raise ValueError(f"Unsupported prior_type: {prior_type}")
         self.prior_type = prior_type
+        nb_theta_mode = str(nb_theta_mode).lower()
+        if nb_theta_mode not in ("gene", "cell_gene"):
+            raise ValueError(f"Unsupported nb_theta_mode: {nb_theta_mode}")
+        self.nb_theta_mode = nb_theta_mode
         self.encoder = FiLMMaskEncoder(
             num_genes=num_genes,
             latent_dim=latent_dim,
@@ -462,13 +467,18 @@ class MaskFiLMGMMVAE(nn.Module):
             dropout=dropout,
             cond_dim=self.batch_emb_dim if self.batch_embedding is not None else 0,
         )
-        self.nb_theta_decoder = PoissonDecoder(
-            latent_dim=latent_dim,
-            num_genes=num_genes,
-            hidden_dim=dec_hidden_dim,
-            dropout=dropout,
-            cond_dim=self.batch_emb_dim if self.batch_embedding is not None else 0,
-        )
+        if self.nb_theta_mode == "cell_gene":
+            self.nb_theta_decoder = PoissonDecoder(
+                latent_dim=latent_dim,
+                num_genes=num_genes,
+                hidden_dim=dec_hidden_dim,
+                dropout=dropout,
+                cond_dim=self.batch_emb_dim if self.batch_embedding is not None else 0,
+            )
+            self.nb_log_theta = None
+        else:
+            self.nb_theta_decoder = None
+            self.nb_log_theta = nn.Parameter(torch.zeros(num_genes))
         self.num_components = int(num_components)
         self.latent_dim = int(latent_dim)
         self.posterior_cov_rank = max(0, int(posterior_cov_rank))
@@ -629,12 +639,15 @@ class MaskFiLMGMMVAE(nn.Module):
             posinf=DECODER_LOGIT_CLAMP,
             neginf=-DECODER_LOGIT_CLAMP,
         ).clamp(min=-DECODER_LOGIT_CLAMP, max=DECODER_LOGIT_CLAMP)
-        nb_theta_logits = torch.nan_to_num(
-            self.nb_theta_decoder(z, cond=batch_cond),
-            nan=0.0,
-            posinf=DECODER_LOGIT_CLAMP,
-            neginf=-DECODER_LOGIT_CLAMP,
-        ).clamp(min=-DECODER_LOGIT_CLAMP, max=DECODER_LOGIT_CLAMP)
+        if self.nb_theta_mode == "cell_gene":
+            nb_theta_logits = torch.nan_to_num(
+                self.nb_theta_decoder(z, cond=batch_cond),
+                nan=0.0,
+                posinf=DECODER_LOGIT_CLAMP,
+                neginf=-DECODER_LOGIT_CLAMP,
+            ).clamp(min=-DECODER_LOGIT_CLAMP, max=DECODER_LOGIT_CLAMP)
+        else:
+            nb_theta_logits = self.nb_log_theta.view(1, -1).expand(z.size(0), -1)
         library_size = F.softplus(self.library_head(z)) + 1e-8
         library_size = torch.nan_to_num(
             library_size,
