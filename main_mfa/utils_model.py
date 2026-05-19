@@ -1014,7 +1014,10 @@ class MaskFiLMGMMVAE(nn.Module):
             "mu": mu,
             "logvar": logvar,
             "z": z,
+            "library_size": out["library_size"],
+            "gene_logits": out["gene_logits"],
             "rate": rate,
+            "nb_theta": nb_theta,
         }
 
     def _build_recon_gene_weight(
@@ -1234,7 +1237,7 @@ def offdiag_part(m: torch.Tensor) -> torch.Tensor:
     return m - torch.diag_embed(torch.diagonal(m, dim1=-2, dim2=-1))
 
 
-RECON_RATE_MIN = 1e-8
+RECON_RATE_MIN = 1e-4
 RECON_RATE_MAX = 1e6
 RECON_THETA_MIN = 1e-6
 RECON_THETA_MAX = 1e6
