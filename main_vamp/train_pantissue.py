@@ -146,6 +146,8 @@ def parse_args():
                         help="Ignored in main_vamp; posterior is a standard diagonal Gaussian q(z|x).")
     parser.add_argument("--vamp-pseudo-init-from-data", action="store_true",
                         help="Initialize VampPrior pseudo-cell inputs from real train cells before training.")
+    parser.add_argument("--vamp-pseudo-init-epoch", type=int, default=0,
+                        help="If >0, initialize pseudo-cells after this epoch using current encoder latent k-means.")
     parser.add_argument("--vamp-pseudo-init-samples", type=int, default=50000,
                         help="Max real cells collected before subsampling K pseudo-cell initial profiles.")
     parser.add_argument("--vamp-pseudo-use-real-mask", action="store_true",
@@ -497,25 +499,44 @@ def _inverse_softplus(y: torch.Tensor) -> torch.Tensor:
     return y + torch.log(-torch.expm1(-y))
 
 
-def _collect_pseudo_init_profiles(train_loader, device, max_samples: int):
+def _collect_pseudo_init_profiles(train_loader, device, max_samples: int, model=None, collect_z: bool = False):
     expr_chunks = []
     mask_chunks = []
+    z_chunks = []
     n_seen = 0
+    base_model = _unwrap_model(model) if model is not None else None
+    was_training = bool(base_model.training) if base_model is not None else False
+    if base_model is not None:
+        base_model.eval()
     with torch.no_grad():
         for sample_id, tissue_id, celltype_id, x_count, x_mask, x_mask_encoder in train_loader:
-            x = torch.log1p(x_count.float()).to(device, non_blocking=True)
+            x_count = x_count.to(device, non_blocking=True)
+            x = torch.log1p(x_count.float())
             m = x_mask.float().to(device, non_blocking=True)
             take = min(x.size(0), max(0, int(max_samples) - n_seen))
             if take > 0:
                 expr_chunks.append(x[:take].detach().cpu())
                 mask_chunks.append(m[:take].detach().cpu())
+                if collect_z and base_model is not None:
+                    out = base_model(
+                        x_count=x_count,
+                        x_mask=m,
+                        tissue_id=tissue_id.to(device, non_blocking=True),
+                        sample_id=None,
+                        use_batch_condition=False,
+                        force_base_posterior=True,
+                    )
+                    z_chunks.append(out.get("mu_base", out.get("mu"))[:take].detach().float().cpu())
                 n_seen += take
             if n_seen >= int(max_samples):
                 break
+    if base_model is not None and was_training:
+        base_model.train()
     if not expr_chunks:
         empty = torch.empty((0, 0), dtype=torch.float32)
-        return empty, empty
-    return torch.cat(expr_chunks, dim=0), torch.cat(mask_chunks, dim=0)
+        return empty, empty, empty
+    z = torch.cat(z_chunks, dim=0) if z_chunks else torch.empty((0, 0), dtype=torch.float32)
+    return torch.cat(expr_chunks, dim=0), torch.cat(mask_chunks, dim=0), z
 
 
 def _gather_pseudo_init_tensor(local_x: torch.Tensor, device, rank: int, world_size: int):
@@ -548,6 +569,7 @@ def init_vamp_pseudo_from_loader(
     world_size: int,
     log,
     use_real_mask: bool = False,
+    use_encoder_kmeans: bool = False,
 ):
     base_model = _unwrap_model(model)
     if getattr(base_model, "prior_type", None) != "vamp":
@@ -559,9 +581,16 @@ def init_vamp_pseudo_from_loader(
         return False
     k = int(prior.raw_pseudo_expr.size(0))
     g = int(prior.raw_pseudo_expr.size(1))
-    local_x, local_mask = _collect_pseudo_init_profiles(train_loader, device, max_samples=max(k, int(samples)))
+    local_x, local_mask, local_z = _collect_pseudo_init_profiles(
+        train_loader,
+        device,
+        max_samples=max(k, int(samples)),
+        model=model if bool(use_encoder_kmeans) else None,
+        collect_z=bool(use_encoder_kmeans),
+    )
     x = _gather_pseudo_init_tensor(local_x, device=device, rank=rank, world_size=world_size)
     mask_all = _gather_pseudo_init_tensor(local_mask, device=device, rank=rank, world_size=world_size)
+    z_all = _gather_pseudo_init_tensor(local_z, device=device, rank=rank, world_size=world_size) if bool(use_encoder_kmeans) else None
 
     if rank == 0:
         if x is None or x.size(0) <= 0:
@@ -580,7 +609,22 @@ def init_vamp_pseudo_from_loader(
             else:
                 gen = torch.Generator(device=device)
                 gen.manual_seed(int(seed))
-                if x.size(0) >= k:
+                if bool(use_encoder_kmeans) and z_all is not None and z_all.size(0) >= k:
+                    z_all = z_all.float().to(device)
+                    centers, assign = _kmeans_torch(z_all, k=k, iters=20, seed=int(seed))
+                    center_dist = torch.cdist(centers, z_all, p=2)
+                    # Prefer nearest member of each cluster; fall back to global nearest if a cluster is empty.
+                    idx_rows = []
+                    for kk in range(k):
+                        member = (assign == kk).nonzero(as_tuple=False).flatten()
+                        if member.numel() > 0:
+                            local_dist = torch.norm(z_all.index_select(0, member) - centers[kk].view(1, -1), dim=1)
+                            idx_rows.append(member[torch.argmin(local_dist)])
+                        else:
+                            idx_rows.append(torch.argmin(center_dist[kk]))
+                    idx = torch.stack(idx_rows).long()
+                    init_expr = x.index_select(0, idx)
+                elif x.size(0) >= k:
                     idx = torch.randperm(x.size(0), generator=gen, device=device)[:k]
                     init_expr = x.index_select(0, idx)
                 else:
@@ -595,7 +639,8 @@ def init_vamp_pseudo_from_loader(
                 log(
                     f"[VampPseudoInit] done: collected={x.size(0)}, K={k}, "
                     f"expr[min/mean/max]={init_expr.min().item():.4g}/{init_expr.mean().item():.4g}/{init_expr.max().item():.4g}, "
-                    f"mask_mean={pseudo_mask.mean().item():.4g}, use_real_mask={bool(use_real_mask)}"
+                    f"mask_mean={pseudo_mask.mean().item():.4g}, use_real_mask={bool(use_real_mask)}, "
+                    f"encoder_kmeans={bool(use_encoder_kmeans)}"
                 )
     else:
         ok = torch.tensor([0], device=device, dtype=torch.long)
@@ -1194,7 +1239,7 @@ def main():
     else:
         log("[TrainMode] full")
 
-    if bool(args.vamp_pseudo_init_from_data) and (not prior_initialized):
+    if bool(args.vamp_pseudo_init_from_data) and int(args.vamp_pseudo_init_epoch) <= 0 and (not prior_initialized):
         log("[VampPseudoInit] Triggered before training")
         if train_sampler is not None:
             train_sampler.set_epoch(0)
@@ -1208,6 +1253,7 @@ def main():
             world_size=world_size,
             log=log,
             use_real_mask=args.vamp_pseudo_use_real_mask,
+            use_encoder_kmeans=False,
         )
         prior_initialized = bool(prior_initialized or initialized)
 
@@ -1343,6 +1389,38 @@ def main():
         if prior_snapshot_start:
             train_msg += ", " + format_prior_delta(prior_parameter_delta(model, prior_snapshot_start))
         log(train_msg)
+
+        if (
+            bool(args.vamp_pseudo_init_from_data)
+            and int(args.vamp_pseudo_init_epoch) > 0
+            and (not prior_initialized)
+            and epoch_id >= int(args.vamp_pseudo_init_epoch)
+        ):
+            log(f"[VampPseudoInit] Triggered after epoch {epoch_id} using encoder latent k-means")
+            if train_sampler is not None:
+                train_sampler.set_epoch(epoch_id + 100000)
+            initialized = init_vamp_pseudo_from_loader(
+                model=model,
+                train_loader=train_loader,
+                device=device,
+                samples=args.vamp_pseudo_init_samples,
+                seed=args.seed + epoch_id,
+                rank=rank,
+                world_size=world_size,
+                log=log,
+                use_real_mask=args.vamp_pseudo_use_real_mask,
+                use_encoder_kmeans=True,
+            )
+            prior_initialized = bool(prior_initialized or initialized)
+            if initialized:
+                _clear_optimizer_state_for_params(
+                    optimizer,
+                    [
+                        getattr(_unwrap_model(model).prior, "raw_pseudo_expr", None),
+                        getattr(_unwrap_model(model).prior, "pi_logits", None),
+                    ],
+                )
+                log("[VampPseudoInit] optimizer state cleared for pseudo prior parameters.")
 
         if (
             int(args.prior_init_epoch) > 0
