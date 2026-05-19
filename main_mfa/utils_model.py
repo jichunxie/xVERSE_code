@@ -561,13 +561,25 @@ class MaskFiLMGMMVAE(nn.Module):
             prior_factor = self.prior._expanded_factor()
             if prior_factor is not None:
                 prior_factor = prior_factor.to(device=h.device, dtype=h.dtype)  # (K, D, R)
-            eps_mu = self.post_eps_mu(h).view(bsz, k, d)
-            eps_logvar = torch.clamp(self.post_eps_logvar(h).view(bsz, k, d), min=-8.0, max=8.0)
+            eps_mu = torch.nan_to_num(self.post_eps_mu(h).view(bsz, k, d), nan=0.0, posinf=POSTERIOR_MU_CLAMP, neginf=-POSTERIOR_MU_CLAMP)
+            eps_mu = eps_mu.clamp(min=-POSTERIOR_MU_CLAMP, max=POSTERIOR_MU_CLAMP)
+            eps_logvar = torch.nan_to_num(
+                self.post_eps_logvar(h).view(bsz, k, d),
+                nan=0.0,
+                posinf=POSTERIOR_LOGVAR_MAX,
+                neginf=POSTERIOR_LOGVAR_MIN,
+            ).clamp(min=POSTERIOR_LOGVAR_MIN, max=POSTERIOR_LOGVAR_MAX)
             eps_comp = eps_mu + torch.randn_like(eps_mu) * torch.exp(0.5 * eps_logvar)
             if self.mfa_factor_dim > 0 and self.post_u_mu is not None and prior_factor is not None:
                 r = self.mfa_factor_dim
-                u_mu = self.post_u_mu(h).view(bsz, k, r)
-                u_logvar = torch.clamp(self.post_u_logvar(h).view(bsz, k, r), min=-8.0, max=8.0)
+                u_mu = torch.nan_to_num(self.post_u_mu(h).view(bsz, k, r), nan=0.0, posinf=POSTERIOR_MU_CLAMP, neginf=-POSTERIOR_MU_CLAMP)
+                u_mu = u_mu.clamp(min=-POSTERIOR_MU_CLAMP, max=POSTERIOR_MU_CLAMP)
+                u_logvar = torch.nan_to_num(
+                    self.post_u_logvar(h).view(bsz, k, r),
+                    nan=0.0,
+                    posinf=POSTERIOR_LOGVAR_MAX,
+                    neginf=POSTERIOR_LOGVAR_MIN,
+                ).clamp(min=POSTERIOR_LOGVAR_MIN, max=POSTERIOR_LOGVAR_MAX)
                 u_comp = u_mu + torch.randn_like(u_mu) * torch.exp(0.5 * u_logvar)
                 factor_shift = torch.einsum("kdr,bkr->bkd", prior_factor, u_comp)
                 factor_mean_shift = torch.einsum("kdr,bkr->bkd", prior_factor, u_mu)
@@ -611,12 +623,31 @@ class MaskFiLMGMMVAE(nn.Module):
             u_logvar = None
             u_comp = None
         batch_cond = self._batch_condition(sample_id=sample_id, use_batch_condition=use_batch_condition)
-        gene_logits = self.decoder(z, cond=batch_cond)
-        nb_theta_logits = self.nb_theta_decoder(z, cond=batch_cond)
+        gene_logits = torch.nan_to_num(
+            self.decoder(z, cond=batch_cond),
+            nan=0.0,
+            posinf=DECODER_LOGIT_CLAMP,
+            neginf=-DECODER_LOGIT_CLAMP,
+        ).clamp(min=-DECODER_LOGIT_CLAMP, max=DECODER_LOGIT_CLAMP)
+        nb_theta_logits = torch.nan_to_num(
+            self.nb_theta_decoder(z, cond=batch_cond),
+            nan=0.0,
+            posinf=DECODER_LOGIT_CLAMP,
+            neginf=-DECODER_LOGIT_CLAMP,
+        ).clamp(min=-DECODER_LOGIT_CLAMP, max=DECODER_LOGIT_CLAMP)
         library_size = F.softplus(self.library_head(z)) + 1e-8
+        library_size = torch.nan_to_num(
+            library_size,
+            nan=RECON_RATE_MIN,
+            posinf=RECON_LIBRARY_SIZE_MAX,
+            neginf=RECON_RATE_MIN,
+        ).clamp(min=RECON_RATE_MIN, max=RECON_LIBRARY_SIZE_MAX)
         gene_probs = F.softmax(gene_logits, dim=-1)
-        rate = gene_probs * library_size
+        rate = torch.nan_to_num(gene_probs * library_size, nan=RECON_RATE_MIN, posinf=RECON_RATE_MAX, neginf=RECON_RATE_MIN)
+        rate = rate.clamp(min=RECON_RATE_MIN, max=RECON_RATE_MAX)
         nb_theta = F.softplus(nb_theta_logits) + 1e-8
+        nb_theta = torch.nan_to_num(nb_theta, nan=RECON_THETA_MIN, posinf=RECON_THETA_MAX, neginf=RECON_THETA_MIN)
+        nb_theta = nb_theta.clamp(min=RECON_THETA_MIN, max=RECON_THETA_MAX)
         out = {
             "mu": mu,
             "mu_base": mu_enc,
@@ -1088,7 +1119,8 @@ class MaskFiLMGMMVAE(nn.Module):
 
 POSTERIOR_MU_CLAMP = 30.0
 POSTERIOR_LOGVAR_MIN = -8.0
-POSTERIOR_LOGVAR_MAX = 6.0
+POSTERIOR_LOGVAR_MAX = 4.0
+DECODER_LOGIT_CLAMP = 30.0
 
 
 def sanitize_posterior_params(mu: torch.Tensor, logvar: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -1121,11 +1153,25 @@ def reparameterize(mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
 
 
 def gaussian_log_prob_diag(z: torch.Tensor, mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
-    inv_var = torch.exp(-logvar)
-    quad = ((z - mu) ** 2) * inv_var
-    log_det = logvar.sum(dim=-1)
-    d = z.size(-1)
-    return -0.5 * (quad.sum(dim=-1) + log_det + d * math.log(2.0 * math.pi))
+    device_type = z.device.type
+    with torch.amp.autocast(device_type=device_type, enabled=False):
+        zf = torch.nan_to_num(z.float(), nan=0.0, posinf=POSTERIOR_MU_CLAMP, neginf=-POSTERIOR_MU_CLAMP)
+        muf = torch.nan_to_num(mu.float(), nan=0.0, posinf=POSTERIOR_MU_CLAMP, neginf=-POSTERIOR_MU_CLAMP)
+        lv = torch.nan_to_num(
+            logvar.float(),
+            nan=0.0,
+            posinf=POSTERIOR_LOGVAR_MAX,
+            neginf=POSTERIOR_LOGVAR_MIN,
+        ).clamp(min=POSTERIOR_LOGVAR_MIN, max=POSTERIOR_LOGVAR_MAX)
+        zf = zf.clamp(min=-POSTERIOR_MU_CLAMP, max=POSTERIOR_MU_CLAMP)
+        muf = muf.clamp(min=-POSTERIOR_MU_CLAMP, max=POSTERIOR_MU_CLAMP)
+        inv_var = torch.exp(-lv)
+        delta = (zf - muf).clamp(min=-2.0 * POSTERIOR_MU_CLAMP, max=2.0 * POSTERIOR_MU_CLAMP)
+        quad = (delta ** 2) * inv_var
+        log_det = lv.sum(dim=-1)
+        d = z.size(-1)
+        out = -0.5 * (quad.sum(dim=-1) + log_det + d * math.log(2.0 * math.pi))
+        return torch.nan_to_num(out, nan=-RECON_RATE_MAX, posinf=RECON_RATE_MAX, neginf=-RECON_RATE_MAX).to(dtype=z.dtype)
 
 
 def gaussian_log_prob_lowrank(
@@ -1627,6 +1673,32 @@ def batch_count_diagnostics(
         }
 
 
+def model_activation_diagnostics(out: Dict[str, torch.Tensor]) -> str:
+    def _safe_stats(name: str, tensor: torch.Tensor, mode: str = "absmax") -> str:
+        if tensor is None or (not torch.is_tensor(tensor)) or tensor.numel() == 0:
+            return f"{name}=NA"
+        t = tensor.detach().float()
+        finite = torch.isfinite(t)
+        n_bad = int((~finite).sum().item())
+        tf = torch.nan_to_num(t, nan=0.0, posinf=0.0, neginf=0.0)
+        if mode == "minmax":
+            return f"{name}[min/max]={tf.min().item():.3g}/{tf.max().item():.3g}" + (f"/bad={n_bad}" if n_bad else "")
+        if mode == "meanmax":
+            return f"{name}[mean/max]={tf.mean().item():.3g}/{tf.max().item():.3g}" + (f"/bad={n_bad}" if n_bad else "")
+        return f"{name}AbsMax={tf.abs().max().item():.3g}" + (f"/bad={n_bad}" if n_bad else "")
+
+    parts = [
+        _safe_stats("mu", out.get("mu"), "absmax"),
+        _safe_stats("logvar", out.get("logvar"), "minmax"),
+        _safe_stats("z", out.get("z"), "absmax"),
+        _safe_stats("libPred", out.get("library_size"), "meanmax"),
+        _safe_stats("geneLogit", out.get("gene_logits"), "absmax"),
+        _safe_stats("rate", out.get("rate"), "minmax"),
+        _safe_stats("theta", out.get("nb_theta"), "minmax"),
+    ]
+    return ", ".join(parts)
+
+
 def prior_parameter_snapshot(model) -> Dict[str, torch.Tensor]:
     base = model.module if hasattr(model, "module") else model
     prior = getattr(base, "prior", None)
@@ -1691,6 +1763,20 @@ def format_prior_delta(delta: Dict[str, float]) -> str:
         if mean_key in delta:
             parts.append(f"{label}={delta[mean_key]:.3g}/{delta[max_key]:.3g}")
     return "priorDelta[" + ", ".join(parts) + "]" if parts else "priorDelta=NA"
+
+
+def sanitize_nonfinite_parameters_(model: nn.Module) -> int:
+    fixed = 0
+    with torch.no_grad():
+        for p in model.parameters():
+            if p is None or p.data.numel() == 0:
+                continue
+            finite = torch.isfinite(p.data)
+            if finite.all():
+                continue
+            fixed += int((~finite).sum().item())
+            p.data = torch.nan_to_num(p.data, nan=0.0, posinf=1.0, neginf=-1.0)
+    return fixed
 
 
 # =========================
@@ -2100,6 +2186,7 @@ def train_gmm_vae_one_epoch(
                 if z_cur.numel() > 0:
                     z_f = z_cur.detach().float()
                     diag_msg += f", zAbsMax={z_f.nan_to_num().abs().max().item():.3g}"
+                diag_msg += ", " + model_activation_diagnostics(out_fake)
                 cnt_diag = batch_count_diagnostics(
                     x_count=x_count,
                     sample_id=sample_id,
@@ -2145,13 +2232,17 @@ def train_gmm_vae_one_epoch(
                     f"[WARN] Non-finite grad norm at batch {batch_idx + 1}, skip step. "
                     f"gradNorm={float(grad_norm.detach().cpu()) if torch.is_tensor(grad_norm) else grad_norm}, "
                     f"Loss={loss.item():.4f}, Recon={recon.item():.4f}, KL={kl.item():.4f}, "
-                    f"Contrast={contrast.item():.4f}, cls={celltype_cls.item():.4f}"
+                    f"Contrast={contrast.item():.4f}, cls={celltype_cls.item():.4f}, "
+                    f"{model_activation_diagnostics(out_fake)}"
                 )
             optimizer.zero_grad(set_to_none=True)
             scaler.update()
             continue
         scaler.step(optimizer)
         scaler.update()
+        fixed_params = sanitize_nonfinite_parameters_(model)
+        if fixed_params > 0 and is_rank0:
+            print(f"[WARN] Sanitized {fixed_params} non-finite model parameters after optimizer step.")
 
         total_loss += loss.item() * bsz
         total_recon += recon.item() * bsz
@@ -2178,6 +2269,7 @@ def train_gmm_vae_one_epoch(
                 f"KLu={out_fake.get('kl_u_loss', torch.zeros_like(kl)).item():.4f}, "
                 f"KLeps={out_fake.get('kl_eps_loss', torch.zeros_like(kl)).item():.4f}, "
                 f"cls={celltype_cls.item():.4f}, "
+                f"{model_activation_diagnostics(out_fake)}, "
                 f"libMean/P99/Max={cnt_diag['lib_mean']:.1f}/{cnt_diag['lib_p99']:.1f}/{cnt_diag['lib_max']:.1f}, "
                 f"maxGene={cnt_diag['max_gene']:.1f}, nLibFiltered={cnt_diag['n_filtered']}, "
                 f"topLib={cnt_diag['top_lib']}, topGene={cnt_diag['top_gene']}"

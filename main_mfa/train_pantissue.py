@@ -111,6 +111,12 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=42, help="Random seed.")
     parser.add_argument("--last-ckpt-name", default="last_model.pth", help="Filename for last checkpoint.")
     parser.add_argument("--best-ckpt-name", default="best_model.pth", help="Filename for best checkpoint.")
+    parser.add_argument(
+        "--resume-from",
+        choices=["last", "best", "none"],
+        default="last",
+        help="Checkpoint to resume from inside result-dir. 'none' disables automatic result-dir resume.",
+    )
     parser.add_argument("--beta-kl", type=float, default=0.01, help="KL weight.")
     parser.add_argument("--beta-u-kl-multiplier", type=float, default=1.0,
                         help="Extra multiplier on the MFA factor u KL inside the KL term. 1.0 keeps standard KL.")
@@ -692,6 +698,11 @@ def main():
     _write_args_csv(args.result_dir, args, rank)
     ckpt_path = os.path.join(args.result_dir, args.last_ckpt_name)
     best_ckpt_path = os.path.join(args.result_dir, args.best_ckpt_name)
+    resume_ckpt_path = None
+    if args.resume_from == "last":
+        resume_ckpt_path = ckpt_path
+    elif args.resume_from == "best":
+        resume_ckpt_path = best_ckpt_path
 
     if args.compiled_dataset_root:
         ignored = ["--data-root"]
@@ -971,9 +982,9 @@ def main():
     prior_initialized = False
     prior_freeze_until_epoch = 0
 
-    if os.path.exists(ckpt_path):
+    if resume_ckpt_path is not None and os.path.exists(resume_ckpt_path):
         map_location = device
-        ckpt = torch.load(ckpt_path, map_location=map_location)
+        ckpt = torch.load(resume_ckpt_path, map_location=map_location)
         ckpt_state = ckpt["model_state_dict"]
         filtered_state, skipped = _filter_state_dict_by_shape(model, ckpt_state)
         load_ret = model.load_state_dict(filtered_state, strict=False)
@@ -1006,13 +1017,16 @@ def main():
         last_epoch = int(ckpt.get("epoch", 0))
         start_round = last_epoch + 1
         log(
-            f"[Resume] Loaded {ckpt_path} (epoch={last_epoch}, best_val_metric={best_val_metric:.6f}). "
+            f"[Resume] Loaded {resume_ckpt_path} via --resume-from {args.resume_from} "
+            f"(epoch={last_epoch}, best_val_metric={best_val_metric:.6f}). "
             f"Continue from epoch {start_round}."
         )
         if getattr(load_ret, "missing_keys", None):
             log(f"[Resume] Missing keys (expected with new heads): {load_ret.missing_keys}")
         if getattr(load_ret, "unexpected_keys", None):
             log(f"[Resume] Unexpected keys: {load_ret.unexpected_keys}")
+    elif resume_ckpt_path is not None and args.resume_from == "best":
+        raise FileNotFoundError(f"--resume-from best requested but checkpoint not found: {resume_ckpt_path}")
     elif args.init_ckpt:
         if not os.path.exists(args.init_ckpt):
             raise FileNotFoundError(f"--init-ckpt not found: {args.init_ckpt}")
