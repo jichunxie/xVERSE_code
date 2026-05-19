@@ -101,6 +101,8 @@ def parse_args():
                         help="Keep validation DataLoader workers alive across validation calls.")
     parser.add_argument("--samples-per-id", type=int, default=1000, help="Samples drawn per id in sampler.")
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate.")
+    parser.add_argument("--prior-lr-multiplier", type=float, default=1.0,
+                        help="Multiplier for model.prior parameter learning rate in full training mode.")
     parser.add_argument("--weight-decay", type=float, default=1e-5, help="Weight decay.")
     parser.add_argument("--scheduler-factor", type=float, default=0.5, help="LR scheduler factor.")
     parser.add_argument("--scheduler-patience", type=int, default=3, help="LR scheduler patience.")
@@ -425,6 +427,57 @@ def _clear_optimizer_state_for_params(optimizer, params):
     for p in params:
         if p is not None and p in optimizer.state:
             optimizer.state.pop(p, None)
+
+
+def _is_prior_param_name(name: str) -> bool:
+    parts = str(name).split(".")
+    while parts and parts[0] == "module":
+        parts = parts[1:]
+    return bool(parts) and parts[0] == "prior"
+
+
+def _build_full_optimizer(model, lr: float, weight_decay: float, prior_lr_multiplier: float):
+    prior_lr_multiplier = float(prior_lr_multiplier)
+    if abs(prior_lr_multiplier - 1.0) < 1e-12:
+        return torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+
+    main_params = []
+    prior_params = []
+    for name, p in model.named_parameters():
+        if not p.requires_grad:
+            continue
+        if _is_prior_param_name(name):
+            prior_params.append(p)
+        else:
+            main_params.append(p)
+
+    param_groups = []
+    if main_params:
+        param_groups.append({"params": main_params, "lr": lr, "weight_decay": weight_decay, "name": "main"})
+    if prior_params:
+        param_groups.append({
+            "params": prior_params,
+            "lr": lr * prior_lr_multiplier,
+            "weight_decay": weight_decay,
+            "name": "prior",
+        })
+    if not param_groups:
+        raise RuntimeError("No trainable parameters found for optimizer.")
+    return torch.optim.Adam(param_groups, lr=lr, weight_decay=weight_decay)
+
+
+def _restore_optimizer_group_lrs(optimizer, lr: float, prior_lr_multiplier: float):
+    for group in optimizer.param_groups:
+        name = group.get("name", "main")
+        group["lr"] = lr * float(prior_lr_multiplier) if name == "prior" else lr
+
+
+def _format_optimizer_lrs(optimizer) -> str:
+    parts = []
+    for i, group in enumerate(optimizer.param_groups):
+        name = group.get("name", f"group{i}")
+        parts.append(f"{name}={float(group['lr']):.6g}")
+    return ", ".join(parts)
 
 
 def _collect_prior_init_embeddings(model, train_loader, device, max_samples: int):
@@ -893,9 +946,15 @@ def main():
         model = torch.nn.DataParallel(model)
 
     # Keep optimizer on stable AMP-compatible path for this environment.
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    optimizer = _build_full_optimizer(
+        model,
+        lr=args.lr,
+        weight_decay=args.weight_decay,
+        prior_lr_multiplier=args.prior_lr_multiplier,
+    )
     if torch.cuda.is_available():
         log("[Optimizer] Using standard Adam (AMP-compatible).")
+    log(f"[Optimizer] lr groups: {_format_optimizer_lrs(optimizer)}")
     scheduler = ReduceLROnPlateau(
         optimizer,
         mode='min',
@@ -927,6 +986,7 @@ def main():
         if "optimizer_state_dict" in ckpt:
             try:
                 optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+                _restore_optimizer_group_lrs(optimizer, args.lr, args.prior_lr_multiplier)
             except ValueError as e:
                 log(
                     f"[Resume][WARN] Optimizer state is incompatible with current model/param groups ({e}). "
@@ -992,6 +1052,7 @@ def main():
         scaler = GradScaler(enabled=torch.cuda.is_available())
         total_params, trainable_count = count_parameters(base_model)
         log(f"[TrainMode] prior_only: trainable parameters reset to {trainable_count:,}/{total_params:,}; optimizer rebuilt.")
+        log(f"[Optimizer] lr groups: {_format_optimizer_lrs(optimizer)}")
     else:
         log("[TrainMode] full")
 
@@ -1227,8 +1288,7 @@ def main():
             val_metric = val_loss_full
 
             scheduler.step(val_metric)
-            current_lr = optimizer.param_groups[0]['lr']
-            log(f"[Epoch {epoch_id}] Current Learning Rate: {current_lr:.6f}")
+            log(f"[Epoch {epoch_id}] Current Learning Rate: {_format_optimizer_lrs(optimizer)}")
 
             if val_metric < best_val_metric and is_main_process(rank):
                 best_val_metric = val_metric
@@ -1245,8 +1305,7 @@ def main():
                 log(f"[Best Model] Updated at epoch {epoch_id} with metric={val_metric:.4f}")
         else:
             log(f"[Epoch {epoch_id}] Skip validation (val_every={args.val_every}).")
-            current_lr = optimizer.param_groups[0]['lr']
-            log(f"[Epoch {epoch_id}] Current Learning Rate: {current_lr:.6f}")
+            log(f"[Epoch {epoch_id}] Current Learning Rate: {_format_optimizer_lrs(optimizer)}")
 
         if is_main_process(rank):
             torch.save({
