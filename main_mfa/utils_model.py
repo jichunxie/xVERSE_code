@@ -6,7 +6,7 @@ import hashlib
 import json
 import bisect
 from collections import OrderedDict, defaultdict
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -549,6 +549,7 @@ class MaskFiLMGMMVAE(nn.Module):
         if x_expr is None:
             x_expr = torch.log1p(x_count.float())
         mu_enc, logvar_enc, h = self.encoder(x_expr=x_expr, x_mask=x_mask.float(), return_hidden=True)
+        mu_enc, logvar_enc = sanitize_posterior_params(mu_enc, logvar_enc)
         use_mixture_post = (self.prior_type == "gmm") and (not force_base_posterior)
         if use_mixture_post:
             bsz = h.size(0)
@@ -1085,10 +1086,38 @@ class MaskFiLMGMMVAE(nn.Module):
         return w.to(dtype=dtype, device=device)
 
 
+POSTERIOR_MU_CLAMP = 30.0
+POSTERIOR_LOGVAR_MIN = -8.0
+POSTERIOR_LOGVAR_MAX = 6.0
+
+
+def sanitize_posterior_params(mu: torch.Tensor, logvar: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    mu = torch.nan_to_num(
+        mu,
+        nan=0.0,
+        posinf=POSTERIOR_MU_CLAMP,
+        neginf=-POSTERIOR_MU_CLAMP,
+    ).clamp(min=-POSTERIOR_MU_CLAMP, max=POSTERIOR_MU_CLAMP)
+    logvar = torch.nan_to_num(
+        logvar,
+        nan=0.0,
+        posinf=POSTERIOR_LOGVAR_MAX,
+        neginf=POSTERIOR_LOGVAR_MIN,
+    ).clamp(min=POSTERIOR_LOGVAR_MIN, max=POSTERIOR_LOGVAR_MAX)
+    return mu, logvar
+
+
 def reparameterize(mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
+    mu, logvar = sanitize_posterior_params(mu, logvar)
     std = torch.exp(0.5 * logvar)
     eps = torch.randn_like(std)
-    return mu + eps * std
+    z = mu + eps * std
+    return torch.nan_to_num(
+        z,
+        nan=0.0,
+        posinf=POSTERIOR_MU_CLAMP,
+        neginf=-POSTERIOR_MU_CLAMP,
+    ).clamp(min=-POSTERIOR_MU_CLAMP, max=POSTERIOR_MU_CLAMP)
 
 
 def gaussian_log_prob_diag(z: torch.Tensor, mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
@@ -2109,7 +2138,18 @@ def train_gmm_vae_one_epoch(
 
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        if not torch.isfinite(grad_norm):
+            if is_rank0:
+                print(
+                    f"[WARN] Non-finite grad norm at batch {batch_idx + 1}, skip step. "
+                    f"gradNorm={float(grad_norm.detach().cpu()) if torch.is_tensor(grad_norm) else grad_norm}, "
+                    f"Loss={loss.item():.4f}, Recon={recon.item():.4f}, KL={kl.item():.4f}, "
+                    f"Contrast={contrast.item():.4f}, cls={celltype_cls.item():.4f}"
+                )
+            optimizer.zero_grad(set_to_none=True)
+            scaler.update()
+            continue
         scaler.step(optimizer)
         scaler.update()
 
