@@ -120,6 +120,10 @@ def parse_args():
                         help="Linearly warm KL weight from --beta-kl-warmup-start to --beta-kl over this many epochs. 0 disables.")
     parser.add_argument("--beta-kl-warmup-start", type=float, default=0.0,
                         help="Starting KL weight for linear KL warmup.")
+    parser.add_argument("--kl-robust-mode", choices=["none", "clip", "log1p"], default="none",
+                        help="Robust per-cell KL transform before batch averaging. Use log1p to downweight OOD KL tails.")
+    parser.add_argument("--kl-robust-cap", type=float, default=0.0,
+                        help="Cap/scale for robust per-cell KL. <=0 disables.")
     parser.add_argument("--prior-type", choices=["vamp", "gaussian"], default="vamp",
                         help="Latent prior type. 'vamp' uses learnable pseudo-cell VampPrior; 'gaussian' uses N(0,I).")
     parser.add_argument("--latent-dim", type=int, default=128, help="Latent dim.")
@@ -138,6 +142,10 @@ def parse_args():
                         help="Local radius around each coarse group for --prior-mu-init grouped_sphere.")
     parser.add_argument("--posterior-cov-rank", type=int, default=0,
                         help="Ignored in main_vamp; posterior is a standard diagonal Gaussian q(z|x).")
+    parser.add_argument("--vamp-pseudo-init-from-data", action="store_true",
+                        help="Initialize VampPrior pseudo-cell inputs from real train cells before training.")
+    parser.add_argument("--vamp-pseudo-init-samples", type=int, default=50000,
+                        help="Max real cells collected before subsampling K pseudo-cell initial profiles.")
     parser.add_argument("--expr-hidden-dim", type=int, default=1024, help="Expression encoder hidden dim.")
     parser.add_argument("--mask-hidden-dim", type=int, default=512, help="Mask encoder hidden dim.")
     parser.add_argument("--dec-hidden-dim", type=int, default=1024, help="Decoder hidden dim.")
@@ -478,6 +486,103 @@ def _format_optimizer_lrs(optimizer) -> str:
         name = group.get("name", f"group{i}")
         parts.append(f"{name}={float(group['lr']):.6g}")
     return ", ".join(parts)
+
+
+def _inverse_softplus(y: torch.Tensor) -> torch.Tensor:
+    y = torch.clamp(y, min=1e-4)
+    return y + torch.log(-torch.expm1(-y))
+
+
+def _collect_pseudo_init_profiles(train_loader, device, max_samples: int):
+    chunks = []
+    n_seen = 0
+    with torch.no_grad():
+        for sample_id, tissue_id, celltype_id, x_count, x_mask, x_mask_encoder in train_loader:
+            x = torch.log1p(x_count.float()).to(device, non_blocking=True)
+            take = min(x.size(0), max(0, int(max_samples) - n_seen))
+            if take > 0:
+                chunks.append(x[:take].detach().cpu())
+                n_seen += take
+            if n_seen >= int(max_samples):
+                break
+    if not chunks:
+        return torch.empty((0, 0), dtype=torch.float32)
+    return torch.cat(chunks, dim=0)
+
+
+def _gather_pseudo_init_profiles(local_x: torch.Tensor, device, rank: int, world_size: int):
+    if (not dist.is_available()) or (not dist.is_initialized()) or world_size <= 1:
+        return local_x.to(device) if rank == 0 else None
+    local_x = local_x.to(device)
+    local_n = torch.tensor([local_x.size(0)], device=device, dtype=torch.long)
+    sizes = [torch.zeros_like(local_n) for _ in range(world_size)]
+    dist.all_gather(sizes, local_n)
+    max_n = int(max(s.item() for s in sizes))
+    d = local_x.size(1) if local_x.dim() == 2 else 0
+    padded = torch.zeros((max_n, d), device=device, dtype=local_x.dtype)
+    if local_x.size(0) > 0:
+        padded[: local_x.size(0)] = local_x
+    gathered = [torch.zeros_like(padded) for _ in range(world_size)]
+    dist.all_gather(gathered, padded)
+    if rank != 0:
+        return None
+    parts = [g[: int(sizes[i].item())] for i, g in enumerate(gathered) if int(sizes[i].item()) > 0]
+    return torch.cat(parts, dim=0) if parts else torch.empty((0, d), device=device, dtype=local_x.dtype)
+
+
+def init_vamp_pseudo_from_loader(model, train_loader, device, samples: int, seed: int, rank: int, world_size: int, log):
+    base_model = _unwrap_model(model)
+    if getattr(base_model, "prior_type", None) != "vamp":
+        log("[VampPseudoInit][Skip] prior_type is not vamp.")
+        return False
+    prior = getattr(base_model, "prior", None)
+    if prior is None or not hasattr(prior, "raw_pseudo_expr"):
+        log("[VampPseudoInit][Skip] model has no raw_pseudo_expr.")
+        return False
+    k = int(prior.raw_pseudo_expr.size(0))
+    g = int(prior.raw_pseudo_expr.size(1))
+    local_x = _collect_pseudo_init_profiles(train_loader, device, max_samples=max(k, int(samples)))
+    x = _gather_pseudo_init_profiles(local_x, device=device, rank=rank, world_size=world_size)
+
+    if rank == 0:
+        if x is None or x.size(0) <= 0:
+            log("[VampPseudoInit][Skip] no real cell profiles collected.")
+            ok = torch.tensor([0], device=device, dtype=torch.long)
+            raw = torch.zeros((k, g), device=device)
+        else:
+            x = x.float().to(device)
+            if x.size(1) != g:
+                log(f"[VampPseudoInit][Skip] gene dim mismatch: collected={x.size(1)}, pseudo={g}")
+                ok = torch.tensor([0], device=device, dtype=torch.long)
+                raw = torch.zeros((k, g), device=device)
+            else:
+                gen = torch.Generator(device=device)
+                gen.manual_seed(int(seed))
+                if x.size(0) >= k:
+                    idx = torch.randperm(x.size(0), generator=gen, device=device)[:k]
+                    init_expr = x.index_select(0, idx)
+                else:
+                    idx = torch.randint(0, x.size(0), (k,), generator=gen, device=device)
+                    init_expr = x.index_select(0, idx)
+                raw = _inverse_softplus(init_expr)
+                ok = torch.tensor([1], device=device, dtype=torch.long)
+                log(
+                    f"[VampPseudoInit] done: collected={x.size(0)}, K={k}, "
+                    f"expr[min/mean/max]={init_expr.min().item():.4g}/{init_expr.mean().item():.4g}/{init_expr.max().item():.4g}"
+                )
+    else:
+        ok = torch.tensor([0], device=device, dtype=torch.long)
+        raw = torch.zeros((k, g), device=device)
+
+    if dist.is_available() and dist.is_initialized() and world_size > 1:
+        dist.broadcast(ok, src=0)
+        dist.broadcast(raw, src=0)
+    if int(ok.item()) != 1:
+        return False
+    with torch.no_grad():
+        prior.raw_pseudo_expr.copy_(raw.to(device=prior.raw_pseudo_expr.device, dtype=prior.raw_pseudo_expr.dtype))
+    log("[VampPseudoInit] broadcast done.")
+    return True
 
 
 def _collect_prior_init_embeddings(model, train_loader, device, max_samples: int):
@@ -1059,6 +1164,22 @@ def main():
     else:
         log("[TrainMode] full")
 
+    if bool(args.vamp_pseudo_init_from_data) and (not prior_initialized):
+        log("[VampPseudoInit] Triggered before training")
+        if train_sampler is not None:
+            train_sampler.set_epoch(0)
+        initialized = init_vamp_pseudo_from_loader(
+            model=model,
+            train_loader=train_loader,
+            device=device,
+            samples=args.vamp_pseudo_init_samples,
+            seed=args.seed,
+            rank=rank,
+            world_size=world_size,
+            log=log,
+        )
+        prior_initialized = bool(prior_initialized or initialized)
+
     if bool(args.prior_init_before_train) and (not prior_initialized):
         log("[PriorInit] Triggered before training")
         if train_sampler is not None:
@@ -1173,6 +1294,8 @@ def main():
             lambda_batchless_recon=args.lambda_batchless_recon,
             force_base_posterior=force_base_posterior,
             prior_snapshot_start=prior_snapshot_start,
+            kl_robust_mode=args.kl_robust_mode,
+            kl_robust_cap=args.kl_robust_cap,
         )
         train_msg = (
             f"[Epoch {epoch_id}] "
@@ -1277,6 +1400,8 @@ def main():
                 mask_aug_min_frac=args.mask_aug_min_frac,
                 mask_aug_max_frac=args.mask_aug_max_frac,
                 force_base_posterior=force_base_posterior,
+                kl_robust_mode=args.kl_robust_mode,
+                kl_robust_cap=args.kl_robust_cap,
             )
             val_msg = (
                 f"[Epoch {epoch_id}] Validation Loss: "

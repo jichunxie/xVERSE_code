@@ -693,6 +693,8 @@ class MaskFiLMGMMVAE(nn.Module):
         lambda_celltype_cls: float = 0.0,
         lambda_prior_logvar_l2: float = 0.0,
         prior_logvar_target: float = -2.0,
+        kl_robust_mode: str = "none",
+        kl_robust_cap: float = 0.0,
         recon_gene_weight_mode: str = "none",
         recon_gene_weight_alpha: float = 0.0,
         recon_gene_weight_ema_momentum: float = 0.99,
@@ -1453,7 +1455,12 @@ def vamp_collapse_diagnostics(
         pi_entropy = float((-(pi * torch.log(pi + 1e-12))).sum().item())
         k_eff = float(torch.exp(torch.tensor(pi_entropy, device=pi.device)).item())
 
-        p_mu, p_logvar = prior.component_params(base_model.encoder, dtype=z.dtype)
+        p_mu, p_logvar = prior.component_params(
+            base_model.encoder,
+            dtype=z.dtype,
+            logvar_min=getattr(base_model, "prior_logvar_min", -6.0),
+            logvar_max=getattr(base_model, "prior_logvar_max", 2.0),
+        )
         log_w = torch.log(pi.to(device=z.device, dtype=z.dtype) + 1e-12).unsqueeze(0)
         log_comp = gaussian_log_prob_diag(
             z=z.detach().unsqueeze(1),
@@ -1817,6 +1824,8 @@ def train_gmm_vae_one_epoch(
     lambda_batchless_recon=0.0,
     force_base_posterior=False,
     prior_snapshot_start: Dict[str, torch.Tensor] = None,
+    kl_robust_mode: str = "none",
+    kl_robust_cap: float = 0.0,
 ):
     model.train()
     loss_fn = model.module.loss if hasattr(model, "module") else model.loss
@@ -1862,6 +1871,8 @@ def train_gmm_vae_one_epoch(
                 resp_topk=resp_topk,
                 prior_logvar_min=prior_logvar_min,
                 prior_logvar_max=prior_logvar_max,
+                kl_robust_mode=kl_robust_mode,
+                kl_robust_cap=kl_robust_cap,
                 lambda_prior_mu_l2=lambda_prior_mu_l2,
                 lambda_prior_factor_l2=lambda_prior_factor_l2,
                 lambda_prior_pi_balance=lambda_prior_pi_balance,
@@ -1912,6 +1923,8 @@ def train_gmm_vae_one_epoch(
                     resp_topk=0,
                     prior_logvar_min=prior_logvar_min,
                     prior_logvar_max=prior_logvar_max,
+                    kl_robust_mode=kl_robust_mode,
+                    kl_robust_cap=kl_robust_cap,
                     lambda_prior_mu_l2=0.0,
                     lambda_prior_factor_l2=0.0,
                     lambda_prior_pi_balance=0.0,
@@ -1963,6 +1976,8 @@ def train_gmm_vae_one_epoch(
                     resp_topk=0,
                     prior_logvar_min=prior_logvar_min,
                     prior_logvar_max=prior_logvar_max,
+                    kl_robust_mode=kl_robust_mode,
+                    kl_robust_cap=kl_robust_cap,
                     lambda_prior_mu_l2=0.0,
                     lambda_prior_factor_l2=0.0,
                     lambda_prior_pi_balance=0.0,
@@ -2247,6 +2262,8 @@ def evaluate_gmm_vae_one_epoch(
     recon_cell_weight_kmeans_iters=2,
     lambda_batchless_recon=0.0,
     force_base_posterior=False,
+    kl_robust_mode: str = "none",
+    kl_robust_cap: float = 0.0,
 ):
     model.eval()
     loss_fn = model.module.loss if hasattr(model, "module") else model.loss
@@ -2293,6 +2310,8 @@ def evaluate_gmm_vae_one_epoch(
                 resp_topk=resp_topk,
                 prior_logvar_min=prior_logvar_min,
                 prior_logvar_max=prior_logvar_max,
+                kl_robust_mode=kl_robust_mode,
+                kl_robust_cap=kl_robust_cap,
                 lambda_prior_mu_l2=lambda_prior_mu_l2,
                 lambda_prior_factor_l2=lambda_prior_factor_l2,
                 lambda_prior_pi_balance=lambda_prior_pi_balance,
@@ -2349,6 +2368,8 @@ def evaluate_gmm_vae_one_epoch(
                     resp_topk=0,
                     prior_logvar_min=prior_logvar_min,
                     prior_logvar_max=prior_logvar_max,
+                    kl_robust_mode=kl_robust_mode,
+                    kl_robust_cap=kl_robust_cap,
                     lambda_prior_mu_l2=0.0,
                     lambda_prior_factor_l2=0.0,
                     lambda_prior_pi_balance=0.0,

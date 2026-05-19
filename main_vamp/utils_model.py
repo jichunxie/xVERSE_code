@@ -32,11 +32,17 @@ class PseudoCellVampPrior(nn.Module):
     def pseudo_expr(self) -> torch.Tensor:
         return F.softplus(self.raw_pseudo_expr)
 
-    def component_params(self, encoder: nn.Module, dtype: torch.dtype = None):
+    def component_params(
+        self,
+        encoder: nn.Module,
+        dtype: torch.dtype = None,
+        logvar_min: float = -6.0,
+        logvar_max: float = 2.0,
+    ):
         pseudo = self.pseudo_expr()
         mask = torch.ones_like(pseudo)
         mu, logvar = encoder(pseudo, mask)
-        logvar = torch.clamp(logvar, min=-8.0, max=8.0)
+        logvar = torch.clamp(logvar, min=float(logvar_min), max=float(logvar_max))
         if dtype is not None:
             mu = mu.to(dtype=dtype)
             logvar = logvar.to(dtype=dtype)
@@ -101,6 +107,8 @@ class MaskFiLMGMMVAE(nn.Module):
         self.recon_loss_type = str(recon_loss_type).lower()
         if self.recon_loss_type not in ("poisson", "nb"):
             raise ValueError(f"Unsupported recon_loss_type: {self.recon_loss_type}")
+        self.prior_logvar_min = -6.0
+        self.prior_logvar_max = 2.0
         self.register_buffer("recon_gene_mean_ema", torch.zeros(num_genes), persistent=True)
         self.register_buffer("recon_gene_sq_mean_ema", torch.zeros(num_genes), persistent=True)
         lib_hidden = max(32, int(latent_dim) // 2)
@@ -213,7 +221,12 @@ class MaskFiLMGMMVAE(nn.Module):
         if self.celltype_head is not None:
             out["celltype_logits"] = self.celltype_head(z)
         if self.prior_type == "vamp":
-            p_mu, p_logvar = self.prior.component_params(self.encoder, dtype=mu.dtype)
+            p_mu, p_logvar = self.prior.component_params(
+                self.encoder,
+                dtype=mu.dtype,
+                logvar_min=self.prior_logvar_min,
+                logvar_max=self.prior_logvar_max,
+            )
             log_r = F.log_softmax(self.prior.pi_logits.float(), dim=0).to(dtype=mu.dtype) + base.gaussian_log_prob_diag(
                 z=z.unsqueeze(1),
                 mu=p_mu.unsqueeze(0),
@@ -240,7 +253,11 @@ class MaskFiLMGMMVAE(nn.Module):
         """
         if self.prior_type != "vamp":
             raise RuntimeError("prototype_nb_params is only defined for --prior-type vamp.")
-        p_mu, p_logvar = self.prior.component_params(self.encoder)
+        p_mu, p_logvar = self.prior.component_params(
+            self.encoder,
+            logvar_min=self.prior_logvar_min,
+            logvar_max=self.prior_logvar_max,
+        )
         pseudo_expr = self.prior.pseudo_expr()
         pi = torch.softmax(self.prior.pi_logits.float(), dim=0).to(device=p_mu.device, dtype=p_mu.dtype)
         if component_ids is None:
@@ -331,10 +348,11 @@ class MaskFiLMGMMVAE(nn.Module):
              use_batch_condition=True, recon_mask=None, lambda_score=0.0, score_noise_std=0.1,
              score_detach_z=True, lambda_cov=0.0, cov_use_mu=True, lambda_resp_balance=0.0,
              lambda_resp_confidence=0.0, lambda_resp_anchor=0.0, resp_temperature=1.0, resp_topk=0,
-             prior_logvar_min=-6.0, prior_logvar_max=4.0, lambda_prior_mu_l2=0.0,
+            prior_logvar_min=-6.0, prior_logvar_max=4.0, lambda_prior_mu_l2=0.0,
              lambda_prior_factor_l2=0.0, lambda_prior_pi_balance=0.0, lambda_prior_mu_spread=0.0,
              prior_mu_spread_tau=1.0, lambda_post_c_balance=0.0, lambda_celltype_cls=0.0,
              lambda_prior_logvar_l2=0.0, prior_logvar_target=-2.0, recon_gene_weight_mode="none",
+             kl_robust_mode="none", kl_robust_cap=0.0,
              recon_gene_weight_alpha=0.0, recon_gene_weight_ema_momentum=0.99, recon_gene_weight_min=0.3,
              recon_gene_weight_max=3.0, recon_gene_weight_eps=1e-6, recon_cell_weight_mode="none",
              recon_cell_weight_alpha=0.0, recon_cell_weight_min=0.5, recon_cell_weight_max=2.0,
@@ -373,12 +391,35 @@ class MaskFiLMGMMVAE(nn.Module):
             zero = torch.zeros_like(z)
             log_p = base.gaussian_log_prob_diag(z=z, mu=zero, logvar=zero)
         else:
-            p_mu, p_logvar = self.prior.component_params(self.encoder, dtype=z.dtype)
+            self.prior_logvar_min = float(prior_logvar_min)
+            self.prior_logvar_max = float(prior_logvar_max)
+            p_mu, p_logvar = self.prior.component_params(
+                self.encoder,
+                dtype=z.dtype,
+                logvar_min=self.prior_logvar_min,
+                logvar_max=self.prior_logvar_max,
+            )
             comp_logp = base.gaussian_log_prob_diag(z=z.unsqueeze(1), mu=p_mu.unsqueeze(0), logvar=p_logvar.unsqueeze(0))
             log_pi = F.log_softmax(self.prior.pi_logits.float(), dim=0).to(dtype=z.dtype)
             log_p = torch.logsumexp(comp_logp + log_pi.view(1, -1), dim=1)
-        kl_per_cell = (log_q - log_p).to(z.dtype)
+        kl_per_cell_raw = (log_q - log_p).to(z.dtype)
+        kl_per_cell = kl_per_cell_raw
+        mode = str(kl_robust_mode).lower()
+        cap = float(kl_robust_cap)
+        if mode != "none" and cap > 0:
+            # Negative Monte-Carlo KL estimates can happen for individual samples.
+            # Robust mode uses only the positive KL tail so KL cannot become a
+            # reward term, while OOD cells still cannot dominate linearly.
+            pos = torch.clamp(kl_per_cell_raw, min=0.0)
+            if mode == "clip":
+                pos = torch.clamp(pos, max=cap)
+            elif mode == "log1p":
+                pos = cap * torch.log1p(pos / cap)
+            else:
+                raise ValueError(f"Unsupported kl_robust_mode: {kl_robust_mode}")
+            kl_per_cell = pos
         kl_loss = base._valid_cell_mean(kl_per_cell, x_count_safe)
+        kl_raw_loss = base._valid_cell_mean(kl_per_cell_raw, x_count_safe)
 
         zero_scalar = torch.zeros((), device=z.device, dtype=z.dtype)
         resp_entropy = zero_scalar
@@ -412,6 +453,7 @@ class MaskFiLMGMMVAE(nn.Module):
             "loss": total_loss,
             "recon_loss": recon_loss,
             "kl_loss": kl_loss,
+            "kl_raw_loss": kl_raw_loss,
             "kl_c_loss": zero_scalar,
             "kl_u_loss": zero_scalar,
             "kl_eps_loss": kl_loss,
