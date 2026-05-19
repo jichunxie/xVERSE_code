@@ -19,7 +19,7 @@ export PYTHONUNBUFFERED=1
 
 COMPILED_ROOT="/hpc/group/xielab/xj58/xVerseAtlas/compiled_train_v1_all"
 CELLTYPE_CSV="/hpc/group/xielab/xj58/sparest_code/standard_type/cellxgene_cell_type_mapped.csv"
-RESULT_DIR="/hpc/group/xielab/xj58/pretrain_model_celltype/vae_all_tissue0518_con1_nobatch_kl1e-4_noct"
+RESULT_DIR="/hpc/group/xielab/xj58/pretrain_model_celltype/vae_all_tissue0518_con1_nobatch_kl1e-4_noct_2"
 
 NPROC_PER_NODE=$(python - <<'PY'
 import torch
