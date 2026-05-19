@@ -73,7 +73,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --num-components 128 \
   --prior-cov-rank 0 \
   --vamp-pseudo-init-from-data \
-  --vamp-pseudo-init-epoch 3 \
+  --vamp-pseudo-init-epoch 1 \
   --vamp-pseudo-init-samples 200000 \
   --vamp-pseudo-use-real-mask \
   --prior-mu-init sphere \
