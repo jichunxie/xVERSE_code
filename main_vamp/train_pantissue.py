@@ -148,6 +148,8 @@ def parse_args():
                         help="Initialize VampPrior pseudo-cell inputs from real train cells before training.")
     parser.add_argument("--vamp-pseudo-init-samples", type=int, default=50000,
                         help="Max real cells collected before subsampling K pseudo-cell initial profiles.")
+    parser.add_argument("--vamp-pseudo-use-real-mask", action="store_true",
+                        help="When initializing pseudo-cells from data, also store and use their real panel masks.")
     parser.add_argument("--expr-hidden-dim", type=int, default=1024, help="Expression encoder hidden dim.")
     parser.add_argument("--mask-hidden-dim", type=int, default=512, help="Mask encoder hidden dim.")
     parser.add_argument("--dec-hidden-dim", type=int, default=1024, help="Decoder hidden dim.")
@@ -496,23 +498,27 @@ def _inverse_softplus(y: torch.Tensor) -> torch.Tensor:
 
 
 def _collect_pseudo_init_profiles(train_loader, device, max_samples: int):
-    chunks = []
+    expr_chunks = []
+    mask_chunks = []
     n_seen = 0
     with torch.no_grad():
         for sample_id, tissue_id, celltype_id, x_count, x_mask, x_mask_encoder in train_loader:
             x = torch.log1p(x_count.float()).to(device, non_blocking=True)
+            m = x_mask.float().to(device, non_blocking=True)
             take = min(x.size(0), max(0, int(max_samples) - n_seen))
             if take > 0:
-                chunks.append(x[:take].detach().cpu())
+                expr_chunks.append(x[:take].detach().cpu())
+                mask_chunks.append(m[:take].detach().cpu())
                 n_seen += take
             if n_seen >= int(max_samples):
                 break
-    if not chunks:
-        return torch.empty((0, 0), dtype=torch.float32)
-    return torch.cat(chunks, dim=0)
+    if not expr_chunks:
+        empty = torch.empty((0, 0), dtype=torch.float32)
+        return empty, empty
+    return torch.cat(expr_chunks, dim=0), torch.cat(mask_chunks, dim=0)
 
 
-def _gather_pseudo_init_profiles(local_x: torch.Tensor, device, rank: int, world_size: int):
+def _gather_pseudo_init_tensor(local_x: torch.Tensor, device, rank: int, world_size: int):
     if (not dist.is_available()) or (not dist.is_initialized()) or world_size <= 1:
         return local_x.to(device) if rank == 0 else None
     local_x = local_x.to(device)
@@ -532,7 +538,17 @@ def _gather_pseudo_init_profiles(local_x: torch.Tensor, device, rank: int, world
     return torch.cat(parts, dim=0) if parts else torch.empty((0, d), device=device, dtype=local_x.dtype)
 
 
-def init_vamp_pseudo_from_loader(model, train_loader, device, samples: int, seed: int, rank: int, world_size: int, log):
+def init_vamp_pseudo_from_loader(
+    model,
+    train_loader,
+    device,
+    samples: int,
+    seed: int,
+    rank: int,
+    world_size: int,
+    log,
+    use_real_mask: bool = False,
+):
     base_model = _unwrap_model(model)
     if getattr(base_model, "prior_type", None) != "vamp":
         log("[VampPseudoInit][Skip] prior_type is not vamp.")
@@ -543,20 +559,24 @@ def init_vamp_pseudo_from_loader(model, train_loader, device, samples: int, seed
         return False
     k = int(prior.raw_pseudo_expr.size(0))
     g = int(prior.raw_pseudo_expr.size(1))
-    local_x = _collect_pseudo_init_profiles(train_loader, device, max_samples=max(k, int(samples)))
-    x = _gather_pseudo_init_profiles(local_x, device=device, rank=rank, world_size=world_size)
+    local_x, local_mask = _collect_pseudo_init_profiles(train_loader, device, max_samples=max(k, int(samples)))
+    x = _gather_pseudo_init_tensor(local_x, device=device, rank=rank, world_size=world_size)
+    mask_all = _gather_pseudo_init_tensor(local_mask, device=device, rank=rank, world_size=world_size)
 
     if rank == 0:
         if x is None or x.size(0) <= 0:
             log("[VampPseudoInit][Skip] no real cell profiles collected.")
             ok = torch.tensor([0], device=device, dtype=torch.long)
             raw = torch.zeros((k, g), device=device)
+            pseudo_mask = torch.ones((k, g), device=device)
         else:
             x = x.float().to(device)
+            mask_all = mask_all.float().to(device) if mask_all is not None and mask_all.numel() > 0 else torch.ones_like(x)
             if x.size(1) != g:
                 log(f"[VampPseudoInit][Skip] gene dim mismatch: collected={x.size(1)}, pseudo={g}")
                 ok = torch.tensor([0], device=device, dtype=torch.long)
                 raw = torch.zeros((k, g), device=device)
+                pseudo_mask = torch.ones((k, g), device=device)
             else:
                 gen = torch.Generator(device=device)
                 gen.manual_seed(int(seed))
@@ -567,22 +587,30 @@ def init_vamp_pseudo_from_loader(model, train_loader, device, samples: int, seed
                     idx = torch.randint(0, x.size(0), (k,), generator=gen, device=device)
                     init_expr = x.index_select(0, idx)
                 raw = _inverse_softplus(init_expr)
+                if bool(use_real_mask):
+                    pseudo_mask = mask_all.index_select(0, idx).clamp(0.0, 1.0)
+                else:
+                    pseudo_mask = torch.ones((k, g), device=device)
                 ok = torch.tensor([1], device=device, dtype=torch.long)
                 log(
                     f"[VampPseudoInit] done: collected={x.size(0)}, K={k}, "
-                    f"expr[min/mean/max]={init_expr.min().item():.4g}/{init_expr.mean().item():.4g}/{init_expr.max().item():.4g}"
+                    f"expr[min/mean/max]={init_expr.min().item():.4g}/{init_expr.mean().item():.4g}/{init_expr.max().item():.4g}, "
+                    f"mask_mean={pseudo_mask.mean().item():.4g}, use_real_mask={bool(use_real_mask)}"
                 )
     else:
         ok = torch.tensor([0], device=device, dtype=torch.long)
         raw = torch.zeros((k, g), device=device)
+        pseudo_mask = torch.ones((k, g), device=device)
 
     if dist.is_available() and dist.is_initialized() and world_size > 1:
         dist.broadcast(ok, src=0)
         dist.broadcast(raw, src=0)
+        dist.broadcast(pseudo_mask, src=0)
     if int(ok.item()) != 1:
         return False
     with torch.no_grad():
         prior.raw_pseudo_expr.copy_(raw.to(device=prior.raw_pseudo_expr.device, dtype=prior.raw_pseudo_expr.dtype))
+        prior.pseudo_mask.copy_(pseudo_mask.to(device=prior.pseudo_mask.device, dtype=prior.pseudo_mask.dtype))
     log("[VampPseudoInit] broadcast done.")
     return True
 
@@ -1179,6 +1207,7 @@ def main():
             rank=rank,
             world_size=world_size,
             log=log,
+            use_real_mask=args.vamp_pseudo_use_real_mask,
         )
         prior_initialized = bool(prior_initialized or initialized)
 

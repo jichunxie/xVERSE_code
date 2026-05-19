@@ -28,6 +28,7 @@ class PseudoCellVampPrior(nn.Module):
             # raw pseudo expression is mapped through softplus before encoding.
             raw = torch.randn(self.K, self.num_genes) * 0.02
         self.raw_pseudo_expr = nn.Parameter(raw)
+        self.register_buffer("pseudo_mask", torch.ones(self.K, self.num_genes), persistent=True)
 
     def pseudo_expr(self) -> torch.Tensor:
         return F.softplus(self.raw_pseudo_expr)
@@ -40,7 +41,9 @@ class PseudoCellVampPrior(nn.Module):
         logvar_max: float = 2.0,
     ):
         pseudo = self.pseudo_expr()
-        mask = torch.ones_like(pseudo)
+        mask = self.pseudo_mask.to(device=pseudo.device, dtype=pseudo.dtype)
+        if tuple(mask.shape) != tuple(pseudo.shape):
+            mask = torch.ones_like(pseudo)
         mu, logvar = encoder(pseudo, mask)
         logvar = torch.clamp(logvar, min=float(logvar_min), max=float(logvar_max))
         if dtype is not None:

@@ -1490,6 +1490,7 @@ def vamp_collapse_diagnostics(
             mean_mu_dist = 0.0
         prior_var = torch.exp(p_logvar.detach().float())
         pseudo = prior.pseudo_expr().detach().float()
+        pseudo_mask = getattr(prior, "pseudo_mask", torch.ones_like(pseudo)).detach().float().to(device=pseudo.device)
         return {
             "pi_entropy": pi_entropy,
             "k_eff": k_eff,
@@ -1506,6 +1507,7 @@ def vamp_collapse_diagnostics(
             "min_pseudo": float(pseudo.min().item()),
             "mean_pseudo": float(pseudo.mean().item()),
             "max_pseudo": float(pseudo.max().item()),
+            "pseudo_mask_mean": float(pseudo_mask.mean().item()),
         }
 
 
@@ -2184,7 +2186,8 @@ def train_gmm_vae_one_epoch(
                     f"minMuDist={diag['min_mu_dist']:.3f}, meanMuDist={diag['mean_mu_dist']:.3f}, "
                     f"meanPriorMuNorm={diag['mean_prior_mu_norm']:.3f}, "
                     f"meanVar={diag['mean_prior_var']:.3f}, maxVar={diag['max_prior_var']:.3f}, "
-                    f"pseudo[min/mean/max]={diag['min_pseudo']:.3g}/{diag['mean_pseudo']:.3g}/{diag['max_pseudo']:.3g}"
+                    f"pseudo[min/mean/max]={diag['min_pseudo']:.3g}/{diag['mean_pseudo']:.3g}/{diag['max_pseudo']:.3g}, "
+                    f"pseudoMaskMean={diag['pseudo_mask_mean']:.3f}"
                 )
             print(msg)
 
@@ -2459,7 +2462,8 @@ def evaluate_gmm_vae_one_epoch(
                         f"minMuDist={diag['min_mu_dist']:.3f}, meanMuDist={diag['mean_mu_dist']:.3f}, "
                         f"meanPriorMuNorm={diag['mean_prior_mu_norm']:.3f}, "
                         f"meanVar={diag['mean_prior_var']:.3f}, maxVar={diag['max_prior_var']:.3f}, "
-                        f"pseudo[min/mean/max]={diag['min_pseudo']:.3g}/{diag['mean_pseudo']:.3g}/{diag['max_pseudo']:.3g}"
+                        f"pseudo[min/mean/max]={diag['min_pseudo']:.3g}/{diag['mean_pseudo']:.3g}/{diag['max_pseudo']:.3g}, "
+                        f"pseudoMaskMean={diag['pseudo_mask_mean']:.3f}"
                     )
                 print(msg)
 
