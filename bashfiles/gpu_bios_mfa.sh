@@ -117,5 +117,5 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --recon-cell-weight-alpha 0.5 \
   --recon-cell-weight-clusters 32 \
   --recon-cell-weight-kmeans-iters 5 \
-  --contrast-temp 0.1
+  --contrast-temp 0.1 \
   --resume-from best 
