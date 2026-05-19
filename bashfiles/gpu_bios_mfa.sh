@@ -19,7 +19,7 @@ export PYTHONUNBUFFERED=1
 
 COMPILED_ROOT="/hpc/group/xielab/xj58/xVerseAtlas/compiled_train_v1_all"
 CELLTYPE_CSV="/hpc/group/xielab/xj58/sparest_code/standard_type/cellxgene_cell_type_mapped.csv"
-RESULT_DIR="/hpc/group/xielab/xj58/pretrain_model_celltype/mfa_all_tissue0518_128x4_bio_noct_filter_kl1e-4_priorlr0.1_push"
+RESULT_DIR="/hpc/group/xielab/xj58/pretrain_model_celltype/mfa_all_tissue0518_128x4_bio_noct_filter_kl1e-4_priorlr0.1-norm"
 
 NPROC_PER_NODE=$(python - <<'PY'
 import torch
@@ -56,14 +56,14 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --result-dir "${RESULT_DIR}" \
   --num-epochs 100 \
   --val-every 10 \
-  --batch-size 256 \
+  --batch-size 2048 \
   --val-batch-size 1024 \
   --num-workers 8 \
   --val-num-workers 8 \
   --val-persistent-workers \
   --prefetch-factor 8 \
   --samples-per-id 500 \
-  --lr 5e-4 \
+  --lr 1e-4 \
   --prior-lr-multiplier 0.1 \
   --weight-decay 1e-5 \
   --prior-type gmm \
@@ -95,8 +95,8 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --lambda-contrast 1 \
   --lambda-real-recon 0.5 \
   --lambda-prior-pi-balance 0 \
-  --lambda-prior-mu-spread 0.1 \
-  --prior-mu-spread-tau 0.5 \
+  --lambda-prior-mu-spread 0 \
+  --prior-mu-spread-tau 0 \
   --lambda-prior-logvar-l2 0.1 \
   --lambda-prior-factor-l2 0.1 \
   --prior-logvar-target 0 \
