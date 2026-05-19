@@ -67,21 +67,24 @@ MODELS = [
 ]
 
 SCIB_SCORE_TABLE = [
-    ("Isolated labels", "Bio conservation"),
-    ("KMeans NMI", "Bio conservation"),
-    ("KMeans ARI", "Bio conservation"),
-    ("Silhouette label", "Bio conservation"),
-    ("cLISI", "Bio conservation"),
+    ("Isolated label ASW", "Rare bio conservation"),
+    ("Isolated label F1", "Rare bio conservation"),
+    ("KMeans NMI", "Major bio conservation"),
+    ("KMeans ARI", "Major bio conservation"),
+    ("Silhouette label", "Major bio conservation"),
+    ("cLISI", "Major bio conservation"),
     ("Silhouette batch", "Batch correction"),
     ("iLISI", "Batch correction"),
     ("KBET", "Batch correction"),
     ("Graph connectivity", "Batch correction"),
-    ("Bio conservation", "Aggregate score"),
+    ("Rare bio conservation", "Aggregate score"),
+    ("Major bio conservation", "Aggregate score"),
     ("Batch correction", "Aggregate score"),
 ]
 
 SCIB_METRIC_COLUMNS = [name for name, _ in SCIB_SCORE_TABLE]
 METRIC_OUTPUT_COLUMNS = ["tissue", "gene_set", "model", "key", "n_cells"] + SCIB_METRIC_COLUMNS
+CACHE_REQUIRED_COLUMNS = ["Isolated label F1"]
 
 PCR_COLUMNS = {
     "PCR_batch",
@@ -102,14 +105,19 @@ def format_metric_output_df(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return df
     df = drop_pcr_columns(df.copy())
+    if "Isolated label ASW" not in df.columns and "Isolated labels" in df.columns:
+        df["Isolated label ASW"] = df["Isolated labels"]
     for col in METRIC_OUTPUT_COLUMNS:
         if col not in df.columns:
             df[col] = np.nan
-    bio_cols = ["Isolated labels", "KMeans NMI", "KMeans ARI", "Silhouette label", "cLISI"]
+    rare_bio_cols = ["Isolated label ASW", "Isolated label F1"]
+    major_bio_cols = ["KMeans NMI", "KMeans ARI", "Silhouette label", "cLISI"]
     batch_cols = ["Silhouette batch", "iLISI", "KBET", "Graph connectivity"]
-    bio = df[bio_cols].apply(pd.to_numeric, errors="coerce").mean(axis=1, skipna=True)
+    rare_bio = df[rare_bio_cols].apply(pd.to_numeric, errors="coerce").mean(axis=1, skipna=True)
+    major_bio = df[major_bio_cols].apply(pd.to_numeric, errors="coerce").mean(axis=1, skipna=True)
     batch = df[batch_cols].apply(pd.to_numeric, errors="coerce").mean(axis=1, skipna=True)
-    df["Bio conservation"] = pd.to_numeric(df["Bio conservation"], errors="coerce").fillna(bio)
+    df["Rare bio conservation"] = pd.to_numeric(df["Rare bio conservation"], errors="coerce").fillna(rare_bio)
+    df["Major bio conservation"] = pd.to_numeric(df["Major bio conservation"], errors="coerce").fillna(major_bio)
     df["Batch correction"] = pd.to_numeric(df["Batch correction"], errors="coerce").fillna(batch)
     return df[METRIC_OUTPUT_COLUMNS]
 
@@ -260,7 +268,8 @@ def add_kbet_metrics(metrics, errors, adata_int, embed_key: str, batch_key: str,
 
 def add_scib_score_aliases(metrics):
     alias_map = {
-        "Isolated labels": "isolated_ASW",
+        "Isolated label ASW": "isolated_ASW",
+        "Isolated label F1": "isolated_F1",
         "KMeans NMI": "KMeans_NMI",
         "KMeans ARI": "KMeans_ARI",
         "Silhouette label": "ASW_label",
@@ -273,12 +282,22 @@ def add_scib_score_aliases(metrics):
     for display_name, source_name in alias_map.items():
         metrics[display_name] = metrics.get(source_name, np.nan)
 
-    bio_vals = [metrics.get(k, np.nan) for k, t in SCIB_SCORE_TABLE[:5]]
-    batch_vals = [metrics.get(k, np.nan) for k, t in SCIB_SCORE_TABLE[5:9]]
-    metrics["Bio conservation"] = float(np.nanmean(bio_vals)) if np.isfinite(bio_vals).any() else np.nan
+    rare_bio_vals = [metrics.get(k, np.nan) for k in ["Isolated label ASW", "Isolated label F1"]]
+    major_bio_vals = [metrics.get(k, np.nan) for k in ["KMeans NMI", "KMeans ARI", "Silhouette label", "cLISI"]]
+    batch_vals = [metrics.get(k, np.nan) for k in ["Silhouette batch", "iLISI", "KBET", "Graph connectivity"]]
+    metrics["Rare bio conservation"] = float(np.nanmean(rare_bio_vals)) if np.isfinite(rare_bio_vals).any() else np.nan
+    metrics["Major bio conservation"] = float(np.nanmean(major_bio_vals)) if np.isfinite(major_bio_vals).any() else np.nan
     metrics["Batch correction"] = float(np.nanmean(batch_vals)) if np.isfinite(batch_vals).any() else np.nan
-    if np.isfinite(metrics["Bio conservation"]) and np.isfinite(metrics["Batch correction"]):
-        metrics["Total"] = 0.6 * metrics["Bio conservation"] + 0.4 * metrics["Batch correction"]
+    if (
+        np.isfinite(metrics["Rare bio conservation"])
+        and np.isfinite(metrics["Major bio conservation"])
+        and np.isfinite(metrics["Batch correction"])
+    ):
+        metrics["Total"] = (
+            0.2 * metrics["Rare bio conservation"]
+            + 0.4 * metrics["Major bio conservation"]
+            + 0.4 * metrics["Batch correction"]
+        )
     else:
         metrics["Total"] = np.nan
 
@@ -628,7 +647,13 @@ def cached_row_for(cached: pd.DataFrame, tissue_name: str, gene_set: str, model_
     ]
     if sub.empty:
         return None
-    return sub.iloc[0].to_dict()
+    row = sub.iloc[0]
+    for col in CACHE_REQUIRED_COLUMNS:
+        val = pd.to_numeric(row.get(col, np.nan), errors="coerce")
+        if not np.isfinite(val):
+            print(f"[cache stale] {model_name} key={key}: missing {col}, recompute")
+            return None
+    return row.to_dict()
 
 
 def update_metric_cache(cache_path: str, rows: list):
