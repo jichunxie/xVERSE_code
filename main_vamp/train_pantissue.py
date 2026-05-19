@@ -126,6 +126,8 @@ def parse_args():
                         help="Cap/scale for robust per-cell KL. <=0 disables.")
     parser.add_argument("--prior-type", choices=["vamp", "gaussian"], default="vamp",
                         help="Latent prior type. 'vamp' uses learnable pseudo-cell VampPrior; 'gaussian' uses N(0,I).")
+    parser.add_argument("--vamp-start-epoch", type=int, default=1,
+                        help="For --prior-type vamp, use standard Gaussian VAE KL before this epoch, then enable VampPrior.")
     parser.add_argument("--latent-dim", type=int, default=128, help="Latent dim.")
     parser.add_argument("--num-components", type=int, default=16, help="VampPrior component count K.")
     parser.add_argument("--prior-cov-rank", type=int, default=0,
@@ -1217,7 +1219,12 @@ def main():
             warmup_epochs=args.beta_kl_warmup_epochs,
             start_beta=args.beta_kl_warmup_start,
         )
-        stage_name = "stage3"
+        force_base_posterior = (
+            str(args.prior_type).lower() == "vamp"
+            and int(args.vamp_start_epoch) > 1
+            and epoch_id < int(args.vamp_start_epoch)
+        )
+        stage_name = "vae_warmup" if force_base_posterior else "vamp"
         base_model = _unwrap_model(model)
         _apply_train_mode(base_model, args.train_mode)
         if prior_initialized and int(prior_freeze_until_epoch) >= epoch_id:
@@ -1229,13 +1236,11 @@ def main():
 
         log(
             f"[Epoch {epoch_id}] stage={stage_name}, beta_kl={beta_t:.6f}, "
-            f"lambda_resp_anchor={lambda_resp_anchor_t:.6f}"
+            f"lambda_resp_anchor={lambda_resp_anchor_t:.6f}, force_base_posterior={force_base_posterior}"
         )
         prior_snapshot_start = prior_parameter_snapshot(model)
         if prior_snapshot_start and is_main_process(rank):
             log(f"[Epoch {epoch_id}] PriorSnapshot captured keys={','.join(sorted(prior_snapshot_start.keys()))}")
-
-        force_base_posterior = False
 
         train_sampler.set_epoch(epoch_id)
         if val_sampler is not None:
