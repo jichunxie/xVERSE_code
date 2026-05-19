@@ -1439,6 +1439,69 @@ def gmm_collapse_diagnostics(
     }
 
 
+def vamp_collapse_diagnostics(
+    model,
+    z: torch.Tensor,
+    active_thresh: float = 1e-3,
+) -> Dict[str, float]:
+    with torch.no_grad():
+        base_model = model.module if hasattr(model, "module") else model
+        prior = getattr(base_model, "prior", None)
+        if prior is None or not hasattr(prior, "raw_pseudo_expr"):
+            return {}
+        pi = torch.softmax(prior.pi_logits.float(), dim=0)
+        pi_entropy = float((-(pi * torch.log(pi + 1e-12))).sum().item())
+        k_eff = float(torch.exp(torch.tensor(pi_entropy, device=pi.device)).item())
+
+        p_mu, p_logvar = prior.component_params(base_model.encoder, dtype=z.dtype)
+        log_w = torch.log(pi.to(device=z.device, dtype=z.dtype) + 1e-12).unsqueeze(0)
+        log_comp = gaussian_log_prob_diag(
+            z=z.detach().unsqueeze(1),
+            mu=p_mu.unsqueeze(0),
+            logvar=p_logvar.unsqueeze(0),
+        )
+        resp = torch.softmax(log_w + log_comp, dim=1)
+        usage = resp.mean(dim=0)
+        active_comp = int((usage > float(active_thresh)).sum().item())
+        resp_top1 = float(resp.max(dim=1).values.mean().item())
+        usage_entropy = float((-(usage * torch.log(usage + 1e-12))).sum().item())
+        usage_eff = float(torch.exp(torch.tensor(usage_entropy, device=usage.device)).item())
+        usage_max = float(usage.max().item())
+        usage_min = float(usage.min().item())
+
+        mu = p_mu.detach().float()
+        mean_prior_mu_norm = float(mu.norm(dim=1).mean().item())
+        if mu.size(0) > 1:
+            dmat = torch.cdist(mu, mu, p=2)
+            diag_mask = torch.eye(dmat.size(0), device=dmat.device, dtype=torch.bool)
+            finite_dists = dmat.masked_fill(diag_mask, float("nan"))
+            finite_dists = finite_dists[~torch.isnan(finite_dists)]
+            min_mu_dist = float(finite_dists.min().item()) if finite_dists.numel() > 0 else 0.0
+            mean_mu_dist = float(finite_dists.mean().item()) if finite_dists.numel() > 0 else 0.0
+        else:
+            min_mu_dist = 0.0
+            mean_mu_dist = 0.0
+        prior_var = torch.exp(p_logvar.detach().float())
+        pseudo = prior.pseudo_expr().detach().float()
+        return {
+            "pi_entropy": pi_entropy,
+            "k_eff": k_eff,
+            "active_comp": active_comp,
+            "resp_top1": resp_top1,
+            "usage_eff": usage_eff,
+            "usage_max": usage_max,
+            "usage_min": usage_min,
+            "min_mu_dist": min_mu_dist,
+            "mean_mu_dist": mean_mu_dist,
+            "mean_prior_mu_norm": mean_prior_mu_norm,
+            "mean_prior_var": float(prior_var.mean().item()),
+            "max_prior_var": float(prior_var.max().item()),
+            "min_pseudo": float(pseudo.min().item()),
+            "mean_pseudo": float(pseudo.mean().item()),
+            "max_pseudo": float(pseudo.max().item()),
+        }
+
+
 def batch_kmeans_usage_diagnostics(
     z: torch.Tensor,
     num_clusters: int = 32,
@@ -2097,6 +2160,17 @@ def train_gmm_vae_one_epoch(
                     f"factorNorm={diag['mean_factor_norm']:.3f}, totalVar={diag['mean_total_var']:.3f}, "
                     f"maxTotalVar={diag['max_total_var']:.3f}, totalStd={diag['mean_total_std']:.3f}"
                 )
+            elif getattr(prior_ref, "raw_pseudo_expr", None) is not None:
+                diag = vamp_collapse_diagnostics(model=model, z=out_fake["z"])
+                msg += (
+                    f", K_eff={diag['k_eff']:.2f}, usageEff={diag['usage_eff']:.2f}, "
+                    f"activeK={diag['active_comp']}, respTop1={diag['resp_top1']:.3f}, "
+                    f"usageMax={diag['usage_max']:.3f}, usageMin={diag['usage_min']:.3g}, "
+                    f"minMuDist={diag['min_mu_dist']:.3f}, meanMuDist={diag['mean_mu_dist']:.3f}, "
+                    f"meanPriorMuNorm={diag['mean_prior_mu_norm']:.3f}, "
+                    f"meanVar={diag['mean_prior_var']:.3f}, maxVar={diag['max_prior_var']:.3f}, "
+                    f"pseudo[min/mean/max]={diag['min_pseudo']:.3g}/{diag['mean_pseudo']:.3g}/{diag['max_pseudo']:.3g}"
+                )
             print(msg)
 
     if dist.is_available() and dist.is_initialized():
@@ -2354,6 +2428,17 @@ def evaluate_gmm_vae_one_epoch(
                         f"factorVar={diag['mean_factor_var']:.3f}, maxFactorVar={diag['max_factor_var']:.3f}, "
                         f"factorNorm={diag['mean_factor_norm']:.3f}, totalVar={diag['mean_total_var']:.3f}, "
                         f"maxTotalVar={diag['max_total_var']:.3f}, totalStd={diag['mean_total_std']:.3f}"
+                    )
+                elif getattr(prior_ref, "raw_pseudo_expr", None) is not None:
+                    diag = vamp_collapse_diagnostics(model=model, z=out_real["z"])
+                    msg += (
+                        f", K_eff={diag['k_eff']:.2f}, usageEff={diag['usage_eff']:.2f}, "
+                        f"activeK={diag['active_comp']}, respTop1={diag['resp_top1']:.3f}, "
+                        f"usageMax={diag['usage_max']:.3f}, usageMin={diag['usage_min']:.3g}, "
+                        f"minMuDist={diag['min_mu_dist']:.3f}, meanMuDist={diag['mean_mu_dist']:.3f}, "
+                        f"meanPriorMuNorm={diag['mean_prior_mu_norm']:.3f}, "
+                        f"meanVar={diag['mean_prior_var']:.3f}, maxVar={diag['max_prior_var']:.3f}, "
+                        f"pseudo[min/mean/max]={diag['min_pseudo']:.3g}/{diag['mean_pseudo']:.3g}/{diag['max_pseudo']:.3g}"
                     )
                 print(msg)
 
