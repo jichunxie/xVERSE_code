@@ -69,9 +69,9 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --weight-decay 1e-5 \
   --prior-type gmm \
   --recon-loss nb \
-  --latent-dim 256 \
-  --num-components 256 \
-  --prior-cov-rank 64 \
+  --latent-dim 128 \
+  --num-components 128 \
+  --prior-cov-rank 16 \
   --prior-mu-init sphere \
   --prior-mu-init-radius 2 \
   --batch-emb-dim 0 \
