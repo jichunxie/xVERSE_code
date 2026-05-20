@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Plot UMAPs for a given embedding key from fig2 donor h5ad files.
-Default uses full panel ("all") and GMVAE mixmu embedding.
+Default uses full panel ("all") and current xVERSE embedding.
 """
 
 import argparse
@@ -18,7 +18,7 @@ def parse_args():
     ap.add_argument("--liver-dir", default="/hpc/group/xielab/xj58/xVerse_results/fig2/liver")
     ap.add_argument("--brain-dir", default="/hpc/group/xielab/xj58/xVerse_results/fig2/brain")
     ap.add_argument("--output-dir", default="/hpc/group/xielab/xj58/xVerse_results/fig2_gmmvae_current/umap")
-    ap.add_argument("--embedding-key", default="xVerse_gmmvae_mixmu")
+    ap.add_argument("--embedding-key", default="xVERSE")
     ap.add_argument("--gene-set", default="all", choices=["all", "5k", "xenium"])
     ap.add_argument("--neighbors-k", type=int, default=15)
     ap.add_argument("--min-dist", type=float, default=0.3)

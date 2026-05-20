@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Extract GMVAE/MFA embeddings for fig2 biology signal datasets.
+Extract current xVERSE embeddings for fig2 biology signal datasets.
 
 This mirrors the original fig2 xVerse embedding extraction flow but uses:
 - main_energy or main_mfa MaskFiLMGMMVAE checkpoint
 - same donor h5ad files and gene-set splits
-- output embedding key: obsm["xVerse_gmmvae_mixmu"] by default
+- output embedding key: obsm["xVERSE"] by default
 """
 
 import argparse
@@ -34,7 +34,7 @@ from main_mfa.utils_model import MaskFiLMGMMVAE as MFAMaskFiLMGMMVAE
 
 
 def parse_args():
-    ap = argparse.ArgumentParser(description="Extract GMVAE embeddings for fig2 donor datasets.")
+    ap = argparse.ArgumentParser(description="Extract current xVERSE embeddings for fig2 donor datasets.")
     ap.add_argument(
         "--gene-ids-path",
         default="/hpc/group/xielab/xj58/xVerseAtlas/npz_tissue_dataset_donor/ensg_keys_high_quality.txt",
@@ -42,7 +42,7 @@ def parse_args():
     ap.add_argument(
         "--ckpt",
         default="/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_all_tissue3/last_model.pth",
-        help="Path to trained GMVAE checkpoint.",
+        help="Path to trained xVERSE checkpoint.",
     )
     ap.add_argument("--liver-dir", default="/hpc/group/xielab/xj58/xVerse_results/fig2/liver")
     ap.add_argument("--brain-dir", default="/hpc/group/xielab/xj58/xVerse_results/fig2/brain")
@@ -56,7 +56,7 @@ def parse_args():
     )
     ap.add_argument("--default-gene-id-col", default="gene_ids", help="Default adata.var column containing Ensembl IDs.")
     ap.add_argument("--output-dir", default="/hpc/group/xielab/xj58/xVerse_results/fig2_gmmvae_current")
-    ap.add_argument("--embedding-key", default="xVerse_gmmvae_mixmu")
+    ap.add_argument("--embedding-key", default="xVERSE")
     ap.add_argument(
         "--embedding-mode",
         default="mixmu",
@@ -918,7 +918,7 @@ def process_dataset_manifest(args, model, gene_ids, device: torch.device, timing
         print(f"[OK] wrote {args.embedding_key} to {fp} shape={emb.shape} time={cost:.2f}s")
         timing_records.append(
             {
-                "model": "gmmvae_current",
+                "model": "xVERSE",
                 "tissue": tissue,
                 "gene_set": "all",
                 "file": fp.name,
@@ -962,7 +962,7 @@ def process_tissue_dir(args, model, gene_ids, tissue_name: str, tissue_dir: Path
         print(f"[OK] wrote {args.embedding_key} to {fp.name} shape={emb.shape} time={cost:.2f}s")
         timing_records.append(
             {
-                "model": "gmmvae_current",
+                "model": "xVERSE",
                 "tissue": tissue_name,
                 "gene_set": gene_set,
                 "file": fp.name,
@@ -1036,7 +1036,7 @@ def main():
         )
 
     if timing_records:
-        out_csv = os.path.join(args.output_dir, "gmmvae_current_inference_timing.csv")
+        out_csv = os.path.join(args.output_dir, "xverse_current_inference_timing.csv")
         pd.DataFrame(timing_records).to_csv(out_csv, index=False)
         print(f"[Done] timing saved to {out_csv}")
     else:

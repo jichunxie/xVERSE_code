@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Evaluate GMVAE and existing foundation model embeddings with a broader scIB metric set.
+Evaluate the current xVERSE embedding and existing foundation model embeddings with a broader scIB metric set.
 
 Design goals:
 1) Reuse already computed embeddings in donor h5ad files (no re-extraction for other FMs).
-2) Add GMVAE embedding key into comparison.
+2) Add the current xVERSE embedding key into comparison.
 3) Compute a broader set of scIB metrics with robust try/except fallback.
 4) Save per-tissue/per-gene-set csv files and one global summary csv.
 """
@@ -41,7 +41,7 @@ def parse_args():
     )
     ap.add_argument("--output-dir", default="/hpc/group/xielab/xj58/xVerse_results/fig2_gmmvae_current/evaluation_scib_full")
     ap.add_argument("--old-eval-dir", default="/hpc/group/xielab/xj58/xVerse_results/fig2/evaluation")
-    ap.add_argument("--gmm-key", default="xVerse_gmmvae_mixmu")
+    ap.add_argument("--gmm-key", default="xVERSE", help="Embedding key for the current xVERSE model.")
     ap.add_argument("--neighbors-k", type=int, default=15)
     ap.add_argument("--max-cells", type=int, default=20000, help="0 means all cells; otherwise random subsample for speed.")
     ap.add_argument("--seed", type=int, default=42)
@@ -58,8 +58,7 @@ def parse_args():
 
 MODELS = [
     ("Unintegrated", "X_pca"),
-    ("xVerse", "xVerse"),
-    ("GMVAE", "xVerse_gmmvae"),
+    ("xVERSE", "__CURRENT_XVERSE__"),
     ("Harmony", "harmony"),
     ("scGPT", "scgpt"),
     ("Nicheformer", "nicheformer"),
@@ -681,7 +680,7 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
     copy_existing_timing_csv(args.old_eval_dir, args.output_dir)
 
-    model_pairs = [(n, (args.gmm_key if k == "xVerse_gmmvae" else k)) for n, k in MODELS]
+    model_pairs = [(n, (args.gmm_key if k == "__CURRENT_XVERSE__" else k)) for n, k in MODELS]
 
     all_rows = []
     all_err_rows = []
@@ -739,7 +738,7 @@ def main():
                 continue
 
             for model_name, key in model_pairs:
-                cached = None if model_name == "GMVAE" else cached_row_for(cached_metrics, tissue_name, gene_set, model_name, key)
+                cached = None if model_name == "xVERSE" else cached_row_for(cached_metrics, tissue_name, gene_set, model_name, key)
                 if cached is not None:
                     print(f"[cache] {model_name} key={key}")
                     all_rows.append(cached)

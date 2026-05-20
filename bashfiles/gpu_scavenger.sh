@@ -32,7 +32,7 @@ run_one_model () {
   CKPT_NAME="${5:-best_contrast_model.pth}"
   shift 5 || true
   EXTRACT_EXTRA_ARGS=("$@")
-  EMBEDDING_KEY="xVerse_gmmvae_${EMBEDDING_MODE}"
+  EMBEDDING_KEY="xVERSE"
   CKPT_PATH="${RESULT_DIR}/${CKPT_NAME}"
   FIG2_OUT_DIR="/hpc/group/xielab/xj58/xVerse_results/fig2_gmmvae_${MODEL_TAG}"
   FIG2_EVAL_DIR="${FIG2_OUT_DIR}/evaluation_scib_full"
@@ -50,7 +50,7 @@ run_one_model () {
       --embedding-key "${EMBEDDING_KEY}" \
       --embedding-mode "${EMBEDDING_MODE}"
 
-  echo ">>> [${MODEL_TAG}] Evaluate FMs + GMVAE (scIB full)"
+  echo ">>> [${MODEL_TAG}] Evaluate FMs + xVERSE (scIB full)"
   python reproduce_manuscript/fig2_biology_signal_gmmvae_current/03_evaluate_scib_full.py \
       --liver-dir "${FIG2_LIVER_DIR}" \
       --brain-dir "${FIG2_BRAIN_DIR}" \
@@ -72,7 +72,7 @@ run_one_model () {
 }
 
 # run_one_model "vae" "/hpc/group/xielab/xj58/pretrain_model_celltype/vae_all_tissue0518_con1_nobatch_kl1e-4_ct_reweight" "main_mfa" "encoder_hidden" "best_model.pth" --no-prior-viz
-run_one_model "mfa" "/hpc/group/xielab/xj58/pretrain_model_celltype/mfa_all_tissue0518_128x16_bio_ct_filter_kl2e-2-norm_v2_reweight_sharetheta" "main_mfa" "encoder_hidden" "last_model.pth"
+run_one_model "mfa" "/hpc/group/xielab/xj58/pretrain_model_celltype/mfa_all_tissue0520" "main_mfa" "encoder_hidden" "last_model.pth"
 # run_one_model "gene_theta_encoder_0515" "/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_all_tissue0515_2" "main_energy" "encoder_hidden"
 # run_one_model "mfa_rank4" "/hpc/group/xielab/xj58/pretrain_model_celltype/mfa_all_tissue0513_rank4" "main_mfa"
 # run_one_model "nb" "/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_all_tissue0512" "main_energy"
