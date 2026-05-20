@@ -204,6 +204,10 @@ def parse_args():
                         help="Use tissue-conditional MFA prior p(z|tissue).")
     parser.add_argument("--lambda-celltype-cls", type=float, default=0.0,
                         help="Weight for auxiliary celltype cross-entropy loss (ignore label -1).")
+    parser.add_argument("--celltype-text-embedding-path", default=None,
+                        help="Optional .npz/.npy file with cell-type language embeddings. If set, --lambda-celltype-cls uses text-embedding contrastive loss instead of hard CE.")
+    parser.add_argument("--celltype-text-temp", type=float, default=0.1,
+                        help="Temperature for cell-type text embedding contrastive loss.")
     parser.add_argument("--prior-logvar-min", type=float, default=-4.0,
                         help="Lower clamp bound for MFA prior log-variance used in KL. Prevents tiny prior variance from exploding KL.")
     parser.add_argument("--prior-logvar-max", type=float, default=4.0,
@@ -374,6 +378,37 @@ def _write_args_csv(result_dir: str, args_namespace, rank: int):
             w.writerow(["run_timestamp", "key", "value"])
         for k, v in items:
             w.writerow([run_ts, k, v])
+
+
+def _load_celltype_text_embeddings(path: str, expected_n: int, log):
+    if path is None or str(path).strip() == "":
+        return None
+    fp = os.path.expanduser(str(path))
+    if not os.path.exists(fp):
+        raise FileNotFoundError(f"celltype text embedding file not found: {fp}")
+    if fp.endswith(".npz"):
+        data = np.load(fp, allow_pickle=True)
+        if "embeddings" not in data:
+            raise KeyError(f"{fp} must contain an 'embeddings' array")
+        emb = data["embeddings"]
+        ids = data["ids"].astype(str).tolist() if "ids" in data else None
+        names = data["names"].astype(str).tolist() if "names" in data else None
+    else:
+        emb = np.load(fp, allow_pickle=True)
+        ids = None
+        names = None
+    emb = np.asarray(emb, dtype=np.float32)
+    if emb.ndim != 2:
+        raise ValueError(f"celltype text embeddings must be 2D, got shape={emb.shape}")
+    if expected_n > 0 and emb.shape[0] != int(expected_n):
+        raise ValueError(
+            f"celltype text embedding rows ({emb.shape[0]}) do not match num_cell_types ({expected_n}). "
+            "This usually means the compiled dataset was built with a different cell-type map."
+        )
+    log(f"[CellTypeText] loaded {emb.shape[0]} embeddings, dim={emb.shape[1]} from {fp}")
+    if ids is not None and names is not None and len(ids) > 0:
+        log(f"[CellTypeText] first={ids[0]}:{names[0]}, last={ids[-1]}:{names[-1]}")
+    return torch.from_numpy(emb)
 
 
 def _apply_training_stage(base_model, stage: str):
@@ -833,6 +868,11 @@ def main():
     else:
         num_cell_types = int(inferred_num_cell_types)
     log(f"[CellType] num_cell_types={num_cell_types}, lambda_celltype_cls={args.lambda_celltype_cls}")
+    celltype_text_embeddings = _load_celltype_text_embeddings(
+        args.celltype_text_embedding_path,
+        expected_n=num_cell_types,
+        log=log,
+    )
 
     inferred_num_tissues = max(ds.infer_num_tissues(), val_ds.infer_num_tissues())
     if int(args.num_tissues) > 0:
@@ -947,6 +987,8 @@ def main():
         batch_cond_drop_prob=args.batch_cond_drop_prob,
         recon_loss_type=args.recon_loss,
         nb_theta_mode=args.nb_theta_mode,
+        celltype_text_embeddings=celltype_text_embeddings,
+        celltype_text_temperature=args.celltype_text_temp,
     ).to(device)
 
     total_params, trainable_params = count_parameters(model)

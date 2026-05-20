@@ -47,15 +47,30 @@ def parse_allowed_sample_ids(s: Optional[str]) -> Optional[set]:
 
 def build_cell_type_to_index(csv_path: str) -> Dict[str, int]:
     df = pd.read_csv(csv_path)
-    if "id" not in df.columns or "classification_result" not in df.columns:
-        raise ValueError("cell-type CSV must contain columns: id, classification_result")
-    df = df.dropna(subset=["classification_result"])
-    uncategorized = {"Other/Unknown"}
-    valid = sorted(c for c in df["classification_result"].unique() if c not in uncategorized)
-    cls_to_idx = {c: i for i, c in enumerate(valid)}
-    for c in uncategorized:
-        cls_to_idx[c] = -1
-    return {str(row["id"]): int(cls_to_idx.get(row["classification_result"], -1)) for _, row in df.iterrows()}
+    if "id" not in df.columns:
+        raise ValueError("cell-type CSV must contain an id column")
+
+    if "classification_result" in df.columns:
+        df = df.dropna(subset=["classification_result"])
+        uncategorized = {"Other/Unknown"}
+        valid = sorted(c for c in df["classification_result"].unique() if c not in uncategorized)
+        cls_to_idx = {c: i for i, c in enumerate(valid)}
+        for c in uncategorized:
+            cls_to_idx[c] = -1
+        return {str(row["id"]): int(cls_to_idx.get(row["classification_result"], -1)) for _, row in df.iterrows()}
+
+    if "name" not in df.columns:
+        raise ValueError("cell-type CSV must contain either classification_result or name")
+    valid_rows = []
+    for _, row in df.iterrows():
+        cid = str(row["id"])
+        name = str(row["name"])
+        lname = name.strip().lower()
+        if lname in {"cell", "unknown", "other/unknown"}:
+            continue
+        valid_rows.append((cid, name))
+    id_to_idx = {cid: idx for idx, (cid, _name) in enumerate(valid_rows)}
+    return {str(row["id"]): int(id_to_idx.get(str(row["id"]), -1)) for _, row in df.iterrows()}
 
 
 def parse_summary_rows(

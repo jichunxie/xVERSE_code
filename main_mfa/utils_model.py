@@ -425,6 +425,8 @@ class MaskFiLMGMMVAE(nn.Module):
         batch_cond_drop_prob: float = 0.0,
         recon_loss_type: str = "poisson",
         nb_theta_mode: str = "gene",
+        celltype_text_embeddings: Optional[torch.Tensor] = None,
+        celltype_text_temperature: float = 0.1,
     ):
         super().__init__()
         if prior_type not in ("gmm", "gaussian"):
@@ -535,7 +537,34 @@ class MaskFiLMGMMVAE(nn.Module):
             nn.Linear(lib_hidden, 1),
         )
         self.num_cell_types = max(0, int(num_cell_types))
-        if self.num_cell_types > 0:
+        self.celltype_text_temperature = max(float(celltype_text_temperature), 1e-6)
+        if celltype_text_embeddings is not None:
+            text_emb = torch.as_tensor(celltype_text_embeddings, dtype=torch.float32)
+            if text_emb.ndim != 2:
+                raise ValueError(f"celltype_text_embeddings must be 2D, got shape={tuple(text_emb.shape)}")
+            if self.num_cell_types <= 0:
+                self.num_cell_types = int(text_emb.size(0))
+            if int(text_emb.size(0)) != self.num_cell_types:
+                raise ValueError(
+                    f"celltype_text_embeddings rows ({text_emb.size(0)}) != num_cell_types ({self.num_cell_types})"
+                )
+            text_emb = F.normalize(text_emb, dim=-1)
+            self.register_buffer("celltype_text_embeddings", text_emb, persistent=True)
+            text_dim = int(text_emb.size(1))
+            proj_hidden = max(128, int(latent_dim))
+            self.celltype_text_head = nn.Sequential(
+                nn.LayerNorm(latent_dim),
+                nn.Linear(latent_dim, proj_hidden),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(proj_hidden, text_dim),
+            )
+            self.celltype_head = None
+        else:
+            self.register_buffer("celltype_text_embeddings", torch.empty(0), persistent=True)
+            self.celltype_text_head = None
+
+        if self.num_cell_types > 0 and self.celltype_text_head is None:
             self.celltype_head = nn.Sequential(
                 nn.LayerNorm(latent_dim),
                 nn.Linear(latent_dim, 64),
@@ -673,6 +702,8 @@ class MaskFiLMGMMVAE(nn.Module):
         }
         if self.celltype_head is not None:
             out["celltype_logits"] = self.celltype_head(z)
+        if self.celltype_text_head is not None:
+            out["celltype_text_embedding"] = F.normalize(self.celltype_text_head(z).float(), dim=-1).to(z.dtype)
         if use_mixture_post:
             out.update(
                 {
@@ -961,9 +992,18 @@ class MaskFiLMGMMVAE(nn.Module):
             else:
                 tgt = torch.full_like(self.prior.prior_logvar, float(prior_logvar_target)).float()
                 prior_logvar_l2_loss = F.mse_loss(self.prior.prior_logvar.float(), tgt).to(z.dtype)
-        if lambda_celltype_cls > 0 and celltype_id is not None and self.celltype_head is not None:
+        if lambda_celltype_cls > 0 and celltype_id is not None and self.celltype_text_head is not None:
             ct = celltype_id.view(-1).to(z.device).long()
-            valid = (ct >= 0) & valid_cell_mask
+            valid = (ct >= 0) & (ct < self.num_cell_types) & valid_cell_mask
+            if valid.any():
+                pred = F.normalize(out["celltype_text_embedding"][valid].float(), dim=-1)
+                text = F.normalize(self.celltype_text_embeddings.float(), dim=-1)
+                logits = pred @ text.t()
+                logits = logits / self.celltype_text_temperature
+                celltype_cls_loss = F.cross_entropy(logits, ct[valid]).to(z.dtype)
+        elif lambda_celltype_cls > 0 and celltype_id is not None and self.celltype_head is not None:
+            ct = celltype_id.view(-1).to(z.device).long()
+            valid = (ct >= 0) & (ct < self.num_cell_types) & valid_cell_mask
             if valid.any():
                 logits = out["celltype_logits"][valid]
                 tgt = ct[valid]
@@ -3475,25 +3515,40 @@ class DistributedBalancedSampler(Sampler):
 
 def build_cell_type_to_index(csv_path):
     df = pd.read_csv(csv_path)
-    df = df.dropna(subset=["classification_result"])
+    if "id" not in df.columns:
+        raise ValueError("cell-type CSV must contain an id column")
+    if "classification_result" in df.columns:
+        df = df.dropna(subset=["classification_result"])
 
-    uncategorized_set = {"Other/Unknown"}
-    filtered_classes = sorted([
-        c for c in df["classification_result"].unique()
-        if c not in uncategorized_set
-    ])
-    print(f"Number of valid cell types (excluding 'Other/Unknown'): {len(filtered_classes)}")
+        uncategorized_set = {"Other/Unknown"}
+        filtered_classes = sorted([
+            c for c in df["classification_result"].unique()
+            if c not in uncategorized_set
+        ])
+        print(f"Number of valid cell types (excluding 'Other/Unknown'): {len(filtered_classes)}")
 
-    classification_to_index = {cls: idx for idx, cls in enumerate(filtered_classes)}
-    for cls in uncategorized_set:
-        classification_to_index[cls] = -1
+        classification_to_index = {cls: idx for idx, cls in enumerate(filtered_classes)}
+        for cls in uncategorized_set:
+            classification_to_index[cls] = -1
 
-    id_to_index = {
-        row["id"]: classification_to_index.get(row["classification_result"], -1)
-        for _, row in df.iterrows()
-    }
+        return {
+            str(row["id"]): int(classification_to_index.get(row["classification_result"], -1))
+            for _, row in df.iterrows()
+        }
 
-    return id_to_index
+    if "name" not in df.columns:
+        raise ValueError("cell-type CSV must contain either classification_result or name")
+    valid_rows = []
+    for _, row in df.iterrows():
+        cid = str(row["id"])
+        name = str(row["name"])
+        lname = name.strip().lower()
+        if lname in {"cell", "unknown", "other/unknown"}:
+            continue
+        valid_rows.append((cid, name))
+    id_to_idx = {cid: idx for idx, (cid, _name) in enumerate(valid_rows)}
+    print(f"Number of valid cell types (excluding cell/unknown): {len(valid_rows)}")
+    return {str(row["id"]): int(id_to_idx.get(str(row["id"]), -1)) for _, row in df.iterrows()}
 
 
 def build_pair_to_sample_id_and_paths(csv_path, allowed_sample_ids=None, use_tissue=None):
