@@ -20,7 +20,7 @@ export PYTHONUNBUFFERED=1
 
 COMPILED_ROOT="/hpc/group/xielab/xj58/xVerseAtlas/compiled_train_v1_all"
 CELLTYPE_CSV="/hpc/group/xielab/xj58/sparest_code/standard_type/cellxgene_cell_type_mapped.csv"
-RESULT_DIR="/hpc/group/xielab/xj58/pretrain_model_celltype/mfa_all_tissue0518_128x16_bio_ct_filter_kl2e-2-norm_v2_reweight_sharetheta_meta"
+RESULT_DIR="/hpc/group/xielab/xj58/pretrain_model_celltype/mfa_all_tissue0520"
 
 NPROC_PER_NODE=$(python - <<'PY'
 import torch
@@ -55,7 +55,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --sampler-shard-reorder-window 4096 \
   --cell-type-csv "${CELLTYPE_CSV}" \
   --result-dir "${RESULT_DIR}" \
-  --num-epochs 100 \
+  --num-epochs 200 \
   --val-every 10 \
   --batch-size 1024 \
   --val-batch-size 1024 \
@@ -70,10 +70,10 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --prior-type gmm \
   --recon-loss nb \
   --latent-dim 128 \
-  --num-components 128 \
+  --num-components 256 \
   --prior-cov-rank 16 \
   --prior-mu-init sphere \
-  --prior-mu-init-radius 2 \
+  --prior-mu-init-radius 4 \
   --batch-emb-dim 0 \
   --batch-cond-drop-prob 0.0 \
   --lambda-batchless-recon 0 \
@@ -92,8 +92,8 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --mask-aug-policy simple \
   --mask-aug-min-frac 0 \
   --mask-aug-max-frac 0.5 \
-  --lambda-celltype-cls 2 \
-  --lambda-contrast 2 \
+  --lambda-celltype-cls 1 \
+  --lambda-contrast 0.5 \
   --lambda-real-recon 0.5 \
   --lambda-prior-pi-balance 0 \
   --lambda-prior-mu-spread 0 \
