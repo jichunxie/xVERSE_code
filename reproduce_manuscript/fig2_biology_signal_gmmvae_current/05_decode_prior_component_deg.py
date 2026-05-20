@@ -58,8 +58,38 @@ def parse_args():
     ap.add_argument("--output-dir", required=True)
     ap.add_argument("--model-family", default="main_mfa", choices=["auto", "main_energy", "main_mfa"])
     ap.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
-    ap.add_argument("--active-min-pi", type=float, default=0.02)
-    ap.add_argument("--active-top-k", type=int, default=0, help="Fallback/use top-K components by pi. 0 disables.")
+    ap.add_argument(
+        "--active-mode",
+        default="effective",
+        choices=["effective", "mass", "relative_uniform", "pi", "top_k"],
+        help=(
+            "How to select active components. effective: top ceil(K_eff * multiplier), "
+            "mass: top components covering active-mass, relative_uniform: pi >= ratio/K, "
+            "pi: fixed active-min-pi, top_k: fixed active-top-k."
+        ),
+    )
+    ap.add_argument("--active-min-pi", type=float, default=0.02, help="Fixed pi threshold used by --active-mode pi.")
+    ap.add_argument(
+        "--active-min-relative-uniform",
+        type=float,
+        default=0.5,
+        help="Relative-to-uniform threshold used by --active-mode relative_uniform: pi >= value / K.",
+    )
+    ap.add_argument(
+        "--active-mass",
+        type=float,
+        default=0.95,
+        help="Cumulative pi mass retained by --active-mode mass.",
+    )
+    ap.add_argument(
+        "--active-eff-multiplier",
+        type=float,
+        default=1.25,
+        help="Multiplier for K_eff=exp(H(pi)) used by --active-mode effective.",
+    )
+    ap.add_argument("--active-top-k", type=int, default=0, help="Fixed/top-up number of components by pi. 0 disables.")
+    ap.add_argument("--active-min-components", type=int, default=1, help="Minimum number of active components to keep.")
+    ap.add_argument("--active-max-components", type=int, default=0, help="Maximum number of active components to keep. 0 disables.")
     ap.add_argument("--top-genes", type=int, default=100)
     ap.add_argument("--factor-steps", default="-2,-1,1,2", help="Comma-separated factor traversal strengths.")
     ap.add_argument("--seed", type=int, default=0)
@@ -107,14 +137,74 @@ def gene_symbols_from_csv(path: str):
     return mapping
 
 
-def select_active_components(pi: np.ndarray, min_pi: float, top_k: int):
-    active = np.where(pi >= float(min_pi))[0]
-    if top_k > 0:
-        top = np.argsort(-pi)[: min(int(top_k), pi.size)]
+def mixture_effective_k(pi: np.ndarray):
+    pi = np.asarray(pi, dtype=np.float64)
+    pi = pi / np.clip(pi.sum(), 1e-12, None)
+    entropy = -np.sum(pi * np.log(np.clip(pi, 1e-12, None)))
+    return float(np.exp(entropy)), float(entropy)
+
+
+def select_active_components(
+    pi: np.ndarray,
+    mode: str,
+    min_pi: float,
+    relative_uniform: float,
+    mass: float,
+    eff_multiplier: float,
+    top_k: int,
+    min_components: int,
+    max_components: int,
+):
+    pi = np.asarray(pi, dtype=np.float64)
+    k_total = pi.size
+    order = np.argsort(-pi)
+    k_eff, pi_entropy = mixture_effective_k(pi)
+
+    if mode == "pi":
+        active = np.where(pi >= float(min_pi))[0]
+    elif mode == "relative_uniform":
+        threshold = float(relative_uniform) / max(k_total, 1)
+        active = np.where(pi >= threshold)[0]
+    elif mode == "mass":
+        target_mass = float(np.clip(mass, 0.0, 1.0))
+        cumsum = np.cumsum(pi[order])
+        n = int(np.searchsorted(cumsum, target_mass, side="left") + 1)
+        active = order[:n]
+    elif mode == "top_k":
+        n = int(top_k) if top_k > 0 else int(np.ceil(k_eff))
+        active = order[:n]
+    elif mode == "effective":
+        n = int(np.ceil(float(eff_multiplier) * k_eff))
+        active = order[:n]
+    else:
+        raise ValueError(f"Unknown active component selection mode: {mode}")
+
+    active = np.asarray(active, dtype=int)
+    if top_k > 0 and mode != "top_k":
+        top = order[: min(int(top_k), k_total)]
         active = np.array(sorted(set(active.tolist()) | set(top.tolist())), dtype=int)
+
+    min_components = max(1, int(min_components))
+    if active.size < min_components:
+        active = order[: min(min_components, k_total)]
+    if max_components > 0 and active.size > int(max_components):
+        active = order[: int(max_components)]
     if active.size == 0:
-        active = np.argsort(-pi)[: min(10, pi.size)]
-    return np.asarray(active, dtype=int)
+        active = order[: min(10, k_total)]
+
+    active = np.asarray(sorted(active.tolist()), dtype=int)
+    stats = {
+        "mode": mode,
+        "K": int(k_total),
+        "K_eff": k_eff,
+        "pi_entropy": pi_entropy,
+        "uniform_pi": 1.0 / max(k_total, 1),
+        "selected_mass": float(pi[active].sum()) if active.size else 0.0,
+        "selected_n": int(active.size),
+        "pi_min_selected": float(pi[active].min()) if active.size else 0.0,
+        "pi_max_selected": float(pi[active].max()) if active.size else 0.0,
+    }
+    return active, stats
 
 
 @torch.no_grad()
@@ -474,8 +564,26 @@ def main():
 
     prior = model.prior
     pi = torch.softmax(prior.pi_logits.detach().float(), dim=0).cpu().numpy()
-    active = select_active_components(pi, args.active_min_pi, args.active_top_k)
-    print(f"[Active] {len(active)}/{len(pi)} components: {active.tolist()}")
+    active, active_stats = select_active_components(
+        pi,
+        mode=args.active_mode,
+        min_pi=args.active_min_pi,
+        relative_uniform=args.active_min_relative_uniform,
+        mass=args.active_mass,
+        eff_multiplier=args.active_eff_multiplier,
+        top_k=args.active_top_k,
+        min_components=args.active_min_components,
+        max_components=args.active_max_components,
+    )
+    print(
+        "[Active] "
+        f"mode={active_stats['mode']}, selected={active_stats['selected_n']}/{active_stats['K']}, "
+        f"K_eff={active_stats['K_eff']:.2f}, mass={active_stats['selected_mass']:.3f}, "
+        f"uniform_pi={active_stats['uniform_pi']:.4g}, "
+        f"pi_selected[min/max]={active_stats['pi_min_selected']:.4g}/{active_stats['pi_max_selected']:.4g}"
+    )
+    print(f"[Active] components: {active.tolist()}")
+    pd.DataFrame([active_stats]).to_csv(output_dir / "active_selection_summary.csv", index=False)
 
     gene_symbols = {str(g): str(g) for g in gene_ids}
     gene_symbols.update(gene_symbols_from_csv(args.gene_symbol_csv))

@@ -20,7 +20,7 @@ export PYTHONUNBUFFERED=1
 
 COMPILED_ROOT="/hpc/group/xielab/xj58/xVerseAtlas/compiled_train_v1_all"
 CELLTYPE_CSV="/hpc/group/xielab/xj58/sparest_code/standard_type/cellxgene_cell_type_mapped.csv"
-RESULT_DIR="/hpc/group/xielab/xj58/pretrain_model_celltype/mfa_all_tissue0518_128x16_bio_ct_filter_kl3e-2-norm_v2_reweight_sharetheta"
+RESULT_DIR="/hpc/group/xielab/xj58/pretrain_model_celltype/mfa_all_tissue0518_256x16_bio_ct_filter_kl3e-2-norm_v2_reweight_sharetheta"
 
 NPROC_PER_NODE=$(python - <<'PY'
 import torch
@@ -64,16 +64,16 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --val-persistent-workers \
   --prefetch-factor 8 \
   --samples-per-id 500 \
-  --lr 3e-3 \
-  --prior-lr-multiplier 1 \
+  --lr 5e-3 \
+  --prior-lr-multiplier 0.5 \
   --weight-decay 1e-5 \
   --prior-type gmm \
   --recon-loss nb \
-  --latent-dim 128 \
-  --num-components 128 \
+  --latent-dim 256 \
+  --num-components 256 \
   --prior-cov-rank 16 \
   --prior-mu-init sphere \
-  --prior-mu-init-radius 4 \
+  --prior-mu-init-radius 2 \
   --batch-emb-dim 0 \
   --batch-cond-drop-prob 0.0 \
   --lambda-batchless-recon 0 \
@@ -82,7 +82,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --expr-hidden-dim 512 \
   --mask-hidden-dim 512 \
   --dec-hidden-dim 512 \
-  --beta-kl 3e-2 \
+  --beta-kl 2e-2 \
   --beta-u-kl-multiplier 1.0 \
   --beta-eps-kl-multiplier 1.0 \
   --beta-kl-warmup-epochs 10 \
@@ -93,7 +93,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --mask-aug-min-frac 0 \
   --mask-aug-max-frac 0.5 \
   --lambda-celltype-cls 0.5 \
-  --lambda-contrast 0.25 \
+  --lambda-contrast 0.75 \
   --lambda-real-recon 0.5 \
   --lambda-prior-pi-balance 0 \
   --lambda-prior-mu-spread 0 \
