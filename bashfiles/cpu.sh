@@ -44,9 +44,9 @@ else
   echo ">>> Reusing existing cell type language embeddings: ${TEXT_EMB_NPZ}"
 fi
 
-echo ">>> Updating celltype_id.npy in existing compiled dataset"
-stdbuf -oL -eL python -u -m main_mfa.update_compiled_celltype_ids \
-    --compiled-root "${COMPILED_ROOT}" \
-    --cell-type-csv "${CELLTYPE_CSV}" \
-    --splits train,val \
-    --backup
+# echo ">>> Updating celltype_id.npy in existing compiled dataset"
+# stdbuf -oL -eL python -u -m main_mfa.update_compiled_celltype_ids \
+#     --compiled-root "${COMPILED_ROOT}" \
+#     --cell-type-csv "${CELLTYPE_CSV}" \
+#     --splits train,val \
+#     --backup

@@ -11,8 +11,11 @@ CSV is passed as --cell-type-csv.
 """
 
 import argparse
+import json
 import os
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 import numpy as np
@@ -97,6 +100,47 @@ def generate_description(client, model: str, cid: str, name: str) -> str:
     return resp.choices[0].message.content.strip()
 
 
+def _openai_rest(api_key: str, endpoint: str, payload: dict):
+    req = urllib.request.Request(
+        f"https://api.openai.com/v1/{endpoint}",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"OpenAI API HTTP {e.code}: {body}") from e
+
+
+def generate_description_rest(api_key: str, model: str, cid: str, name: str) -> str:
+    prompt = (
+        "Write 3-5 concise scientific sentences describing this cell type for a single-cell biology model. "
+        "Mention core biological function, typical tissue/context if broadly known, and characteristic molecular or morphological features. "
+        "Do not overclaim. Return only the description.\n\n"
+        f"Cell ontology id: {cid}\n"
+        f"Cell type name: {name}"
+    )
+    data = _openai_rest(
+        api_key,
+        "chat/completions",
+        {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": "You are a precise cell biology ontology assistant."},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.2,
+        },
+    )
+    return data["choices"][0]["message"]["content"].strip()
+
+
 def embed_texts(client, model: str, texts, batch_size: int, sleep_s: float):
     embs = []
     for start in range(0, len(texts), batch_size):
@@ -109,12 +153,32 @@ def embed_texts(client, model: str, texts, batch_size: int, sleep_s: float):
     return np.asarray(embs, dtype=np.float32)
 
 
+def embed_texts_rest(api_key: str, model: str, texts, batch_size: int, sleep_s: float):
+    embs = []
+    for start in range(0, len(texts), batch_size):
+        batch = list(texts[start:start + batch_size])
+        data = _openai_rest(api_key, "embeddings", {"model": model, "input": batch})
+        embs.extend([item["embedding"] for item in data["data"]])
+        if sleep_s > 0:
+            time.sleep(sleep_s)
+        print(f"[Embed] {min(start + batch_size, len(texts))}/{len(texts)}")
+    return np.asarray(embs, dtype=np.float32)
+
+
 def main():
     args = parse_args()
-    from openai import OpenAI
 
     api_key = load_api_key(args.api_key_path)
-    client = OpenAI(api_key=api_key)
+    try:
+        from openai import OpenAI
+
+        client = OpenAI(api_key=api_key)
+        use_rest = False
+        print("[OpenAI] using openai Python package")
+    except ModuleNotFoundError:
+        client = None
+        use_rest = True
+        print("[OpenAI] openai package not installed; using urllib REST fallback")
 
     out_prefix = Path(args.output_prefix)
     out_prefix.parent.mkdir(parents=True, exist_ok=True)
@@ -128,7 +192,10 @@ def main():
         df = load_celltypes(args.cell_type_csv)
         desc_rows = []
         for i, row in df.iterrows():
-            desc = generate_description(client, args.chat_model, row["id"], row["name"])
+            if use_rest:
+                desc = generate_description_rest(api_key, args.chat_model, row["id"], row["name"])
+            else:
+                desc = generate_description(client, args.chat_model, row["id"], row["name"])
             desc_rows.append({**row.to_dict(), "description": desc})
             print(f"[Describe] {i + 1}/{len(df)} {row['id']} {row['name']}")
             if args.sleep > 0:
@@ -141,7 +208,10 @@ def main():
         f"Cell ontology id: {row.id}. Cell type name: {row.name}. {row.description}"
         for row in desc_df.itertuples(index=False)
     ]
-    embeddings = embed_texts(client, args.embedding_model, texts, args.batch_size, args.sleep)
+    if use_rest:
+        embeddings = embed_texts_rest(api_key, args.embedding_model, texts, args.batch_size, args.sleep)
+    else:
+        embeddings = embed_texts(client, args.embedding_model, texts, args.batch_size, args.sleep)
     np.savez_compressed(
         emb_npz,
         embeddings=embeddings,
