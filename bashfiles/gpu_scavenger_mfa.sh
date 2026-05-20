@@ -5,7 +5,7 @@
 #SBATCH -c 10                             
 #SBATCH --mem=100G                        
 #SBATCH -t 20:00:00                            
-#SBATCH -J scavenger-gpu
+#SBATCH -J meta+batch
 #SBATCH --output=/hpc/group/xielab/xj58/sbatch_output/%x_output_%j.txt  
 #SBATCH --error=/hpc/group/xielab/xj58/sbatch_output/%x_error_%j.txt  
 #SBATCH --mail-user=xj58@duke.edu                 
@@ -19,7 +19,7 @@ export PYTHONUNBUFFERED=1
 
 COMPILED_ROOT="/hpc/group/xielab/xj58/xVerseAtlas/compiled_train_v1_all"
 CELLTYPE_CSV="/hpc/group/xielab/xj58/sparest_code/standard_type/cellxgene_cell_type_mapped.csv"
-RESULT_DIR="/hpc/group/xielab/xj58/pretrain_model_celltype/mfa_all_tissue0518_128x16_bio_ct_filter_kl5e-2-norm_v2_reweight_sharetheta_meta"
+RESULT_DIR="/hpc/group/xielab/xj58/pretrain_model_celltype/mfa_all_tissue0518_128x16_bio_ct_filter_kl5e-2-norm_v2_reweight_sharetheta_meta+batch"
 
 NPROC_PER_NODE=$(python - <<'PY'
 import torch
@@ -73,9 +73,9 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --prior-cov-rank 16 \
   --prior-mu-init sphere \
   --prior-mu-init-radius 2 \
-  --batch-emb-dim 0 \
+  --batch-emb-dim 32 \
   --batch-cond-drop-prob 0.0 \
-  --lambda-batchless-recon 0 \
+  --lambda-batchless-recon 1 \
   --prior-logvar-min -4 \
   --prior-logvar-max 4 \
   --expr-hidden-dim 512 \
