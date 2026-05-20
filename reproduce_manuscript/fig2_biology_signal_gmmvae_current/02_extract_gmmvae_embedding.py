@@ -109,6 +109,31 @@ def detect_model_family(state, requested: str) -> str:
     return "main_energy"
 
 
+def _load_celltype_text_embeddings_from_args(saved_args: dict, state: dict):
+    path = saved_args.get("celltype_text_embedding_path", None)
+    if path is None or str(path).strip() == "":
+        if "celltype_text_embeddings" not in state:
+            return None
+        # Older or moved checkpoints may include the buffer but not the path.
+        return state["celltype_text_embeddings"].detach().cpu().float()
+    path = os.path.expanduser(str(path))
+    if not os.path.exists(path):
+        if "celltype_text_embeddings" in state:
+            print(f"[Load][WARN] celltype text embedding path missing, using checkpoint buffer: {path}")
+            return state["celltype_text_embeddings"].detach().cpu().float()
+        raise FileNotFoundError(f"celltype text embedding file not found: {path}")
+    if path.endswith(".npz"):
+        data = np.load(path, allow_pickle=True)
+        if "embeddings" not in data:
+            raise KeyError(f"{path} must contain an 'embeddings' array")
+        emb = data["embeddings"]
+    else:
+        emb = np.load(path, allow_pickle=True)
+    emb = np.asarray(emb, dtype=np.float32)
+    print(f"[Load] celltype text embeddings shape={emb.shape} from {path}")
+    return torch.from_numpy(emb)
+
+
 def build_model_from_ckpt(ckpt_path: str, device: torch.device):
     ckpt = torch.load(ckpt_path, map_location=device)
     saved_args = ckpt.get("args", {})
@@ -144,6 +169,9 @@ def build_model_from_ckpt(ckpt_path: str, device: torch.device):
         model_family = getattr(build_model_from_ckpt, "_requested_family")
     ModelCls = MFAMaskFiLMGMMVAE if model_family == "main_mfa" else EnergyMaskFiLMGMMVAE
     print(f"[Load] model_family={model_family}")
+    celltype_text_embeddings = None
+    if model_family == "main_mfa":
+        celltype_text_embeddings = _load_celltype_text_embeddings_from_args(saved_args, state)
 
     common_kwargs = dict(
         num_genes=int(saved_args.get("total_gene", 17999)),
@@ -166,7 +194,11 @@ def build_model_from_ckpt(ckpt_path: str, device: torch.device):
         recon_loss_type=str(saved_args.get("recon_loss", saved_args.get("recon_loss_type", "poisson"))),
     )
     if model_family == "main_mfa":
-        model = ModelCls(**common_kwargs).to(device)
+        model = ModelCls(
+            **common_kwargs,
+            celltype_text_embeddings=celltype_text_embeddings,
+            celltype_text_temperature=float(saved_args.get("celltype_text_temp", 0.1)),
+        ).to(device)
     else:
         model = ModelCls(**common_kwargs, tissue_emb_dim=tissue_emb_dim).to(device)
 
