@@ -3,7 +3,7 @@
 #SBATCH -A xielab                 
 #SBATCH --gres=gpu:1
 #SBATCH -c 20                             
-#SBATCH --mem=200G                        
+#SBATCH --mem=300G                        
 #SBATCH -t 20:00:00                            
 #SBATCH -J high
 #SBATCH --output=/hpc/group/xielab/xj58/sbatch_output/%x_output_%j.txt  
