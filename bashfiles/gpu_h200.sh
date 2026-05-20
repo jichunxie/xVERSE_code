@@ -12,37 +12,111 @@
 #SBATCH --mail-type=BEGIN,END,FAIL  
 #SBATCH --exclude=dcc-h200-gpu-05                 
 
-# Load environment
 source ~/.bashrc
 conda activate SpaRest
 
 cd /hpc/group/xielab/xj58/xVERSE_code
+export PYTHONUNBUFFERED=1
 
-DATA_ROOT="/hpc/group/xielab/xj58/xVerseAtlas/npz_tissue_dataset_donor"
 COMPILED_ROOT="/hpc/group/xielab/xj58/xVerseAtlas/compiled_train_v1_all"
-RESULT_DIR="/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_all_tissue3"
+CELLTYPE_CSV="/hpc/group/xielab/xj58/sparest_code/standard_type/cellxgene_cell_type_mapped.csv"
+RESULT_DIR="/hpc/group/xielab/xj58/pretrain_model_celltype/mfa_all_tissue0520_high"
 
-CKPT_PATH="${RESULT_DIR}/best_model.pth"
-FIG2_LIVER_DIR="/hpc/group/xielab/xj58/xVerse_results/fig2/liver"
-FIG2_BRAIN_DIR="/hpc/group/xielab/xj58/xVerse_results/fig2/brain"
-FIG2_GENE_IDS="/hpc/group/xielab/xj58/xVerseAtlas/npz_tissue_dataset_donor/ensg_keys_high_quality.txt"
-FIG2_OUT_DIR="/hpc/group/xielab/xj58/xVerse_results/fig2_gmmvae_current"
-FIG2_EVAL_DIR="${FIG2_OUT_DIR}/evaluation_scib_full"
-FIG2_OLD_EVAL_DIR="/hpc/group/xielab/xj58/xVerse_results/fig2/evaluation"
+NPROC_PER_NODE=$(python - <<'PY'
+import torch
+try:
+    n = int(torch.cuda.device_count())
+except Exception:
+    n = 0
+print(max(1, n))
+PY
+)
 
-echo ">>> Running Task: Extract GMVAE embeddings on fig2 donor h5ad files"
-python reproduce_manuscript/fig2_biology_signal_gmmvae_current/02_extract_gmmvae_embedding.py \
-    --ckpt "${CKPT_PATH}" \
-    --gene-ids-path "${FIG2_GENE_IDS}" \
-    --liver-dir "${FIG2_LIVER_DIR}" \
-    --brain-dir "${FIG2_BRAIN_DIR}" \
-    --output-dir "${FIG2_OUT_DIR}" \
-    --embedding-key xVerse_gmmvae
+if [ -z "${NPROC_PER_NODE}" ]; then
+  NPROC_PER_NODE=1
+fi
 
-echo ">>> Running Task: Evaluate FMs + GMVAE with full scIB metrics"
-python reproduce_manuscript/fig2_biology_signal_gmmvae_current/03_evaluate_scib_full.py \
-    --liver-dir "${FIG2_LIVER_DIR}" \
-    --brain-dir "${FIG2_BRAIN_DIR}" \
-    --output-dir "${FIG2_EVAL_DIR}" \
-    --old-eval-dir "${FIG2_OLD_EVAL_DIR}" \
-    --gmm-key xVerse_gmmvae
+echo ">>> Running pretraining"
+echo ">>> NPROC_PER_NODE=${NPROC_PER_NODE}"
+echo ">>> COMPILED_ROOT=${COMPILED_ROOT}"
+echo ">>> RESULT_DIR=${RESULT_DIR}"
+
+if [ "${NPROC_PER_NODE}" -le 1 ]; then
+  echo ">>> Single GPU mode: use python -m (no torchrun)"
+  RUN_CMD=(python -u -m main_mfa.train_pantissue)
+else
+  echo ">>> Multi-GPU mode: use torchrun"
+  RUN_CMD=(torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" -m main_mfa.train_pantissue)
+fi
+
+stdbuf -oL -eL "${RUN_CMD[@]}" \
+  --compiled-dataset-root "${COMPILED_ROOT}" \
+  --compiled-max-cached-shards 4092 \
+  --sampler-shard-reorder-window 4096 \
+  --cell-type-csv "${CELLTYPE_CSV}" \
+  --result-dir "${RESULT_DIR}" \
+  --num-epochs 200 \
+  --val-every 10 \
+  --batch-size 1024 \
+  --val-batch-size 1024 \
+  --num-workers 8 \
+  --val-num-workers 8 \
+  --val-persistent-workers \
+  --prefetch-factor 8 \
+  --samples-per-id 500 \
+  --lr 5e-3 \
+  --prior-lr-multiplier 0.5 \
+  --weight-decay 1e-5 \
+  --prior-type gmm \
+  --recon-loss nb \
+  --latent-dim 128 \
+  --num-components 256 \
+  --prior-cov-rank 16 \
+  --prior-mu-init sphere \
+  --prior-mu-init-radius 4 \
+  --batch-emb-dim 0 \
+  --batch-cond-drop-prob 0.0 \
+  --lambda-batchless-recon 0 \
+  --prior-logvar-min -4 \
+  --prior-logvar-max 4 \
+  --expr-hidden-dim 512 \
+  --mask-hidden-dim 512 \
+  --dec-hidden-dim 512 \
+  --beta-kl 5e-2 \
+  --beta-u-kl-multiplier 1.0 \
+  --beta-eps-kl-multiplier 1.0 \
+  --beta-kl-warmup-epochs 10 \
+  --beta-kl-warmup-start 5e-2 \
+  --recon-observed-only \
+  --mask-aug-prob 1.0 \
+  --mask-aug-policy simple \
+  --mask-aug-min-frac 0 \
+  --mask-aug-max-frac 0.5 \
+  --lambda-celltype-cls 5 \
+  --lambda-contrast 2 \
+  --lambda-real-recon 0.5 \
+  --lambda-prior-pi-balance 0 \
+  --lambda-prior-mu-spread 0 \
+  --prior-mu-spread-tau 0 \
+  --lambda-prior-logvar-l2 0 \
+  --lambda-prior-factor-l2 0 \
+  --prior-logvar-target 0 \
+  --prior-init-epoch 0 \
+  --prior-init-samples 500000 \
+  --prior-init-kmeans-iters 20 \
+  --prior-init-logvar-mode shrink \
+  --prior-init-logvar-value 0 \
+  --prior-init-logvar-shrink-alpha 0.1 \
+  --prior-init-logvar-min -4 \
+  --prior-init-logvar-max 2 \
+  --no-prior-init-factor-pca \
+  --prior-init-factor-std 0.01 \
+  --lambda-post-c-balance 0 \
+  --recon-gene-weight-mode none \
+  --recon-gene-weight-alpha 0 \
+  --recon-cell-weight-mode none \
+  --recon-cell-weight-alpha 0.5 \
+  --recon-cell-weight-clusters 32 \
+  --recon-cell-weight-kmeans-iters 5 \
+  --contrast-temp 0.1 \
+  --resume-from last
