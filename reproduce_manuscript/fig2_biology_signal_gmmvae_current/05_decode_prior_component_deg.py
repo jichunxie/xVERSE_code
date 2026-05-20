@@ -60,10 +60,11 @@ def parse_args():
     ap.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
     ap.add_argument(
         "--active-mode",
-        default="effective",
-        choices=["effective", "mass", "relative_uniform", "pi", "top_k"],
+        default="background",
+        choices=["background", "effective", "mass", "relative_uniform", "pi", "top_k"],
         help=(
-            "How to select active components. effective: top ceil(K_eff * multiplier), "
+            "How to select active components. background: components above the low-pi background plateau, "
+            "effective: top ceil(K_eff * multiplier), "
             "mass: top components covering active-mass, relative_uniform: pi >= ratio/K, "
             "pi: fixed active-min-pi, top_k: fixed active-top-k."
         ),
@@ -86,6 +87,24 @@ def parse_args():
         type=float,
         default=1.25,
         help="Multiplier for K_eff=exp(H(pi)) used by --active-mode effective.",
+    )
+    ap.add_argument(
+        "--active-background-tail-frac",
+        type=float,
+        default=0.5,
+        help="Bottom fraction of sorted pi used to estimate inactive background for --active-mode background.",
+    )
+    ap.add_argument(
+        "--active-background-fold",
+        type=float,
+        default=1.5,
+        help="Select pi >= background_median * this value for --active-mode background.",
+    )
+    ap.add_argument(
+        "--active-background-mad-multiplier",
+        type=float,
+        default=6.0,
+        help="Also require pi above background_median + multiplier * MAD for --active-mode background.",
     )
     ap.add_argument("--active-top-k", type=int, default=0, help="Fixed/top-up number of components by pi. 0 disables.")
     ap.add_argument("--active-min-components", type=int, default=1, help="Minimum number of active components to keep.")
@@ -151,6 +170,9 @@ def select_active_components(
     relative_uniform: float,
     mass: float,
     eff_multiplier: float,
+    background_tail_frac: float,
+    background_fold: float,
+    background_mad_multiplier: float,
     top_k: int,
     min_components: int,
     max_components: int,
@@ -159,8 +181,21 @@ def select_active_components(
     k_total = pi.size
     order = np.argsort(-pi)
     k_eff, pi_entropy = mixture_effective_k(pi)
+    threshold = None
+    background_median = None
+    background_mad = None
 
-    if mode == "pi":
+    if mode == "background":
+        tail_n = int(np.ceil(float(np.clip(background_tail_frac, 0.05, 0.95)) * k_total))
+        tail = pi[order[-max(1, tail_n):]]
+        background_median = float(np.median(tail))
+        background_mad = float(np.median(np.abs(tail - background_median)))
+        fold_threshold = background_median * float(background_fold)
+        mad_threshold = background_median + float(background_mad_multiplier) * background_mad
+        threshold = max(fold_threshold, mad_threshold)
+        active = np.where(pi >= threshold)[0]
+    elif mode == "pi":
+        threshold = float(min_pi)
         active = np.where(pi >= float(min_pi))[0]
     elif mode == "relative_uniform":
         threshold = float(relative_uniform) / max(k_total, 1)
@@ -203,6 +238,9 @@ def select_active_components(
         "selected_n": int(active.size),
         "pi_min_selected": float(pi[active].min()) if active.size else 0.0,
         "pi_max_selected": float(pi[active].max()) if active.size else 0.0,
+        "threshold": float(threshold) if threshold is not None else np.nan,
+        "background_median": float(background_median) if background_median is not None else np.nan,
+        "background_mad": float(background_mad) if background_mad is not None else np.nan,
     }
     return active, stats
 
@@ -571,6 +609,9 @@ def main():
         relative_uniform=args.active_min_relative_uniform,
         mass=args.active_mass,
         eff_multiplier=args.active_eff_multiplier,
+        background_tail_frac=args.active_background_tail_frac,
+        background_fold=args.active_background_fold,
+        background_mad_multiplier=args.active_background_mad_multiplier,
         top_k=args.active_top_k,
         min_components=args.active_min_components,
         max_components=args.active_max_components,
@@ -580,6 +621,8 @@ def main():
         f"mode={active_stats['mode']}, selected={active_stats['selected_n']}/{active_stats['K']}, "
         f"K_eff={active_stats['K_eff']:.2f}, mass={active_stats['selected_mass']:.3f}, "
         f"uniform_pi={active_stats['uniform_pi']:.4g}, "
+        f"threshold={active_stats['threshold']:.4g}, "
+        f"background={active_stats['background_median']:.4g}+/-{active_stats['background_mad']:.4g}, "
         f"pi_selected[min/max]={active_stats['pi_min_selected']:.4g}/{active_stats['pi_max_selected']:.4g}"
     )
     print(f"[Active] components: {active.tolist()}")
