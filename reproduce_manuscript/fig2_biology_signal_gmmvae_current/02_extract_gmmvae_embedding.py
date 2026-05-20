@@ -82,7 +82,7 @@ def parse_args():
     ap.add_argument("--prior-viz-min-pi", type=float, default=0.02, help="Only draw active components with pi >= this threshold in prior figures.")
     ap.add_argument("--prior-viz-factor-scale", type=float, default=1.0, help="Scale for projected MFA factor arrows.")
     ap.add_argument("--prior-viz-grid", type=int, default=120, help="Grid size for projected prior density surface.")
-    ap.add_argument("--prior-viz-sample-n", type=int, default=5000, help="Number of true high-dimensional prior samples for UMAP/KDE visualization.")
+    ap.add_argument("--prior-viz-sample-n", type=int, default=20000, help="Number of true high-dimensional prior samples for UMAP/KDE visualization.")
     ap.add_argument(
         "--prior-viz-sample-embed",
         default="auto",
@@ -468,6 +468,32 @@ def visualize_prior(
             }
         )
         sample_df.to_csv(output_dir / f"{stem}_embedding.csv", index=False)
+
+        fig, ax = plt.subplots(figsize=(8, 7), dpi=180)
+        sca = ax.scatter(
+            sample_emb[:, 0],
+            sample_emb[:, 1],
+            c=prior_sample_comp,
+            cmap="tab20",
+            s=2,
+            alpha=0.35,
+            linewidth=0,
+        )
+        for idx in component_idx:
+            mask = prior_sample_comp == idx
+            if not np.any(mask):
+                continue
+            cx = float(np.median(sample_emb[mask, 0]))
+            cy = float(np.median(sample_emb[mask, 1]))
+            ax.scatter([cx], [cy], c="white", s=70, edgecolor="black", linewidth=0.6, zorder=4)
+            ax.text(cx, cy, str(idx), fontsize=7, ha="center", va="center", zorder=5)
+        ax.set_xlabel(f"{sample_method.upper()}1")
+        ax.set_ylabel(f"{sample_method.upper()}2")
+        ax.set_title(f"Raw high-dimensional prior samples ({title_suffix}, {sample_method}, n={int(sample_n)})")
+        ax.set_aspect("equal", adjustable="datalim")
+        fig.tight_layout()
+        fig.savefig(output_dir / f"{stem}_raw_{sample_method}.png")
+        plt.close(fig)
 
         fig, ax = plt.subplots(figsize=(8, 7), dpi=180)
         kde_payload = None
