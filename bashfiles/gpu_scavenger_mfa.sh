@@ -56,8 +56,8 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --result-dir "${RESULT_DIR}" \
   --num-epochs 100 \
   --val-every 10 \
-  --batch-size 1024 \
-  --val-batch-size 1024 \
+  --batch-size 256 \
+  --val-batch-size 256 \
   --num-workers 8 \
   --val-num-workers 8 \
   --val-persistent-workers \
