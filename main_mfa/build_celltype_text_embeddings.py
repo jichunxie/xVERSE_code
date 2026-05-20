@@ -81,12 +81,11 @@ def load_celltypes(path: str) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def generate_description(client, model: str, cid: str, name: str) -> str:
+def generate_description(client, model: str, name: str) -> str:
     prompt = (
         "Write 3-5 concise scientific sentences describing this cell type for a single-cell biology model. "
         "Mention core biological function, typical tissue/context if broadly known, and characteristic molecular or morphological features. "
         "Do not overclaim. Return only the description.\n\n"
-        f"Cell ontology id: {cid}\n"
         f"Cell type name: {name}"
     )
     resp = client.chat.completions.create(
@@ -118,12 +117,11 @@ def _openai_rest(api_key: str, endpoint: str, payload: dict):
         raise RuntimeError(f"OpenAI API HTTP {e.code}: {body}") from e
 
 
-def generate_description_rest(api_key: str, model: str, cid: str, name: str) -> str:
+def generate_description_rest(api_key: str, model: str, name: str) -> str:
     prompt = (
         "Write 3-5 concise scientific sentences describing this cell type for a single-cell biology model. "
         "Mention core biological function, typical tissue/context if broadly known, and characteristic molecular or morphological features. "
         "Do not overclaim. Return only the description.\n\n"
-        f"Cell ontology id: {cid}\n"
         f"Cell type name: {name}"
     )
     data = _openai_rest(
@@ -193,9 +191,9 @@ def main():
         desc_rows = []
         for i, row in df.iterrows():
             if use_rest:
-                desc = generate_description_rest(api_key, args.chat_model, row["id"], row["name"])
+                desc = generate_description_rest(api_key, args.chat_model, row["name"])
             else:
-                desc = generate_description(client, args.chat_model, row["id"], row["name"])
+                desc = generate_description(client, args.chat_model, row["name"])
             desc_rows.append({**row.to_dict(), "description": desc})
             print(f"[Describe] {i + 1}/{len(df)} {row['id']} {row['name']}")
             if args.sleep > 0:
@@ -205,7 +203,7 @@ def main():
         print(f"[Write] {desc_csv}")
 
     texts = [
-        f"Cell ontology id: {row.id}. Cell type name: {row.name}. {row.description}"
+        f"Cell type name: {row.name}. {row.description}"
         for row in desc_df.itertuples(index=False)
     ]
     if use_rest:
