@@ -6,12 +6,15 @@ This script diagnoses the prior itself only; it does not load cell h5ad files.
 
 Outputs:
 - active_components.csv
+- component_readable_summary.csv
 - decoded_center_top_genes.csv
 - decoded_center_vs_rest_top_genes.csv
 - decoded_center_log1p_rate_corr.csv
 - factor_direction_summary.csv
+- factor_direction_readable_summary.csv
 - factor_direction_delta_top_genes.csv
 - factor_direction_delta_corr.csv
+- prior_component_direction_report.md
 """
 
 import argparse
@@ -141,6 +144,42 @@ def top_rows(values, gene_ids, gene_symbols, component, name, top_n):
     return rows
 
 
+def _gene_label(gene_id, gene_symbols):
+    gid = str(gene_id)
+    symbol = gene_symbols.get(gid, gid)
+    return symbol if symbol == gid else f"{symbol}|{gid}"
+
+
+def _gene_score_list(values, order, gene_ids, gene_symbols, n=10, signed=True):
+    parts = []
+    for idx in list(order)[:n]:
+        gid = str(gene_ids[idx])
+        label = gene_symbols.get(gid, gid)
+        score = float(values[idx])
+        if signed:
+            parts.append(f"{label}({score:+.3g})")
+        else:
+            parts.append(f"{label}({score:.3g})")
+    return "; ".join(parts)
+
+
+def _top_center_genes(values, gene_ids, gene_symbols, n=10):
+    order = np.argsort(-values)
+    return _gene_score_list(values, order, gene_ids, gene_symbols, n=n, signed=False)
+
+
+def _top_up_genes(delta, gene_ids, gene_symbols, n=10):
+    return _gene_score_list(delta, np.argsort(-delta), gene_ids, gene_symbols, n=n, signed=True)
+
+
+def _top_down_genes(delta, gene_ids, gene_symbols, n=10):
+    return _gene_score_list(delta, np.argsort(delta), gene_ids, gene_symbols, n=n, signed=True)
+
+
+def _top_changed_genes(delta, gene_ids, gene_symbols, n=10):
+    return _gene_score_list(delta, np.argsort(-np.abs(delta)), gene_ids, gene_symbols, n=n, signed=True)
+
+
 def _safe_corrcoef(x: np.ndarray):
     x = np.asarray(x, dtype=np.float64)
     if x.ndim != 2 or x.shape[0] < 2:
@@ -175,6 +214,8 @@ def decode_prior(model, gene_ids, gene_symbols, active, output_dir: Path, top_n:
     active_rows = []
     center_rows = []
     factor_rows = []
+    component_readable_rows = []
+    factor_readable_rows = []
     center_rate_all, center_logits_all, lib_all = decode_z(model, mu[active])
     center_rate_np = center_rate_all.cpu().numpy()
     center_lograte_np = np.log1p(center_rate_np)
@@ -219,6 +260,10 @@ def decode_prior(model, gene_ids, gene_symbols, active, output_dir: Path, top_n:
         )
 
     for j, k in enumerate(active):
+        if center_vs_rest_delta:
+            delta = center_vs_rest_delta[j]
+        else:
+            delta = np.zeros_like(center_lograte_np[j])
         center_rows.extend(top_rows(center_lograte_np[j], gene_ids, gene_symbols, int(k), "center_log1p_rate", top_n))
         center_rows.extend(top_rows(center_logits_np[j], gene_ids, gene_symbols, int(k), "center_gene_logits", top_n))
         active_rows.append(
@@ -227,6 +272,18 @@ def decode_prior(model, gene_ids, gene_symbols, active, output_dir: Path, top_n:
                 "pi": float(pi[k]),
                 "library_size_decoded": float(lib_all[j].item()),
                 "mu_norm": float(mu[k].norm().item()),
+            }
+        )
+        component_readable_rows.append(
+            {
+                "component": int(k),
+                "pi": float(pi[k]),
+                "library_size_decoded": float(lib_all[j].item()),
+                "mu_norm": float(mu[k].norm().item()),
+                "top_center_genes": _top_center_genes(center_lograte_np[j], gene_ids, gene_symbols, n=min(12, top_n)),
+                "top_genes_higher_than_other_centers": _top_up_genes(delta, gene_ids, gene_symbols, n=min(12, top_n)),
+                "top_genes_lower_than_other_centers": _top_down_genes(delta, gene_ids, gene_symbols, n=min(12, top_n)),
+                "top_changed_vs_other_centers": _top_changed_genes(delta, gene_ids, gene_symbols, n=min(12, top_n)),
             }
         )
 
@@ -273,6 +330,27 @@ def decode_prior(model, gene_ids, gene_symbols, active, output_dir: Path, top_n:
                         ),
                     }
                 )
+                factor_readable_rows.append(
+                    {
+                        "component": int(k),
+                        "pi": float(pi[k]),
+                        "factor": int(r),
+                        "factor_strength": strength,
+                        "effect_l2_log1p_rate": float(np.linalg.norm(delta_lograte)),
+                        "effect_abs_mean_log1p_rate": float(np.mean(np.abs(delta_lograte))),
+                        "effect_l2_gene_logits": float(np.linalg.norm(delta_logits)),
+                        "library_center": float(lib_center.item()),
+                        "library_plus": float(lib_plus.item()),
+                        "library_minus": float(lib_minus.item()),
+                        "top_up_genes_plus_vs_minus": _top_up_genes(
+                            delta_lograte, gene_ids, gene_symbols, n=min(12, top_n)
+                        ),
+                        "top_down_genes_plus_vs_minus": _top_down_genes(
+                            delta_lograte, gene_ids, gene_symbols, n=min(12, top_n)
+                        ),
+                        "top_changed_genes": _top_changed_genes(delta_lograte, gene_ids, gene_symbols, n=min(12, top_n)),
+                    }
+                )
                 for step in factor_steps:
                     z = (mu[k] + float(step) * direction).unsqueeze(0)
                     rate, _, lib = decode_z(model, z)
@@ -311,6 +389,10 @@ def decode_prior(model, gene_ids, gene_symbols, active, output_dir: Path, top_n:
                     )
 
     pd.DataFrame(active_rows).to_csv(output_dir / "active_components.csv", index=False)
+    component_readable_df = pd.DataFrame(component_readable_rows)
+    factor_readable_df = pd.DataFrame(factor_readable_rows)
+    component_readable_df.to_csv(output_dir / "component_readable_summary.csv", index=False)
+    factor_readable_df.to_csv(output_dir / "factor_direction_readable_summary.csv", index=False)
     pd.DataFrame(center_rows).to_csv(output_dir / "decoded_center_top_genes.csv", index=False)
     pd.DataFrame(factor_rows).to_csv(output_dir / "factor_direction_top_genes.csv", index=False)
     pd.DataFrame(factor_summary).to_csv(output_dir / "factor_direction_summary.csv", index=False)
@@ -322,7 +404,59 @@ def decode_prior(model, gene_ids, gene_symbols, active, output_dir: Path, top_n:
         pd.DataFrame(delta_corr, index=factor_delta_names, columns=factor_delta_names).to_csv(
             output_dir / "factor_direction_delta_corr.csv"
         )
+    _write_markdown_report(output_dir / "prior_component_direction_report.md", component_readable_df, factor_readable_df)
     return pd.DataFrame(active_rows)
+
+
+def _write_markdown_report(path: Path, component_df: pd.DataFrame, factor_df: pd.DataFrame):
+    lines = [
+        "# Prior Component / Factor Direction Report",
+        "",
+        "This report is a human-readable summary of the decoded prior. Scores in parentheses are log1p-rate values or plus-minus log1p-rate deltas.",
+        "",
+    ]
+    if component_df.empty:
+        lines.append("No active components were decoded.")
+        path.write_text("\n".join(lines) + "\n")
+        return
+
+    component_df = component_df.sort_values("pi", ascending=False)
+    for _, comp in component_df.iterrows():
+        k = int(comp["component"])
+        lines.extend(
+            [
+                f"## Component {k}",
+                "",
+                f"- pi: {float(comp['pi']):.4g}",
+                f"- decoded library size: {float(comp['library_size_decoded']):.4g}",
+                f"- mu norm: {float(comp['mu_norm']):.4g}",
+                f"- center top genes: {comp['top_center_genes']}",
+                f"- higher than other centers: {comp['top_genes_higher_than_other_centers']}",
+                f"- lower than other centers: {comp['top_genes_lower_than_other_centers']}",
+                "",
+            ]
+        )
+        sub = factor_df[factor_df["component"].astype(int) == k].copy() if not factor_df.empty else pd.DataFrame()
+        if sub.empty:
+            lines.append("No factor directions found for this component.")
+            lines.append("")
+            continue
+        sub = sub.sort_values("effect_l2_log1p_rate", ascending=False)
+        for _, row in sub.iterrows():
+            lines.extend(
+                [
+                    f"### Component {k}, factor {int(row['factor'])}",
+                    "",
+                    f"- factor strength: {float(row['factor_strength']):.4g}",
+                    f"- decoded effect L2: {float(row['effect_l2_log1p_rate']):.4g}",
+                    f"- decoded effect abs mean: {float(row['effect_abs_mean_log1p_rate']):.4g}",
+                    f"- library center/plus/minus: {float(row['library_center']):.4g} / {float(row['library_plus']):.4g} / {float(row['library_minus']):.4g}",
+                    f"- plus direction genes: {row['top_up_genes_plus_vs_minus']}",
+                    f"- minus direction genes: {row['top_down_genes_plus_vs_minus']}",
+                    "",
+                ]
+            )
+    path.write_text("\n".join(lines) + "\n")
 
 
 def main():
