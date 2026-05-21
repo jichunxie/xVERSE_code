@@ -312,10 +312,22 @@ def _embed_prior_samples(samples: np.ndarray, method: str = "auto", seed: int = 
     return coords, "pca"
 
 
-def _sample_mfa_prior(mu: np.ndarray, logvar: np.ndarray, factor: np.ndarray, pi: np.ndarray, active_idx: np.ndarray, n_sample: int, seed: int = 0):
+def _sample_mfa_prior(
+    mu: np.ndarray,
+    logvar: np.ndarray,
+    factor: np.ndarray,
+    pi: np.ndarray,
+    active_idx: np.ndarray,
+    n_sample: int,
+    seed: int = 0,
+    uniform_component_weight: bool = False,
+):
     rng = np.random.default_rng(seed)
-    active_pi = pi[active_idx]
-    active_pi = active_pi / np.clip(active_pi.sum(), 1e-12, None)
+    if bool(uniform_component_weight):
+        active_pi = np.ones(active_idx.shape[0], dtype=np.float64) / max(int(active_idx.shape[0]), 1)
+    else:
+        active_pi = pi[active_idx]
+        active_pi = active_pi / np.clip(active_pi.sum(), 1e-12, None)
     comp = rng.choice(active_idx, size=int(n_sample), replace=True, p=active_pi)
     samples = np.zeros((int(n_sample), mu.shape[1]), dtype=np.float32)
     for idx in active_idx:
@@ -491,7 +503,13 @@ def visualize_prior(
     fig.savefig(output_dir / "prior_mu_active_mds_distances.png")
     plt.close(fig)
 
-    def _plot_prior_sample_kde(component_idx: np.ndarray, stem: str, title_suffix: str, seed: int):
+    def _plot_prior_sample_kde(
+        component_idx: np.ndarray,
+        stem: str,
+        title_suffix: str,
+        seed: int,
+        uniform_component_weight: bool = False,
+    ):
         prior_samples, prior_sample_comp = _sample_mfa_prior(
             mu=mu,
             logvar=logvar,
@@ -500,7 +518,18 @@ def visualize_prior(
             active_idx=component_idx,
             n_sample=int(sample_n),
             seed=int(seed),
+            uniform_component_weight=bool(uniform_component_weight),
         )
+        component_counts = pd.Series(prior_sample_comp).value_counts().sort_index()
+        component_weight_df = pd.DataFrame(
+            {
+                "component": component_counts.index.astype(int),
+                "sample_count": component_counts.values.astype(int),
+                "sample_fraction": component_counts.values.astype(float) / max(float(component_counts.values.sum()), 1.0),
+                "original_pi": pi[component_counts.index.astype(int)],
+            }
+        )
+        component_weight_df.to_csv(output_dir / f"{stem}_sample_component_weights.csv", index=False)
         sample_emb, sample_method = _embed_prior_samples(prior_samples, method=sample_embed, seed=int(seed))
         sample_df = pd.DataFrame(
             {
@@ -633,6 +662,13 @@ def visualize_prior(
 
     if int(sample_n) > 0:
         _plot_prior_sample_kde(active_idx, "prior_sample_active", "active components", seed=0)
+        _plot_prior_sample_kde(
+            active_idx,
+            "prior_sample_active_uniform",
+            "active components, uniform component weights",
+            seed=2,
+            uniform_component_weight=True,
+        )
         _plot_prior_sample_kde(np.arange(k, dtype=int), "prior_sample_all", "all components", seed=1)
         # Backward-compatible copies for scripts expecting the old filenames.
         shutil.copyfile(output_dir / "prior_sample_active_embedding.csv", output_dir / "prior_sample_embedding.csv")
