@@ -73,7 +73,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --prior-type gmm \
   --recon-loss nb \
   --latent-dim 128 \
-  --num-components 64 \
+  --num-components 128 \
   --prior-cov-rank 8 \
   --prior-mu-init sphere \
   --prior-mu-init-radius 4 \
@@ -85,11 +85,11 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --expr-hidden-dim 512 \
   --mask-hidden-dim 512 \
   --dec-hidden-dim 512 \
-  --beta-kl 1e-1 \
+  --beta-kl 5e-2 \
   --beta-u-kl-multiplier 1.0 \
   --beta-eps-kl-multiplier 2.0 \
   --beta-kl-warmup-epochs 10 \
-  --beta-kl-warmup-start 1e-1 \
+  --beta-kl-warmup-start 5e-2 \
   --recon-observed-only \
   --mask-aug-prob 1.0 \
   --mask-aug-policy simple \
