@@ -58,7 +58,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --cell-type-csv "${CELLTYPE_CSV}" \
   --result-dir "${RESULT_DIR}" \
   --num-epochs 200 \
-  --val-every 10 \
+  --val-every 1 \
   --batch-size 1024 \
   --val-batch-size 1024 \
   --num-workers 8 \
@@ -66,13 +66,14 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --val-persistent-workers \
   --prefetch-factor 8 \
   --samples-per-id 500 \
-  --lr 1e-3 \
-  --prior-lr-multiplier 0.3 \
+  --lr 6e-3 \
+  --prior-lr-multiplier 1 \
+  --epoch-lr-gamma 0.9 \
   --weight-decay 1e-5 \
   --prior-type gmm \
   --recon-loss nb \
   --latent-dim 128 \
-  --num-components 128 \
+  --num-components 32 \
   --prior-cov-rank 8 \
   --prior-mu-init sphere \
   --prior-mu-init-radius 4 \
@@ -84,11 +85,11 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --expr-hidden-dim 512 \
   --mask-hidden-dim 512 \
   --dec-hidden-dim 512 \
-  --beta-kl 5e-2 \
+  --beta-kl 2e-2 \
   --beta-u-kl-multiplier 1.0 \
   --beta-eps-kl-multiplier 1.0 \
   --beta-kl-warmup-epochs 2 \
-  --beta-kl-warmup-start 5e-2 \
+  --beta-kl-warmup-start 2e-2 \
   --recon-observed-only \
   --mask-aug-prob 1.0 \
   --mask-aug-policy simple \
@@ -97,7 +98,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --lambda-celltype-cls 3 \
   --celltype-text-embedding-path "${CELLTYPE_TEXT_EMB}" \
   --celltype-text-temp 0.2 \
-  --lambda-contrast 3 \
+  --lambda-contrast 2 \
   --lambda-real-recon 0.5 \
   --lambda-prior-pi-balance 0 \
   --lambda-prior-mu-spread 0 \

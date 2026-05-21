@@ -114,6 +114,8 @@ def parse_args():
     parser.add_argument("--scheduler-patience", type=int, default=3, help="LR scheduler patience.")
     parser.add_argument("--scheduler-threshold", type=float, default=1e-4, help="LR scheduler threshold.")
     parser.add_argument("--scheduler-min-lr", type=float, default=1e-6, help="LR scheduler minimum LR.")
+    parser.add_argument("--epoch-lr-gamma", type=float, default=1.0,
+                        help="Multiply every optimizer param-group LR by this value after each epoch. 1.0 disables fixed epoch decay.")
     parser.add_argument("--seed", type=int, default=42, help="Random seed.")
     parser.add_argument("--last-ckpt-name", default="last_model.pth", help="Filename for last checkpoint.")
     parser.add_argument("--best-ckpt-name", default="best_model.pth", help="Filename for best checkpoint.")
@@ -574,6 +576,18 @@ def _format_optimizer_lrs(optimizer) -> str:
         name = group.get("name", f"group{i}")
         parts.append(f"{name}={float(group['lr']):.6g}")
     return ", ".join(parts)
+
+
+def _apply_epoch_lr_decay(optimizer, gamma: float, min_lr: float) -> bool:
+    gamma = float(gamma)
+    if gamma <= 0:
+        raise ValueError(f"--epoch-lr-gamma must be > 0, got {gamma}")
+    if abs(gamma - 1.0) < 1e-12:
+        return False
+    min_lr = max(0.0, float(min_lr))
+    for group in optimizer.param_groups:
+        group["lr"] = max(float(group["lr"]) * gamma, min_lr)
+    return True
 
 
 def _collect_prior_init_embeddings(model, train_loader, device, max_samples: int):
@@ -1410,7 +1424,6 @@ def main():
             val_metric = val_loss_full
 
             scheduler.step(val_metric)
-            log(f"[Epoch {epoch_id}] Current Learning Rate: {_format_optimizer_lrs(optimizer)}")
 
             if val_metric < best_val_metric and is_main_process(rank):
                 best_val_metric = val_metric
@@ -1427,6 +1440,13 @@ def main():
                 log(f"[Best Model] Updated at epoch {epoch_id} with metric={val_metric:.4f}")
         else:
             log(f"[Epoch {epoch_id}] Skip validation (val_every={args.val_every}).")
+
+        if _apply_epoch_lr_decay(optimizer, args.epoch_lr_gamma, args.scheduler_min_lr):
+            log(
+                f"[Epoch {epoch_id}] Applied epoch LR decay gamma={args.epoch_lr_gamma:g}; "
+                f"next Learning Rate: {_format_optimizer_lrs(optimizer)}"
+            )
+        else:
             log(f"[Epoch {epoch_id}] Current Learning Rate: {_format_optimizer_lrs(optimizer)}")
 
         if is_main_process(rank):
