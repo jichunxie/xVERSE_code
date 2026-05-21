@@ -21,7 +21,7 @@ import json
 import csv
 import numpy as np
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 from torch.utils.data.distributed import DistributedSampler
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
@@ -87,6 +87,8 @@ def parse_args():
     parser.add_argument("--total-gene", type=int, default=17999, help="Total number of genes.")
     parser.add_argument("--num-epochs", type=int, default=100, help="Training epochs.")
     parser.add_argument("--val-every", type=int, default=1, help="Run validation every N epochs.")
+    parser.add_argument("--val-fraction", type=float, default=1.0,
+                        help="Random fraction of validation dataset evaluated at each validation call. 1.0 uses full validation.")
     parser.add_argument("--batch-size", type=int, default=512, help="Training batch size.")
     parser.add_argument("--val-batch-size", type=int, default=512, help="Validation batch size.")
     parser.add_argument("--num-workers", type=int, default=20, help="DataLoader workers for both train/val.")
@@ -590,6 +592,48 @@ def _apply_epoch_lr_decay(optimizer, gamma: float, min_lr: float) -> bool:
     return True
 
 
+def _build_val_loader_for_epoch(
+    val_ds,
+    val_collator,
+    args,
+    val_loader_kwargs,
+    ddp_enabled: bool,
+    world_size: int,
+    rank: int,
+    epoch: int,
+    log,
+):
+    val_fraction = float(args.val_fraction)
+    if val_fraction <= 0.0 or val_fraction > 1.0:
+        raise ValueError(f"--val-fraction must be in (0, 1], got {val_fraction}")
+    dataset_for_val = val_ds
+    if val_fraction < 1.0:
+        n_total = len(val_ds)
+        n_keep = max(1, int(math.ceil(float(n_total) * val_fraction)))
+        rng = np.random.default_rng(int(args.seed) + int(epoch) * 1009)
+        indices = rng.choice(n_total, size=n_keep, replace=False)
+        indices.sort()
+        dataset_for_val = Subset(val_ds, indices.tolist())
+        log(f"[ValSubset] epoch={epoch}, fraction={val_fraction:.4g}, n={n_keep}/{n_total}")
+    val_sampler = (
+        DistributedSampler(dataset_for_val, num_replicas=world_size, rank=rank, shuffle=False)
+        if ddp_enabled
+        else None
+    )
+    if val_sampler is not None:
+        val_sampler.set_epoch(epoch)
+    val_loader = DataLoader(
+        dataset_for_val,
+        batch_size=args.val_batch_size,
+        shuffle=False,
+        sampler=val_sampler,
+        drop_last=False,
+        collate_fn=val_collator,
+        **val_loader_kwargs,
+    )
+    return val_loader, val_sampler
+
+
 def _collect_prior_init_embeddings(model, train_loader, device, max_samples: int):
     base_model = _unwrap_model(model)
     was_training = base_model.training
@@ -976,17 +1020,6 @@ def main():
         f"val_workers={val_num_workers}, val_persistent={val_loader_kwargs.get('persistent_workers', False)}"
     )
 
-    val_sampler = DistributedSampler(val_ds, num_replicas=world_size, rank=rank, shuffle=False) if ddp_enabled else None
-    val_loader = DataLoader(
-        val_ds,
-        batch_size=args.val_batch_size,
-        shuffle=False if val_sampler is None else False,
-        sampler=val_sampler,
-        drop_last=False,
-        collate_fn=val_collator,
-        **val_loader_kwargs,
-    )
-
     if args.compiled_dataset_root:
         if ddp_enabled:
             train_sampler = DistributedCompiledBalancedSampler(
@@ -1250,8 +1283,6 @@ def main():
         force_base_posterior = False
 
         train_sampler.set_epoch(epoch_id)
-        if val_sampler is not None:
-            val_sampler.set_epoch(epoch_id)
         loss_full, loss_recon, loss_kl, loss_score, loss_contrast, loss_cov, loss_prior_pi_balance, loss_celltype_cls, loss_batchless_recon = train_gmm_vae_one_epoch(
             model=model,
             optimizer=optimizer,
@@ -1326,8 +1357,6 @@ def main():
             and epoch_id >= int(args.prior_init_epoch)
         ):
             log(f"[PriorInit] Triggered after epoch {epoch_id}")
-            if val_sampler is not None:
-                val_sampler.set_epoch(epoch_id)
             initialized = delayed_init_mfa_prior_from_loader(
                 model=model,
                 optimizer=optimizer,
@@ -1359,6 +1388,17 @@ def main():
             or (epoch_id == args.num_epochs)
         )
         if do_val:
+            val_loader, _ = _build_val_loader_for_epoch(
+                val_ds=val_ds,
+                val_collator=val_collator,
+                args=args,
+                val_loader_kwargs=val_loader_kwargs,
+                ddp_enabled=ddp_enabled,
+                world_size=world_size,
+                rank=rank,
+                epoch=epoch_id,
+                log=log,
+            )
             val_loss_full, val_loss_recon, val_loss_kl, val_loss_score, val_loss_contrast, val_loss_cov, val_loss_prior_pi_balance, val_loss_celltype_cls, val_loss_batchless_recon = evaluate_gmm_vae_one_epoch(
                 model=model,
                 val_loader=val_loader,

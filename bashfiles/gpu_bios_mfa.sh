@@ -59,6 +59,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --result-dir "${RESULT_DIR}" \
   --num-epochs 200 \
   --val-every 1 \
+  --val-fraction 0.1 \
   --batch-size 1024 \
   --val-batch-size 1024 \
   --num-workers 8 \
@@ -66,7 +67,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --val-persistent-workers \
   --prefetch-factor 8 \
   --samples-per-id 500 \
-  --lr 6e-3 \
+  --lr 5e-3 \
   --prior-lr-multiplier 1 \
   --epoch-lr-gamma 0.9 \
   --weight-decay 1e-5 \
