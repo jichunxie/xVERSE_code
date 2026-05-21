@@ -89,6 +89,8 @@ def parse_args():
     parser.add_argument("--val-every", type=int, default=1, help="Run validation every N epochs.")
     parser.add_argument("--val-fraction", type=float, default=1.0,
                         help="Random fraction of validation dataset evaluated at each validation call. 1.0 uses full validation.")
+    parser.add_argument("--log-every", type=int, default=1000,
+                        help="Print train/validation batch diagnostics every N batches. <=0 disables batch diagnostics.")
     parser.add_argument("--batch-size", type=int, default=512, help="Training batch size.")
     parser.add_argument("--val-batch-size", type=int, default=512, help="Validation batch size.")
     parser.add_argument("--num-workers", type=int, default=20, help="DataLoader workers for both train/val.")
@@ -1340,6 +1342,7 @@ def main():
             lambda_batchless_recon=args.lambda_batchless_recon,
             force_base_posterior=force_base_posterior,
             prior_snapshot_start=prior_snapshot_start,
+            log_every=args.log_every,
         )
         train_msg = (
             f"[Epoch {epoch_id}] "
@@ -1454,6 +1457,7 @@ def main():
                 mask_aug_min_frac=args.mask_aug_min_frac,
                 mask_aug_max_frac=args.mask_aug_max_frac,
                 force_base_posterior=force_base_posterior,
+                log_every=args.log_every,
             )
             val_msg = (
                 f"[Epoch {epoch_id}] Validation Loss: "

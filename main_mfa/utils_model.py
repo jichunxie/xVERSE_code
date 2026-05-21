@@ -2000,6 +2000,7 @@ def train_gmm_vae_one_epoch(
     prior_snapshot_start: Dict[str, torch.Tensor] = None,
     kl_robust_mode: str = "none",
     kl_robust_cap: float = 0.0,
+    log_every: int = 1000,
 ):
     model.train()
     loss_fn = model.module.loss if hasattr(model, "module") else model.loss
@@ -2384,7 +2385,7 @@ def train_gmm_vae_one_epoch(
         total_celltype_cls += celltype_cls.item() * bsz
         total_batchless_recon += batchless_recon.item() * bsz
 
-        if (batch_idx + 1) % 1000 == 0 and is_rank0:
+        if int(log_every) > 0 and (batch_idx + 1) % int(log_every) == 0 and is_rank0:
             cnt_diag = batch_count_diagnostics(
                 x_count=x_count,
                 sample_id=sample_id,
@@ -2530,6 +2531,7 @@ def evaluate_gmm_vae_one_epoch(
     force_base_posterior=False,
     kl_robust_mode: str = "none",
     kl_robust_cap: float = 0.0,
+    log_every: int = 1000,
 ):
     model.eval()
     loss_fn = model.module.loss if hasattr(model, "module") else model.loss
@@ -2708,7 +2710,7 @@ def evaluate_gmm_vae_one_epoch(
             total_celltype_cls += out_real.get("celltype_cls_loss", torch.zeros_like(out_real["cov_loss"])).item() * bsz
             total_batchless_recon += batchless_recon.item() * bsz
 
-            if (batch_idx + 1) % 1000 == 0 and is_rank0:
+            if int(log_every) > 0 and (batch_idx + 1) % int(log_every) == 0 and is_rank0:
                 msg = (
                     f"[Val Batch {batch_idx + 1}] "
                     f"Loss={loss.item():.4f}, Recon={recon_for_metric.item():.4f}, "

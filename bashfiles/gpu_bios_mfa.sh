@@ -60,6 +60,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --num-epochs 200 \
   --val-every 1 \
   --val-fraction 0.1 \
+  --log-every 200 \
   --batch-size 1024 \
   --val-batch-size 1024 \
   --num-workers 8 \
