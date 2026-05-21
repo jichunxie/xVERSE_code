@@ -67,8 +67,8 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --val-persistent-workers \
   --prefetch-factor 8 \
   --samples-per-id 500 \
-  --lr 1e-3 \
-  --prior-lr-multiplier 5 \
+  --lr 8e-3 \
+  --prior-lr-multiplier 1 \
   --weight-decay 1e-5 \
   --prior-type gmm \
   --recon-loss nb \
