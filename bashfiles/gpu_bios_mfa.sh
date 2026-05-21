@@ -59,14 +59,14 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --result-dir "${RESULT_DIR}" \
   --num-epochs 200 \
   --val-every 1 \
-  --val-fraction 0.1 \
+  --val-fraction 0.02 \
   --batch-size 1024 \
   --val-batch-size 1024 \
   --num-workers 8 \
   --val-num-workers 8 \
   --val-persistent-workers \
   --prefetch-factor 8 \
-  --samples-per-id 500 \
+  --samples-per-id 100 \
   --lr 5e-3 \
   --prior-lr-multiplier 1 \
   --epoch-lr-gamma 1 \
@@ -91,6 +91,8 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --beta-eps-kl-multiplier 1.0 \
   --beta-kl-warmup-epochs 2 \
   --beta-kl-warmup-start 4e-2 \
+  --vae-pretrain-epochs 5 \
+  --vae-pretrain-beta-kl 1e-4 \
   --recon-observed-only \
   --mask-aug-prob 1.0 \
   --mask-aug-policy simple \

@@ -138,6 +138,10 @@ def parse_args():
                         help="Linearly warm KL weight from --beta-kl-warmup-start to --beta-kl over this many epochs. 0 disables.")
     parser.add_argument("--beta-kl-warmup-start", type=float, default=0.0,
                         help="Starting KL weight for linear KL warmup.")
+    parser.add_argument("--vae-pretrain-epochs", type=int, default=0,
+                        help="Train the backbone as a standard VAE with N(0,I) prior for this many epochs before switching to MFA.")
+    parser.add_argument("--vae-pretrain-beta-kl", type=float, default=None,
+                        help="KL weight used during --vae-pretrain-epochs. Defaults to --beta-kl when unset.")
     parser.add_argument("--prior-type", choices=["gmm", "gaussian"], default="gmm",
                         help="Latent prior type. 'gaussian' uses N(0,I) with closed-form KL.")
     parser.add_argument("--latent-dim", type=int, default=128, help="Latent dim.")
@@ -1256,6 +1260,9 @@ def main():
         prior_initialized = bool(prior_initialized or initialized)
 
     epoch_id = start_round
+    vae_pretrain_done = int(args.vae_pretrain_epochs) <= 0 or start_round > int(args.vae_pretrain_epochs)
+    if int(args.vae_pretrain_epochs) > 0:
+        log(f"[VAEPretrain] enabled for first {int(args.vae_pretrain_epochs)} epoch(s).")
 
     while epoch_id <= args.num_epochs:
         start_time = time.time()
@@ -1266,8 +1273,15 @@ def main():
             warmup_epochs=args.beta_kl_warmup_epochs,
             start_beta=args.beta_kl_warmup_start,
         )
-        stage_name = "stage3"
         base_model = _unwrap_model(model)
+        in_vae_pretrain = (
+            getattr(base_model, "prior_type", None) == "gmm"
+            and int(args.vae_pretrain_epochs) > 0
+            and epoch_id <= int(args.vae_pretrain_epochs)
+        )
+        if in_vae_pretrain and args.vae_pretrain_beta_kl is not None:
+            beta_t = float(args.vae_pretrain_beta_kl)
+        stage_name = "vae_pretrain" if in_vae_pretrain else "stage3"
         _apply_train_mode(base_model, args.train_mode)
         if prior_initialized and int(prior_freeze_until_epoch) >= epoch_id:
             _set_requires_grad(getattr(base_model, "prior", None), False)
@@ -1284,7 +1298,7 @@ def main():
         if prior_snapshot_start and is_main_process(rank):
             log(f"[Epoch {epoch_id}] PriorSnapshot captured keys={','.join(sorted(prior_snapshot_start.keys()))}")
 
-        force_base_posterior = False
+        force_base_posterior = bool(in_vae_pretrain)
 
         train_sampler.set_epoch(epoch_id)
         loss_full, loss_recon, loss_kl, loss_score, loss_contrast, loss_cov, loss_prior_pi_balance, loss_celltype_cls, loss_batchless_recon = train_gmm_vae_one_epoch(
@@ -1360,6 +1374,7 @@ def main():
         if (
             int(args.prior_init_epoch) > 0
             and (not prior_initialized)
+            and (not in_vae_pretrain)
             and epoch_id >= int(args.prior_init_epoch)
         ):
             log(f"[PriorInit] Triggered after epoch {epoch_id}")
@@ -1384,6 +1399,38 @@ def main():
                 log=log,
             )
             prior_initialized = bool(prior_initialized or initialized)
+            if initialized and int(args.prior_freeze_after_init_epochs) > 0:
+                prior_freeze_until_epoch = epoch_id + int(args.prior_freeze_after_init_epochs)
+                log(f"[PriorFreeze] prior will be frozen through epoch {prior_freeze_until_epoch}")
+
+        if (
+            int(args.vae_pretrain_epochs) > 0
+            and (not vae_pretrain_done)
+            and epoch_id >= int(args.vae_pretrain_epochs)
+        ):
+            log(f"[VAEPretrain] completed at epoch {epoch_id}; initializing MFA prior from base posterior.")
+            initialized = delayed_init_mfa_prior_from_loader(
+                model=model,
+                optimizer=optimizer,
+                train_loader=train_loader,
+                device=device,
+                samples=args.prior_init_samples,
+                kmeans_iters=args.prior_init_kmeans_iters,
+                logvar_mode=args.prior_init_logvar_mode,
+                logvar_value=args.prior_init_logvar_value,
+                logvar_shrink_alpha=args.prior_init_logvar_shrink_alpha,
+                logvar_min=args.prior_init_logvar_min,
+                logvar_max=args.prior_init_logvar_max,
+                factor_pca=args.prior_init_factor_pca,
+                factor_scale=args.prior_init_factor_scale,
+                factor_std=args.prior_init_factor_std,
+                seed=args.seed + epoch_id,
+                rank=rank,
+                world_size=world_size,
+                log=log,
+            )
+            prior_initialized = bool(prior_initialized or initialized)
+            vae_pretrain_done = True
             if initialized and int(args.prior_freeze_after_init_epochs) > 0:
                 prior_freeze_until_epoch = epoch_id + int(args.prior_freeze_after_init_epochs)
                 log(f"[PriorFreeze] prior will be frozen through epoch {prior_freeze_until_epoch}")
