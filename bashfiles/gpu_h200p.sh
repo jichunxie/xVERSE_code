@@ -67,7 +67,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --val-persistent-workers \
   --prefetch-factor 8 \
   --samples-per-id 500 \
-  --lr 5e-4 \
+  --lr 2.5e-3 \
   --prior-lr-multiplier 1 \
   --weight-decay 1e-5 \
   --prior-type gmm \
@@ -125,7 +125,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --recon-cell-weight-kmeans-iters 5 \
   --contrast-temp 0.1 \
   --resume-from last \
-  --encoder-lr-multiplier 5 \
-  --prior-lr-multiplier 5 \
+  --encoder-lr-multiplier 1 \
+  --prior-lr-multiplier 1 \
   --decoder-lr-multiplier 1 \
   --recon-head-lr-multiplier 1 \
