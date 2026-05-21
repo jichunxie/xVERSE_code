@@ -88,7 +88,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --beta-kl 5e-2 \
   --beta-u-kl-multiplier 1.0 \
   --beta-eps-kl-multiplier 1.0 \
-  --beta-kl-warmup-epochs 1 \
+  --beta-kl-warmup-epochs 2 \
   --beta-kl-warmup-start 0 \
   --recon-observed-only \
   --mask-aug-prob 1.0 \
