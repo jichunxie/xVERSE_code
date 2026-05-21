@@ -59,7 +59,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --cell-type-csv "${CELLTYPE_CSV}" \
   --result-dir "${RESULT_DIR}" \
   --num-epochs 200 \
-  --val-every 5 \
+  --val-every 1 \
   --batch-size 1024 \
   --val-batch-size 1024 \
   --num-workers 8 \
