@@ -68,7 +68,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --prefetch-factor 8 \
   --samples-per-id 500 \
   --lr 5e-3 \
-  --prior-lr-multiplier 2 \
+  --prior-lr-multiplier 0.1 \
   --weight-decay 1e-5 \
   --prior-type gmm \
   --recon-loss nb \
