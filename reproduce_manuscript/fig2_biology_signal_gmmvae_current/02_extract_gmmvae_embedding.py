@@ -79,7 +79,12 @@ def parse_args():
     ap.add_argument("--no-prior-viz", action="store_true", help="Disable prior visualization before embedding extraction.")
     ap.add_argument("--prior-viz-dir", default=None, help="Directory for prior visualization outputs. Defaults to output-dir/prior_viz.")
     ap.add_argument("--prior-viz-max-components", type=int, default=32, help="Max top-pi components for factor-arrow overlay.")
-    ap.add_argument("--prior-viz-min-pi", type=float, default=0.02, help="Only draw active components with pi >= this threshold in prior figures.")
+    ap.add_argument(
+        "--prior-viz-active-min-fold",
+        type=float,
+        default=1.5,
+        help="Draw active components with pi >= min(pi) * this fold in prior figures.",
+    )
     ap.add_argument("--prior-viz-factor-scale", type=float, default=1.0, help="Scale for projected MFA factor arrows.")
     ap.add_argument("--prior-viz-grid", type=int, default=120, help="Grid size for projected prior density surface.")
     ap.add_argument("--prior-viz-sample-n", type=int, default=20000, help="Number of true high-dimensional prior samples for UMAP/KDE visualization.")
@@ -332,7 +337,7 @@ def visualize_prior(
     model,
     output_dir: Path,
     max_components: int = 32,
-    min_pi: float = 0.02,
+    active_min_fold: float = 1.5,
     factor_scale: float = 1.0,
     grid_size: int = 120,
     sample_n: int = 5000,
@@ -404,14 +409,19 @@ def visualize_prior(
     )
     table.to_csv(output_dir / "prior_pca_components.csv", index=False)
 
-    active_idx = np.where(pi >= float(min_pi))[0]
+    pi_min_all = float(np.min(pi)) if pi.size else 0.0
+    active_threshold = pi_min_all * float(active_min_fold)
+    active_idx = np.where(pi >= active_threshold)[0]
     if active_idx.size == 0:
         active_idx = np.argsort(-pi)[: max(1, min(int(max_components), k))]
-        print(f"[PriorViz] no pi >= {min_pi:g}; fallback to top {active_idx.size} components.")
+        print(f"[PriorViz] no pi >= min(pi)*{active_min_fold:g}; fallback to top {active_idx.size} components.")
     else:
         if active_idx.size > int(max_components):
             active_idx = active_idx[np.argsort(-pi[active_idx])[: int(max_components)]]
-        print(f"[PriorViz] drawing {active_idx.size}/{k} active components with pi >= {min_pi:g}.")
+        print(
+            f"[PriorViz] drawing {active_idx.size}/{k} active components with "
+            f"pi >= min(pi)*{active_min_fold:g} = {active_threshold:.6g}."
+        )
     table.loc[active_idx].to_csv(output_dir / "prior_pca_active_components.csv", index=False)
     sizes = 30.0 + 600.0 * pi / max(float(pi.max()), 1e-12)
 
@@ -1033,7 +1043,7 @@ def main():
                 model=model,
                 output_dir=prior_viz_dir,
                 max_components=args.prior_viz_max_components,
-                min_pi=args.prior_viz_min_pi,
+                active_min_fold=args.prior_viz_active_min_fold,
                 factor_scale=args.prior_viz_factor_scale,
                 grid_size=args.prior_viz_grid,
                 sample_n=args.prior_viz_sample_n,
