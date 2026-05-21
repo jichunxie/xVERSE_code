@@ -11,6 +11,7 @@
 #SBATCH --mail-user=xj58@duke.edu
 #SBATCH --mail-type=BEGIN,END,FAIL
 
+
 source ~/.bashrc
 conda activate SpaRest
 
@@ -20,7 +21,7 @@ export PYTHONUNBUFFERED=1
 COMPILED_ROOT="/hpc/group/xielab/xj58/xVerseAtlas/compiled_train_v1_all"
 CELLTYPE_CSV="/hpc/group/xielab/xj58/general/cellxgene_cell_type_id2name.csv"
 CELLTYPE_TEXT_EMB="/hpc/group/xielab/xj58/general/cellxgene_cell_type_text_embeddings.npz"
-RESULT_DIR="/hpc/group/xielab/xj58/pretrain_model_celltype/mfa_all_tissue0520_celltype_text_32x16"
+RESULT_DIR="/hpc/group/xielab/xj58/pretrain_model_celltype/mfa_all_tissue0520_celltype_text_32x8x03"
 
 NPROC_PER_NODE=$(python - <<'PY'
 import torch
@@ -73,7 +74,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --recon-loss nb \
   --latent-dim 128 \
   --num-components 32 \
-  --prior-cov-rank 16 \
+  --prior-cov-rank 8 \
   --prior-mu-init sphere \
   --prior-mu-init-radius 4 \
   --batch-emb-dim 0 \
@@ -96,7 +97,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --mask-aug-max-frac 0.5 \
   --lambda-celltype-cls 2 \
   --celltype-text-embedding-path "${CELLTYPE_TEXT_EMB}" \
-  --celltype-text-temp 0.2 \
+  --celltype-text-temp 0.3 \
   --lambda-contrast 1 \
   --lambda-real-recon 0.5 \
   --lambda-prior-pi-balance 0 \
