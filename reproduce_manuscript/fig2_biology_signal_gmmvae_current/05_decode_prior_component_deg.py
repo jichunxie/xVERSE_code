@@ -60,10 +60,11 @@ def parse_args():
     ap.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
     ap.add_argument(
         "--active-mode",
-        default="median_fold",
-        choices=["median_fold", "background", "effective", "mass", "relative_uniform", "pi", "top_k"],
+        default="min_fold",
+        choices=["min_fold", "median_fold", "background", "effective", "mass", "relative_uniform", "pi", "top_k"],
         help=(
-            "How to select active components. median_fold: pi >= median(pi) * active-median-fold, "
+            "How to select active components. min_fold: pi >= min(pi) * active-min-fold, "
+            "median_fold: pi >= median(pi) * active-median-fold, "
             "background: components above the low-pi background plateau, "
             "effective: top ceil(K_eff * multiplier), "
             "mass: top components covering active-mass, relative_uniform: pi >= ratio/K, "
@@ -75,6 +76,12 @@ def parse_args():
         type=float,
         default=1.5,
         help="Select pi >= median(pi) * this value for --active-mode median_fold.",
+    )
+    ap.add_argument(
+        "--active-min-fold",
+        type=float,
+        default=1.5,
+        help="Select pi >= min(pi) * this value for --active-mode min_fold.",
     )
     ap.add_argument("--active-min-pi", type=float, default=0.02, help="Fixed pi threshold used by --active-mode pi.")
     ap.add_argument(
@@ -174,6 +181,7 @@ def select_active_components(
     pi: np.ndarray,
     mode: str,
     median_fold: float,
+    min_fold: float,
     min_pi: float,
     relative_uniform: float,
     mass: float,
@@ -190,11 +198,15 @@ def select_active_components(
     order = np.argsort(-pi)
     k_eff, pi_entropy = mixture_effective_k(pi)
     threshold = None
+    pi_min = float(np.min(pi)) if pi.size else 0.0
     pi_median = float(np.median(pi))
     background_median = None
     background_mad = None
 
-    if mode == "median_fold":
+    if mode == "min_fold":
+        threshold = pi_min * float(min_fold)
+        active = np.where(pi >= threshold)[0]
+    elif mode == "median_fold":
         threshold = pi_median * float(median_fold)
         active = np.where(pi >= threshold)[0]
     elif mode == "background":
@@ -246,6 +258,7 @@ def select_active_components(
         "K_eff": k_eff,
         "pi_entropy": pi_entropy,
         "uniform_pi": 1.0 / max(k_total, 1),
+        "pi_min": pi_min,
         "pi_median": pi_median,
         "selected_mass": float(pi[active].sum()) if active.size else 0.0,
         "selected_n": int(active.size),
@@ -619,6 +632,7 @@ def main():
         pi,
         mode=args.active_mode,
         median_fold=args.active_median_fold,
+        min_fold=args.active_min_fold,
         min_pi=args.active_min_pi,
         relative_uniform=args.active_min_relative_uniform,
         mass=args.active_mass,
@@ -634,7 +648,8 @@ def main():
         "[Active] "
         f"mode={active_stats['mode']}, selected={active_stats['selected_n']}/{active_stats['K']}, "
         f"K_eff={active_stats['K_eff']:.2f}, mass={active_stats['selected_mass']:.3f}, "
-        f"uniform_pi={active_stats['uniform_pi']:.4g}, median_pi={active_stats['pi_median']:.4g}, "
+        f"uniform_pi={active_stats['uniform_pi']:.4g}, "
+        f"min_pi={active_stats['pi_min']:.4g}, median_pi={active_stats['pi_median']:.4g}, "
         f"threshold={active_stats['threshold']:.4g}, "
         f"background={active_stats['background_median']:.4g}+/-{active_stats['background_mad']:.4g}, "
         f"pi_selected[min/max]={active_stats['pi_min_selected']:.4g}/{active_stats['pi_max_selected']:.4g}"
