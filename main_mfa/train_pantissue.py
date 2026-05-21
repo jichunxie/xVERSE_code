@@ -266,6 +266,8 @@ def parse_args():
                         help="Weight for batch-level posterior component usage balance KL(q_mean(c)||uniform).")
     parser.add_argument("--lambda-contrast", type=float, default=1.0,
                         help="Weight of contrastive loss between real-mask and fake-mask views.")
+    parser.add_argument("--contrast-view-mode", choices=["real_fake", "random_random"], default="real_fake",
+                        help="Contrastive view pairing: real_fake uses original mask vs random mask; random_random uses two independent random masks and averages their reconstruction losses.")
     parser.add_argument("--lambda-real-recon", type=float, default=0.1,
                         help="Weight of real-mask reconstruction loss term.")
     parser.add_argument("--contrast-temp", type=float, default=0.1,
@@ -1299,6 +1301,7 @@ def main():
             mask_aug_max_frac=args.mask_aug_max_frac,
             lambda_contrast=args.lambda_contrast,
             contrast_temp=args.contrast_temp,
+            contrast_view_mode=args.contrast_view_mode,
             lambda_real_recon=args.lambda_real_recon,
             lambda_resp_anchor=lambda_resp_anchor_t,
             lambda_score=0.0,
@@ -1412,6 +1415,7 @@ def main():
                 score_detach_z=True,
                 lambda_contrast=args.lambda_contrast,
                 contrast_temp=args.contrast_temp,
+                contrast_view_mode=args.contrast_view_mode,
                 lambda_real_recon=args.lambda_real_recon,
                 lambda_cov=0.0,
                 cov_use_mu=True,

@@ -1962,6 +1962,7 @@ def train_gmm_vae_one_epoch(
     score_detach_z=True,
     lambda_contrast=0.0,
     contrast_temp=0.1,
+    contrast_view_mode: str = "real_fake",
     lambda_real_recon=0.0,
     lambda_cov=0.0,
     cov_use_mu=True,
@@ -2007,6 +2008,9 @@ def train_gmm_vae_one_epoch(
     total_batchless_recon = 0.0
     n_cells = 0
     is_rank0 = (not dist.is_available()) or (not dist.is_initialized()) or (dist.get_rank() == 0)
+    contrast_view_mode = str(contrast_view_mode).lower()
+    if contrast_view_mode not in {"real_fake", "random_random"}:
+        raise ValueError(f"Unsupported contrast_view_mode={contrast_view_mode!r}; use real_fake or random_random.")
 
     for batch_idx, (sample_id, tissue_id, celltype_id, x_count, x_mask, x_mask_encoder) in enumerate(train_loader):
         optimizer.zero_grad(set_to_none=True)
@@ -2069,7 +2073,8 @@ def train_gmm_vae_one_epoch(
                 recon_cell_weight_clusters=recon_cell_weight_clusters,
                 recon_cell_weight_kmeans_iters=recon_cell_weight_kmeans_iters,
             )
-            need_real_view = (lambda_contrast > 0) or (lambda_real_recon > 0)
+            out_second = None
+            need_real_view = (contrast_view_mode == "real_fake") and ((lambda_contrast > 0) or (lambda_real_recon > 0))
             real_recon = torch.zeros((), device=x_count.device, dtype=out_fake["z"].dtype)
             if need_real_view:
                 out_real = loss_fn(
@@ -2122,6 +2127,63 @@ def train_gmm_vae_one_epoch(
                     recon_cell_weight_kmeans_iters=recon_cell_weight_kmeans_iters,
                 )
                 real_recon = out_real["recon_loss"]
+            elif contrast_view_mode == "random_random":
+                second_encoder_mask = _random_hide_observed(
+                    x_mask=x_mask,
+                    apply_prob=mask_aug_prob,
+                    policy=mask_aug_policy,
+                    min_frac=mask_aug_min_frac,
+                    max_frac=mask_aug_max_frac,
+                )
+                out_second = loss_fn(
+                    x_count=x_count,
+                    x_mask=x_mask,
+                    tissue_id=tissue_id,
+                    sample_id=sample_id,
+                    celltype_id=celltype_id,
+                    force_base_posterior=force_base_posterior,
+                    beta=0.0,
+                    beta_u_kl_multiplier=beta_u_kl_multiplier,
+                    beta_eps_kl_multiplier=beta_eps_kl_multiplier,
+                    encoder_mask=second_encoder_mask,
+                    recon_mask=x_mask if recon_observed_only else None,
+                    lambda_score=0.0,
+                    score_noise_std=score_noise_std,
+                    score_detach_z=score_detach_z,
+                    lambda_cov=0.0,
+                    cov_use_mu=cov_use_mu,
+                    lambda_resp_balance=0.0,
+                    lambda_resp_confidence=0.0,
+                    lambda_resp_anchor=0.0,
+                    resp_temperature=resp_temperature,
+                    resp_topk=0,
+                    prior_logvar_min=prior_logvar_min,
+                    prior_logvar_max=prior_logvar_max,
+                    kl_robust_mode=kl_robust_mode,
+                    kl_robust_cap=kl_robust_cap,
+                    lambda_prior_mu_l2=0.0,
+                    lambda_prior_factor_l2=0.0,
+                    lambda_prior_pi_balance=0.0,
+                    lambda_prior_mu_spread=0.0,
+                    prior_mu_spread_tau=prior_mu_spread_tau,
+                    lambda_post_c_balance=0.0,
+                    lambda_celltype_cls=0.0,
+                    lambda_prior_logvar_l2=0.0,
+                    prior_logvar_target=prior_logvar_target,
+                    recon_gene_weight_mode=recon_gene_weight_mode,
+                    recon_gene_weight_alpha=recon_gene_weight_alpha,
+                    recon_gene_weight_ema_momentum=recon_gene_weight_ema_momentum,
+                    recon_gene_weight_min=recon_gene_weight_min,
+                    recon_gene_weight_max=recon_gene_weight_max,
+                    recon_gene_weight_eps=recon_gene_weight_eps,
+                    recon_cell_weight_mode=recon_cell_weight_mode,
+                    recon_cell_weight_alpha=recon_cell_weight_alpha,
+                    recon_cell_weight_min=recon_cell_weight_min,
+                    recon_cell_weight_max=recon_cell_weight_max,
+                    recon_cell_weight_eps=recon_cell_weight_eps,
+                    recon_cell_weight_clusters=recon_cell_weight_clusters,
+                    recon_cell_weight_kmeans_iters=recon_cell_weight_kmeans_iters,
+                )
             batchless_recon = torch.zeros((), device=x_count.device, dtype=out_fake["z"].dtype)
             if float(lambda_batchless_recon) != 0.0:
                 out_batchless = loss_fn(
@@ -2177,24 +2239,36 @@ def train_gmm_vae_one_epoch(
                 batchless_recon = out_batchless["recon_loss"]
             if lambda_contrast > 0:
                 valid_pair = out_fake.get("valid_cell_mask", torch.ones((bsz,), device=x_count.device, dtype=torch.bool))
-                if need_real_view:
+                if contrast_view_mode == "real_fake" and need_real_view:
                     valid_pair = valid_pair & out_real.get("valid_cell_mask", valid_pair)
+                    z_left = deterministic_contrast_embedding(out_real)
+                    z_right = deterministic_contrast_embedding(out_fake)
+                elif contrast_view_mode == "random_random" and out_second is not None:
+                    valid_pair = valid_pair & out_second.get("valid_cell_mask", valid_pair)
+                    z_left = deterministic_contrast_embedding(out_fake)
+                    z_right = deterministic_contrast_embedding(out_second)
+                else:
+                    z_left = deterministic_contrast_embedding(out_fake)
+                    z_right = deterministic_contrast_embedding(out_fake)
                 contrast = bidirectional_contrastive_loss(
-                    z_real=deterministic_contrast_embedding(out_real)[valid_pair],
-                    z_fake=deterministic_contrast_embedding(out_fake)[valid_pair],
+                    z_real=z_left[valid_pair],
+                    z_fake=z_right[valid_pair],
                     temperature=contrast_temp,
                 )
             else:
                 contrast = torch.zeros((), device=x_count.device, dtype=out_fake["z"].dtype)
 
             loss = out_fake["loss"]
+            recon = out_fake["recon_loss"]
+            if contrast_view_mode == "random_random" and out_second is not None:
+                recon = 0.5 * (out_fake["recon_loss"] + out_second["recon_loss"])
+                loss = out_fake["loss"] - out_fake["recon_loss"] + recon
             if float(lambda_contrast) != 0.0:
                 loss = loss + float(lambda_contrast) * contrast
-            if float(lambda_real_recon) != 0.0:
+            if float(lambda_real_recon) != 0.0 and contrast_view_mode == "real_fake":
                 loss = loss + float(lambda_real_recon) * real_recon
             if float(lambda_batchless_recon) != 0.0:
                 loss = loss + float(lambda_batchless_recon) * batchless_recon
-            recon = out_fake["recon_loss"]
             kl = out_fake["kl_loss"]
             score = out_fake["score_loss"]
             cov = out_fake["cov_loss"]
@@ -2332,7 +2406,7 @@ def train_gmm_vae_one_epoch(
             )
             if lambda_contrast > 0:
                 msg += f", Contrast={contrast.item():.4f}"
-            if lambda_real_recon > 0:
+            if lambda_real_recon > 0 and contrast_view_mode == "real_fake":
                 msg += f", RealRecon={real_recon.item():.4f}"
             if lambda_batchless_recon > 0:
                 msg += f", BatchlessRecon={batchless_recon.item():.4f}"
@@ -2415,6 +2489,7 @@ def evaluate_gmm_vae_one_epoch(
     score_detach_z=True,
     lambda_contrast=0.0,
     contrast_temp=0.1,
+    contrast_view_mode: str = "real_fake",
     lambda_real_recon=0.0,
     lambda_cov=0.0,
     cov_use_mu=True,
@@ -2463,6 +2538,9 @@ def evaluate_gmm_vae_one_epoch(
     total_batchless_recon = 0.0
     n_cells = 0
     is_rank0 = (not dist.is_available()) or (not dist.is_initialized()) or (dist.get_rank() == 0)
+    contrast_view_mode = str(contrast_view_mode).lower()
+    if contrast_view_mode not in {"real_fake", "random_random"}:
+        raise ValueError(f"Unsupported contrast_view_mode={contrast_view_mode!r}; use real_fake or random_random.")
 
     with torch.no_grad():
         for batch_idx, (sample_id, tissue_id, celltype_id, x_count, x_mask, x_mask_encoder) in enumerate(val_loader):
@@ -2475,6 +2553,15 @@ def evaluate_gmm_vae_one_epoch(
             bsz = x_count.size(0)
             n_cells += bsz
 
+            main_encoder_mask = x_mask
+            if contrast_view_mode == "random_random":
+                main_encoder_mask = _random_hide_observed(
+                    x_mask=x_mask,
+                    apply_prob=mask_aug_prob,
+                    policy=mask_aug_policy,
+                    min_frac=mask_aug_min_frac,
+                    max_frac=mask_aug_max_frac,
+                )
             out_real = loss_fn(
                 # Validation main metric uses the original observed mask, not random-mask augmentation.
                 x_count=x_count,
@@ -2487,7 +2574,7 @@ def evaluate_gmm_vae_one_epoch(
                 beta_u_kl_multiplier=beta_u_kl_multiplier,
                 beta_eps_kl_multiplier=beta_eps_kl_multiplier,
                 use_batch_condition=False,
-                encoder_mask=x_mask,
+                encoder_mask=main_encoder_mask,
                 recon_mask=x_mask if recon_observed_only else None,
                 lambda_score=lambda_score,
                 score_noise_std=score_noise_std,
@@ -2600,15 +2687,19 @@ def evaluate_gmm_vae_one_epoch(
             else:
                 contrast = torch.zeros((), device=x_count.device, dtype=out_fake["z"].dtype)
             loss = out_real["loss"]
+            recon_for_metric = out_real["recon_loss"]
+            if contrast_view_mode == "random_random" and lambda_contrast > 0:
+                recon_for_metric = 0.5 * (out_real["recon_loss"] + out_fake["recon_loss"])
+                loss = out_real["loss"] - out_real["recon_loss"] + recon_for_metric
             if float(lambda_contrast) != 0.0:
                 loss = loss + float(lambda_contrast) * contrast
-            if float(lambda_real_recon) != 0.0:
+            if float(lambda_real_recon) != 0.0 and contrast_view_mode == "real_fake":
                 loss = loss + float(lambda_real_recon) * real_recon
             if float(lambda_batchless_recon) != 0.0:
                 loss = loss + float(lambda_batchless_recon) * batchless_recon
 
             total_loss += loss.item() * bsz
-            total_recon += out_real["recon_loss"].item() * bsz
+            total_recon += recon_for_metric.item() * bsz
             total_kl += out_real["kl_loss"].item() * bsz
             total_score += out_real["score_loss"].item() * bsz
             total_contrast += contrast.item() * bsz
@@ -2620,7 +2711,7 @@ def evaluate_gmm_vae_one_epoch(
             if (batch_idx + 1) % 1000 == 0 and is_rank0:
                 msg = (
                     f"[Val Batch {batch_idx + 1}] "
-                    f"Loss={loss.item():.4f}, Recon={out_real['recon_loss'].item():.4f}, "
+                    f"Loss={loss.item():.4f}, Recon={recon_for_metric.item():.4f}, "
                     f"KL={out_real['kl_loss'].item():.4f}, "
                     f"KLc={out_real.get('kl_c_loss', torch.zeros_like(out_real['kl_loss'])).item():.4f}, "
                     f"KLu={out_real.get('kl_u_loss', torch.zeros_like(out_real['kl_loss'])).item():.4f}, "

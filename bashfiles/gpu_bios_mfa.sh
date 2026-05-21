@@ -99,8 +99,9 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --lambda-celltype-cls 1 \
   --celltype-text-embedding-path "${CELLTYPE_TEXT_EMB}" \
   --celltype-text-temp 0.15 \
+  --contrast-view-mode random_random \
   --lambda-contrast 0.5 \
-  --lambda-real-recon 0.5 \
+  --lambda-real-recon 0 \
   --lambda-prior-pi-balance 0 \
   --lambda-prior-mu-spread 0 \
   --prior-mu-spread-tau 0 \
