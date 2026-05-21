@@ -97,7 +97,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --mask-aug-max-frac 0.5 \
   --lambda-celltype-cls 6 \
   --celltype-text-embedding-path "${CELLTYPE_TEXT_EMB}" \
-  --celltype-text-temp 0.25 \
+  --celltype-text-temp 0.2 \
   --lambda-contrast 2 \
   --lambda-real-recon 0.5 \
   --lambda-prior-pi-balance 0 \
