@@ -21,7 +21,7 @@ export PYTHONUNBUFFERED=1
 COMPILED_ROOT="/hpc/group/xielab/xj58/xVerseAtlas/compiled_train_v1_all"
 CELLTYPE_CSV="/hpc/group/xielab/xj58/general/cellxgene_cell_type_id2name.csv"
 CELLTYPE_TEXT_EMB="/hpc/group/xielab/xj58/general/cellxgene_cell_type_text_embeddings.npz"
-RESULT_DIR="/hpc/group/xielab/xj58/pretrain_model_celltype/mfa_all_tissue0520_celltype_text_64x8x01_n"
+RESULT_DIR="/hpc/group/xielab/xj58/pretrain_model_celltype/mfa_all_tissue0520_celltype_text_128x8x02"
 
 NPROC_PER_NODE=$(python - <<'PY'
 import torch
@@ -67,8 +67,8 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --val-persistent-workers \
   --prefetch-factor 8 \
   --samples-per-id 500 \
-  --lr 1e-3 \
-  --prior-lr-multiplier 1 \
+  --lr 5e-3 \
+  --prior-lr-multiplier 0.1 \
   --weight-decay 1e-5 \
   --prior-type gmm \
   --recon-loss nb \
@@ -97,7 +97,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --mask-aug-max-frac 0.5 \
   --lambda-celltype-cls 1 \
   --celltype-text-embedding-path "${CELLTYPE_TEXT_EMB}" \
-  --celltype-text-temp 0.1 \
+  --celltype-text-temp 0.2 \
   --lambda-contrast 0.5 \
   --lambda-real-recon 0.5 \
   --lambda-prior-pi-balance 0 \
