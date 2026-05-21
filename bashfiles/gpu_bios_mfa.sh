@@ -21,7 +21,7 @@ export PYTHONUNBUFFERED=1
 COMPILED_ROOT="/hpc/group/xielab/xj58/xVerseAtlas/compiled_train_v1_all"
 CELLTYPE_CSV="/hpc/group/xielab/xj58/general/cellxgene_cell_type_id2name.csv"
 CELLTYPE_TEXT_EMB="/hpc/group/xielab/xj58/general/cellxgene_cell_type_text_embeddings.npz"
-RESULT_DIR="/hpc/group/xielab/xj58/pretrain_model_celltype/mfa_all_tissue0520_celltype_text_32x8x02"
+RESULT_DIR="/hpc/group/xielab/xj58/pretrain_model_celltype/mfa_all_tissue0520_celltype_text_64x8x02"
 
 NPROC_PER_NODE=$(python - <<'PY'
 import torch
@@ -73,7 +73,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --prior-type gmm \
   --recon-loss nb \
   --latent-dim 128 \
-  --num-components 32 \
+  --num-components 64 \
   --prior-cov-rank 8 \
   --prior-mu-init sphere \
   --prior-mu-init-radius 4 \
@@ -85,11 +85,11 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --expr-hidden-dim 512 \
   --mask-hidden-dim 512 \
   --dec-hidden-dim 512 \
-  --beta-kl 1e-1 \
+  --beta-kl 2.5e-1 \
   --beta-u-kl-multiplier 1.0 \
   --beta-eps-kl-multiplier 1.0 \
   --beta-kl-warmup-epochs 10 \
-  --beta-kl-warmup-start 1e-1 \
+  --beta-kl-warmup-start 2.5e-1 \
   --recon-observed-only \
   --mask-aug-prob 1.0 \
   --mask-aug-policy simple \
