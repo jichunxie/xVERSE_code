@@ -101,8 +101,14 @@ def parse_args():
                         help="Keep validation DataLoader workers alive across validation calls.")
     parser.add_argument("--samples-per-id", type=int, default=1000, help="Samples drawn per id in sampler.")
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate.")
+    parser.add_argument("--encoder-lr-multiplier", type=float, default=1.0,
+                        help="Multiplier for encoder and posterior-head learning rate in full training mode.")
     parser.add_argument("--prior-lr-multiplier", type=float, default=1.0,
                         help="Multiplier for model.prior parameter learning rate in full training mode.")
+    parser.add_argument("--decoder-lr-multiplier", type=float, default=1.0,
+                        help="Multiplier for expression decoder learning rate in full training mode.")
+    parser.add_argument("--recon-head-lr-multiplier", type=float, default=1.0,
+                        help="Multiplier for reconstruction auxiliary heads such as library/NB theta.")
     parser.add_argument("--weight-decay", type=float, default=1e-5, help="Weight decay.")
     parser.add_argument("--scheduler-factor", type=float, default=0.5, help="LR scheduler factor.")
     parser.add_argument("--scheduler-patience", type=int, default=3, help="LR scheduler patience.")
@@ -479,40 +485,87 @@ def _is_prior_param_name(name: str) -> bool:
     return bool(parts) and parts[0] == "prior"
 
 
-def _build_full_optimizer(model, lr: float, weight_decay: float, prior_lr_multiplier: float):
-    prior_lr_multiplier = float(prior_lr_multiplier)
-    if abs(prior_lr_multiplier - 1.0) < 1e-12:
-        return torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+def _root_param_name(name: str) -> str:
+    parts = str(name).split(".")
+    while parts and parts[0] == "module":
+        parts = parts[1:]
+    return parts[0] if parts else ""
 
-    main_params = []
-    prior_params = []
+
+def _optimizer_group_name(name: str) -> str:
+    root = _root_param_name(name)
+    if root == "prior":
+        return "prior"
+    if root in {"encoder", "post_c_logits", "post_u_mu", "post_u_logvar", "post_eps_mu", "post_eps_logvar"}:
+        return "encoder"
+    if root == "decoder":
+        return "decoder"
+    if root in {"library_head", "nb_log_theta", "nb_theta_decoder"}:
+        return "recon_head"
+    return "other"
+
+
+def _build_full_optimizer(
+    model,
+    lr: float,
+    weight_decay: float,
+    encoder_lr_multiplier: float,
+    prior_lr_multiplier: float,
+    decoder_lr_multiplier: float,
+    recon_head_lr_multiplier: float,
+):
+    multipliers = {
+        "encoder": float(encoder_lr_multiplier),
+        "prior": float(prior_lr_multiplier),
+        "decoder": float(decoder_lr_multiplier),
+        "recon_head": float(recon_head_lr_multiplier),
+        "other": 1.0,
+    }
+    grouped_params = {key: [] for key in ("encoder", "prior", "decoder", "recon_head", "other")}
     for name, p in model.named_parameters():
         if not p.requires_grad:
             continue
-        if _is_prior_param_name(name):
-            prior_params.append(p)
-        else:
-            main_params.append(p)
+        grouped_params[_optimizer_group_name(name)].append(p)
 
     param_groups = []
-    if main_params:
-        param_groups.append({"params": main_params, "lr": lr, "weight_decay": weight_decay, "name": "main"})
-    if prior_params:
-        param_groups.append({
-            "params": prior_params,
-            "lr": lr * prior_lr_multiplier,
-            "weight_decay": weight_decay,
-            "name": "prior",
-        })
+    for name in ("encoder", "prior", "decoder", "recon_head", "other"):
+        params = grouped_params[name]
+        if not params:
+            continue
+        param_groups.append(
+            {
+                "params": params,
+                "lr": lr * multipliers[name],
+                "weight_decay": weight_decay,
+                "name": name,
+                "lr_multiplier": multipliers[name],
+            }
+        )
     if not param_groups:
         raise RuntimeError("No trainable parameters found for optimizer.")
     return torch.optim.Adam(param_groups, lr=lr, weight_decay=weight_decay)
 
 
-def _restore_optimizer_group_lrs(optimizer, lr: float, prior_lr_multiplier: float):
+def _restore_optimizer_group_lrs(
+    optimizer,
+    lr: float,
+    encoder_lr_multiplier: float,
+    prior_lr_multiplier: float,
+    decoder_lr_multiplier: float,
+    recon_head_lr_multiplier: float,
+):
+    multipliers = {
+        "encoder": float(encoder_lr_multiplier),
+        "prior": float(prior_lr_multiplier),
+        "decoder": float(decoder_lr_multiplier),
+        "recon_head": float(recon_head_lr_multiplier),
+        "other": 1.0,
+        "main": 1.0,
+    }
     for group in optimizer.param_groups:
-        name = group.get("name", "main")
-        group["lr"] = lr * float(prior_lr_multiplier) if name == "prior" else lr
+        name = group.get("name", "other")
+        group["lr"] = lr * multipliers.get(name, 1.0)
+        group["lr_multiplier"] = multipliers.get(name, 1.0)
 
 
 def _format_optimizer_lrs(optimizer) -> str:
@@ -1006,7 +1059,10 @@ def main():
         model,
         lr=args.lr,
         weight_decay=args.weight_decay,
+        encoder_lr_multiplier=args.encoder_lr_multiplier,
         prior_lr_multiplier=args.prior_lr_multiplier,
+        decoder_lr_multiplier=args.decoder_lr_multiplier,
+        recon_head_lr_multiplier=args.recon_head_lr_multiplier,
     )
     if torch.cuda.is_available():
         log("[Optimizer] Using standard Adam (AMP-compatible).")
@@ -1042,7 +1098,14 @@ def main():
         if "optimizer_state_dict" in ckpt:
             try:
                 optimizer.load_state_dict(ckpt["optimizer_state_dict"])
-                _restore_optimizer_group_lrs(optimizer, args.lr, args.prior_lr_multiplier)
+                _restore_optimizer_group_lrs(
+                    optimizer,
+                    args.lr,
+                    args.encoder_lr_multiplier,
+                    args.prior_lr_multiplier,
+                    args.decoder_lr_multiplier,
+                    args.recon_head_lr_multiplier,
+                )
             except ValueError as e:
                 log(
                     f"[Resume][WARN] Optimizer state is incompatible with current model/param groups ({e}). "
