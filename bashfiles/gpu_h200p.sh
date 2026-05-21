@@ -87,7 +87,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --dec-hidden-dim 512 \
   --beta-kl 5e-2 \
   --beta-u-kl-multiplier 1.0 \
-  --beta-eps-kl-multiplier 2.0 \
+  --beta-eps-kl-multiplier 1.0 \
   --beta-kl-warmup-epochs 10 \
   --beta-kl-warmup-start 5e-2 \
   --recon-observed-only \
