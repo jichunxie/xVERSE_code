@@ -87,11 +87,11 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --expr-hidden-dim 512 \
   --mask-hidden-dim 512 \
   --dec-hidden-dim 512 \
-  --beta-kl 1e-2 \
+  --beta-kl 2e-2 \
   --beta-u-kl-multiplier 1.0 \
   --beta-eps-kl-multiplier 1.0 \
   --beta-kl-warmup-epochs 2 \
-  --beta-kl-warmup-start 1e-2 \
+  --beta-kl-warmup-start 2e-2 \
   --vae-pretrain-epochs 0 \
   --vae-pretrain-beta-kl 1e-4 \
   --recon-observed-only \
@@ -99,11 +99,11 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --mask-aug-policy simple \
   --mask-aug-min-frac 0 \
   --mask-aug-max-frac 1 \
-  --lambda-celltype-cls 3 \
+  --lambda-celltype-cls 5 \
   --celltype-text-embedding-path "${CELLTYPE_TEXT_EMB}" \
   --celltype-text-temp 0.15 \
   --contrast-view-mode random_random \
-  --lambda-contrast 1 \
+  --lambda-contrast 2 \
   --lambda-real-recon 0 \
   --lambda-prior-pi-balance 0 \
   --lambda-prior-mu-spread 0 \
