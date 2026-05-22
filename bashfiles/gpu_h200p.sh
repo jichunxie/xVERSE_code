@@ -99,11 +99,11 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --mask-aug-policy simple \
   --mask-aug-min-frac 0 \
   --mask-aug-max-frac 1 \
-  --lambda-celltype-cls 2.5 \
+  --lambda-celltype-cls 3 \
   --celltype-text-embedding-path "${CELLTYPE_TEXT_EMB}" \
   --celltype-text-temp 0.15 \
   --contrast-view-mode random_random \
-  --lambda-contrast 2 \
+  --lambda-contrast 1 \
   --lambda-real-recon 0 \
   --lambda-prior-pi-balance 0 \
   --lambda-prior-mu-spread 0 \
