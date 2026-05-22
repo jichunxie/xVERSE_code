@@ -67,7 +67,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --val-num-workers 8 \
   --val-persistent-workers \
   --prefetch-factor 8 \
-  --samples-per-id 100 \
+  --samples-per-id 200 \
   --lr 5e-3 \
   --prior-lr-multiplier 0.5 \
   --epoch-lr-gamma 1 \
@@ -99,9 +99,9 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --mask-aug-policy simple \
   --mask-aug-min-frac 0 \
   --mask-aug-max-frac 1 \
-  --lambda-celltype-cls 2 \
+  --lambda-celltype-cls 3 \
   --celltype-text-embedding-path "${CELLTYPE_TEXT_EMB}" \
-  --celltype-text-temp 0.1 \
+  --celltype-text-temp 0.2 \
   --contrast-view-mode random_random \
   --lambda-contrast 1 \
   --lambda-real-recon 0 \
