@@ -1186,6 +1186,12 @@ def main():
         best_val_metric = float(ckpt.get("best_val_metric", best_val_metric))
         prior_initialized = bool(ckpt.get("prior_initialized", False))
         prior_freeze_until_epoch = int(ckpt.get("prior_freeze_until_epoch", 0))
+        if int(args.prior_freeze_after_init_epochs) <= 0 and prior_freeze_until_epoch > 0:
+            log(
+                f"[Resume] Clear checkpoint prior_freeze_until_epoch={prior_freeze_until_epoch} "
+                "because --prior-freeze-after-init-epochs <= 0."
+            )
+            prior_freeze_until_epoch = 0
         last_epoch = int(ckpt.get("epoch", 0))
         start_round = last_epoch + 1
         log(
