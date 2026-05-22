@@ -4,7 +4,7 @@
 #SBATCH --gres=gpu:h200:1
 #SBATCH -c 10                                 
 #SBATCH --mem=100G                        
-#SBATCH -t 2:00:00                            
+#SBATCH -t 10:00:00                            
 #SBATCH -J h200
 #SBATCH --output=/hpc/group/xielab/xj58/sbatch_output/%x_output_%j.txt  
 #SBATCH --error=/hpc/group/xielab/xj58/sbatch_output/%x_error_%j.txt  
@@ -60,7 +60,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --result-dir "${RESULT_DIR}" \
   --num-epochs 200 \
   --val-every 1 \
-  --val-fraction 0.02 \
+  --val-fraction 0.1 \
   --batch-size 1024 \
   --val-batch-size 1024 \
   --num-workers 8 \
