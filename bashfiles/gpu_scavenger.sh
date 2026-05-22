@@ -2,9 +2,9 @@
 #SBATCH -p scavenger-gpu                
 #SBATCH -A xielab                 
 #SBATCH --gres=gpu:1
-#SBATCH -c 10                             
-#SBATCH --mem=100G                        
-#SBATCH -t 7:00:00                            
+#SBATCH -c 5                             
+#SBATCH --mem=50G                        
+#SBATCH -t 1:00:00                            
 #SBATCH -J scavenger-gpu
 #SBATCH --output=/hpc/group/xielab/xj58/sbatch_output/%x_output_%j.txt  
 #SBATCH --error=/hpc/group/xielab/xj58/sbatch_output/%x_error_%j.txt  
