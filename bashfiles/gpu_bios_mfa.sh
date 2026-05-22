@@ -118,7 +118,8 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --prior-init-logvar-shrink-alpha 0.1 \
   --prior-init-logvar-min -4 \
   --prior-init-logvar-max 2 \
-  --no-prior-init-factor-pca \
+  --prior-init-factor-pca \
+  --prior-init-factor-scale 0.3 \
   --prior-init-factor-std 0.01 \
   --lambda-post-c-balance 0 \
   --recon-gene-weight-mode cv_ema \
@@ -134,3 +135,4 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --decoder-lr-multiplier 1 \
   --recon-head-lr-multiplier 1 \
   --log-every 200 \
+  --prior-freeze-after-init-epochs 1 \

@@ -769,27 +769,35 @@ def delayed_init_mfa_prior_from_loader(
             shrink_alpha = min(max(float(logvar_shrink_alpha), 0.0), 1.0)
             for kk in range(k):
                 members = z[assign == kk]
-                if str(logvar_mode) == "constant":
-                    logvar_rows.append(
-                        torch.full((d,), float(logvar_value), device=device, dtype=z.dtype).clamp(
-                            float(logvar_min), float(logvar_max)
-                        )
-                    )
+                if members.size(0) >= 2:
+                    raw_var = torch.var(members - centers[kk].view(1, -1), dim=0, unbiased=False).clamp_min(1e-6)
                 else:
-                    if members.size(0) >= 2:
-                        var = torch.var(members - centers[kk].view(1, -1), dim=0, unbiased=False).clamp_min(1e-6)
-                    else:
-                        var = global_var
-                    if str(logvar_mode) == "shrink":
-                        var = (1.0 - shrink_alpha) * base_var + shrink_alpha * var
-                    logvar_rows.append(torch.log(var).clamp(float(logvar_min), float(logvar_max)))
+                    raw_var = global_var
+                factor_kk = None
+                factor_is_pca = False
                 if r > 0:
                     if bool(factor_pca) and members.size(0) >= 2:
-                        factor_rows.append(_init_factor_from_cluster(members, r) * float(factor_scale))
+                        factor_kk = _init_factor_from_cluster(members, r) * float(factor_scale)
+                        factor_is_pca = True
                     else:
-                        factor_rows.append(torch.randn((d, r), device=device, dtype=z.dtype) * float(factor_std))
+                        factor_kk = torch.randn((d, r), device=device, dtype=z.dtype) * float(factor_std)
+                if str(logvar_mode) == "constant":
+                    diag_var = base_var
+                else:
+                    var = raw_var
+                    if str(logvar_mode) == "shrink":
+                        var = (1.0 - shrink_alpha) * base_var + shrink_alpha * var
+                    diag_var = var
+                if factor_is_pca and factor_kk is not None:
+                    factor_diag_var = factor_kk.pow(2).sum(dim=1)
+                    diag_var = (diag_var - factor_diag_var).clamp_min(float(math.exp(float(logvar_min))))
+                logvar_rows.append(torch.log(diag_var).clamp(float(logvar_min), float(logvar_max)))
+                if r > 0:
+                    factor_rows.append(factor_kk)
             logvar = torch.stack(logvar_rows, dim=0)
             factor_new = torch.stack(factor_rows, dim=0) if r > 0 else torch.empty((0,), device=device)
+            factor_var_mean = float(factor_new.pow(2).sum(dim=1).mean().item()) if r > 0 and factor_new.numel() > 0 else 0.0
+            factor_var_max = float(factor_new.pow(2).sum(dim=1).max().item()) if r > 0 and factor_new.numel() > 0 else 0.0
             ok = torch.tensor([1], device=device, dtype=torch.long)
             log(
                 f"[PriorInit] done: samples={z.size(0)}, K={k}, "
@@ -798,7 +806,8 @@ def delayed_init_mfa_prior_from_loader(
                 f"logvar_mode={logvar_mode}, logvar_value={float(logvar_value):.3f}, "
                 f"logvar_shrink_alpha={shrink_alpha:.3f}, "
                 f"factor_pca={bool(factor_pca)}, factor_scale={float(factor_scale):.4f}, "
-                f"factor_std={float(factor_std):.4f}"
+                f"factor_std={float(factor_std):.4f}, "
+                f"factor_var_mean={factor_var_mean:.4g}, factor_var_max={factor_var_max:.4g}"
             )
     else:
         ok = torch.tensor([0], device=device, dtype=torch.long)
