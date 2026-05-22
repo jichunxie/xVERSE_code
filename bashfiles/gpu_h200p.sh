@@ -21,7 +21,7 @@ export PYTHONUNBUFFERED=1
 COMPILED_ROOT="/hpc/group/xielab/xj58/xVerseAtlas/compiled_train_v1_all"
 CELLTYPE_CSV="/hpc/group/xielab/xj58/general/cellxgene_cell_type_id2name.csv"
 CELLTYPE_TEXT_EMB="/hpc/group/xielab/xj58/general/cellxgene_cell_type_text_embeddings.npz"
-RESULT_DIR="/hpc/group/xielab/xj58/pretrain_model_celltype/mfa_all_tissue0521_celltype_text_128x8x015_reweight_con2"
+RESULT_DIR="/hpc/group/xielab/xj58/pretrain_model_celltype/mfa_all_tissue0521_celltype_text_128x8x015_reweight_pretrain"
 
 NPROC_PER_NODE=$(python - <<'PY'
 import torch
@@ -60,14 +60,14 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --result-dir "${RESULT_DIR}" \
   --num-epochs 200 \
   --val-every 1 \
-  --val-fraction 0.1 \
+  --val-fraction 0.02 \
   --batch-size 1024 \
   --val-batch-size 1024 \
   --num-workers 8 \
   --val-num-workers 8 \
   --val-persistent-workers \
   --prefetch-factor 8 \
-  --samples-per-id 500 \
+  --samples-per-id 100 \
   --lr 5e-3 \
   --prior-lr-multiplier 1 \
   --epoch-lr-gamma 1 \
@@ -92,6 +92,8 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --beta-eps-kl-multiplier 1.0 \
   --beta-kl-warmup-epochs 2 \
   --beta-kl-warmup-start 4e-2 \
+  --vae-pretrain-epochs 5 \
+  --vae-pretrain-beta-kl 1e-4 \
   --recon-observed-only \
   --mask-aug-prob 1.0 \
   --mask-aug-policy simple \
@@ -117,7 +119,8 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --prior-init-logvar-shrink-alpha 0.1 \
   --prior-init-logvar-min -4 \
   --prior-init-logvar-max 2 \
-  --no-prior-init-factor-pca \
+  --prior-init-factor-pca \
+  --prior-init-factor-scale 0.3 \
   --prior-init-factor-std 0.01 \
   --lambda-post-c-balance 0 \
   --recon-gene-weight-mode cv_ema \
@@ -133,3 +136,4 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --decoder-lr-multiplier 1 \
   --recon-head-lr-multiplier 1 \
   --log-every 200 \
+  --prior-freeze-after-init-epochs 0 \
