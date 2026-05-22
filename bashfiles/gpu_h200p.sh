@@ -21,7 +21,7 @@ export PYTHONUNBUFFERED=1
 COMPILED_ROOT="/hpc/group/xielab/xj58/xVerseAtlas/compiled_train_v1_all"
 CELLTYPE_CSV="/hpc/group/xielab/xj58/general/cellxgene_cell_type_id2name.csv"
 CELLTYPE_TEXT_EMB="/hpc/group/xielab/xj58/general/cellxgene_cell_type_text_embeddings.npz"
-RESULT_DIR="/hpc/group/xielab/xj58/pretrain_model_celltype/mfa_all_tissue0521_celltype_text_128x8x015_reweight_pretrain"
+RESULT_DIR="/hpc/group/xielab/xj58/pretrain_model_celltype/mfa_all_tissue0522_celltype_text_32x8"
 
 NPROC_PER_NODE=$(python - <<'PY'
 import torch
@@ -68,14 +68,14 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --val-persistent-workers \
   --prefetch-factor 8 \
   --samples-per-id 100 \
-  --lr 5e-3 \
+  --lr 1e-3 \
   --prior-lr-multiplier 1 \
   --epoch-lr-gamma 1 \
   --weight-decay 1e-5 \
   --prior-type gmm \
   --recon-loss nb \
   --latent-dim 128 \
-  --num-components 128 \
+  --num-components 32 \
   --prior-cov-rank 8 \
   --prior-mu-init sphere \
   --prior-mu-init-radius 2 \
@@ -87,11 +87,11 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --expr-hidden-dim 512 \
   --mask-hidden-dim 512 \
   --dec-hidden-dim 512 \
-  --beta-kl 4e-2 \
+  --beta-kl 1e-2 \
   --beta-u-kl-multiplier 1.0 \
   --beta-eps-kl-multiplier 1.0 \
   --beta-kl-warmup-epochs 2 \
-  --beta-kl-warmup-start 4e-2 \
+  --beta-kl-warmup-start 1e-2 \
   --vae-pretrain-epochs 5 \
   --vae-pretrain-beta-kl 1e-4 \
   --recon-observed-only \
@@ -99,11 +99,11 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --mask-aug-policy simple \
   --mask-aug-min-frac 0 \
   --mask-aug-max-frac 1 \
-  --lambda-celltype-cls 0.5 \
+  --lambda-celltype-cls 2.5 \
   --celltype-text-embedding-path "${CELLTYPE_TEXT_EMB}" \
   --celltype-text-temp 0.15 \
   --contrast-view-mode random_random \
-  --lambda-contrast 0.5 \
+  --lambda-contrast 2 \
   --lambda-real-recon 0 \
   --lambda-prior-pi-balance 0 \
   --lambda-prior-mu-spread 0 \
@@ -123,9 +123,9 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --prior-init-factor-scale 0.3 \
   --prior-init-factor-std 0.01 \
   --lambda-post-c-balance 0 \
-  --recon-gene-weight-mode cv_ema \
+  --recon-gene-weight-mode none \
   --recon-gene-weight-alpha 0.3 \
-  --recon-cell-weight-mode batch_kmeans \
+  --recon-cell-weight-mode none \
   --recon-cell-weight-alpha 0.5 \
   --recon-cell-weight-clusters 32 \
   --recon-cell-weight-kmeans-iters 5 \
