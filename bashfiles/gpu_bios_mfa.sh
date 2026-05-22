@@ -77,7 +77,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --num-components 32 \
   --prior-cov-rank 32 \
   --prior-mu-init sphere \
-  --prior-mu-init-radius 2 \
+  --prior-mu-init-radius 5 \
   --batch-emb-dim 0 \
   --batch-cond-drop-prob 0.0 \
   --lambda-batchless-recon 0 \
