@@ -92,7 +92,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --beta-eps-kl-multiplier 1.0 \
   --beta-kl-warmup-epochs 2 \
   --beta-kl-warmup-start 1e-2 \
-  --vae-pretrain-epochs 5 \
+  --vae-pretrain-epochs 0 \
   --vae-pretrain-beta-kl 1e-4 \
   --recon-observed-only \
   --mask-aug-prob 1.0 \
