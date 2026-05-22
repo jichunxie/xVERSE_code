@@ -266,7 +266,7 @@ def parse_args():
                         help="Scale applied to PCA-initialized MFA prior factors.")
     parser.add_argument("--prior-init-factor-std", type=float, default=0.01,
                         help="Std for small-random MFA prior factors when PCA init is disabled.")
-    parser.add_argument("--prior-freeze-after-init-epochs", type=int, default=1,
+    parser.add_argument("--prior-freeze-after-init-epochs", type=int, default=0,
                         help="Freeze prior parameters for this many training epochs after delayed prior init.")
     parser.add_argument("--lambda-post-c-balance", type=float, default=0.0,
                         help="Weight for batch-level posterior component usage balance KL(q_mean(c)||uniform).")

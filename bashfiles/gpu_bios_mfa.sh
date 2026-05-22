@@ -135,4 +135,4 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --decoder-lr-multiplier 1 \
   --recon-head-lr-multiplier 1 \
   --log-every 200 \
-  --prior-freeze-after-init-epochs 1 \
+  --prior-freeze-after-init-epochs 0 \
