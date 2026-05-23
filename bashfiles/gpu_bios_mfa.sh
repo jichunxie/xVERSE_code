@@ -20,7 +20,7 @@ export PYTHONUNBUFFERED=1
 COMPILED_ROOT="/hpc/group/xielab/xj58/xVerseAtlas/compiled_train_v1_all"
 CELLTYPE_CSV="/hpc/group/xielab/xj58/general/cellxgene_cell_type_id2name.csv"
 CELLTYPE_TEXT_EMB="/hpc/group/xielab/xj58/general/cellxgene_cell_type_text_embeddings.npz"
-RESULT_DIR="/hpc/group/xielab/xj58/pretrain_model_celltype/mfa_all_tissue0522_celltype_text_16x64_xversemask2"
+RESULT_DIR="/hpc/group/xielab/xj58/pretrain_model_celltype/mfa_all_tissue0523_celltype_text_32x32_xversemask"
 
 NPROC_PER_NODE=$(python - <<'PY'
 import torch
@@ -100,7 +100,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --mask-aug-max-frac 1 \
   --lambda-celltype-cls 3 \
   --celltype-text-embedding-path "${CELLTYPE_TEXT_EMB}" \
-  --celltype-text-temp 0.2 \
+  --celltype-text-temp 0.1 \
   --contrast-view-mode random_random \
   --lambda-contrast 1 \
   --lambda-real-recon 0 \
@@ -128,7 +128,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --recon-cell-weight-alpha 0.5 \
   --recon-cell-weight-clusters 32 \
   --recon-cell-weight-kmeans-iters 5 \
-  --contrast-temp 0.1 \
+  --contrast-temp 0.07 \
   --resume-from last \
   --encoder-lr-multiplier 1 \
   --prior-lr-multiplier 1 \
