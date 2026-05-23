@@ -1886,12 +1886,12 @@ def _random_hide_observed(
                         n_hide = n_obs
                 else:
                     p = float(np.random.rand())
-                    if p < 0.2:
-                        frac = 0.1 + 0.2 * float(np.random.rand())  # 0.1 - 0.3
+                    if p < 0.3:
+                        frac = 0.3 * float(np.random.rand())  # 0.0 - 0.3
                     elif p < 0.9:
                         frac = 0.3 + 0.2 * float(np.random.rand())  # 0.3 - 0.5
                     else:
-                        frac = 0.5 + 0.25 * float(np.random.rand())  # 0.5 - 0.75
+                        frac = 0.5 + 0.2 * float(np.random.rand())  # 0.5 - 0.7
                     n_hide = int(n_obs * frac)
             else:
                 frac = simple_min + (simple_max - simple_min) * float(np.random.rand())
@@ -1922,12 +1922,12 @@ def _random_hide_observed(
                     n_hide = n_obs
             else:
                 p = torch.rand(1, device=enc_mask.device).item()
-                if p < 0.2:
-                    frac = 0.1 + 0.2 * torch.rand(1, device=enc_mask.device).item()
+                if p < 0.3:
+                    frac = 0.3 * torch.rand(1, device=enc_mask.device).item()
                 elif p < 0.9:
                     frac = 0.3 + 0.2 * torch.rand(1, device=enc_mask.device).item()
                 else:
-                    frac = 0.5 + 0.25 * torch.rand(1, device=enc_mask.device).item()
+                    frac = 0.5 + 0.2 * torch.rand(1, device=enc_mask.device).item()
                 n_hide = int(n_obs * frac)
         else:
             min_frac = max(0.0, min(1.0, min_frac))
@@ -3083,12 +3083,12 @@ class SparseBatchCollator:
                         n_hide = n_obs
                 else:
                     p = float(np.random.rand())
-                    if p < 0.2:
-                        frac = 0.1 + 0.2 * float(np.random.rand())
+                    if p < 0.3:
+                        frac = 0.3 * float(np.random.rand())
                     elif p < 0.9:
                         frac = 0.3 + 0.2 * float(np.random.rand())
                     else:
-                        frac = 0.5 + 0.25 * float(np.random.rand())
+                        frac = 0.5 + 0.2 * float(np.random.rand())
                     n_hide = int(n_obs * frac)
             else:
                 frac = simple_min + (simple_max - simple_min) * float(np.random.rand())
