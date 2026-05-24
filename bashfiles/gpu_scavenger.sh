@@ -72,7 +72,7 @@ run_one_model () {
 }
 
 # run_one_model "vae" "/hpc/group/xielab/xj58/pretrain_model_celltype/vae_all_tissue0518_con1_nobatch_kl1e-4_ct_reweight" "main_mfa" "encoder_hidden" "best_model.pth" --no-prior-viz
-run_one_model "mfa" "/hpc/group/xielab/xj58/pretrain_model_celltype/mfa_all_tissue0522_celltype_text_32x64_xversemask2" "main_mfa" "encoder_hidden" "best_model.pth"
+run_one_model "mfa" "/hpc/group/xielab/xj58/pretrain_model_celltype/mfa_all_tissue0523_celltype_text_32x32_xversemask" "main_mfa" "encoder_hidden" "best_model.pth"
 # run_one_model "gene_theta_encoder_0515" "/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_all_tissue0515_2" "main_energy" "encoder_hidden"
 # run_one_model "mfa_rank4" "/hpc/group/xielab/xj58/pretrain_model_celltype/mfa_all_tissue0513_rank4" "main_mfa"
 # run_one_model "nb" "/hpc/group/xielab/xj58/pretrain_model_celltype/gmmvae_all_tissue0512" "main_energy"
