@@ -4,7 +4,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH -c 10
 #SBATCH --mem=100G
-#SBATCH -t 5:00:00
+#SBATCH -t 20:00:00
 #SBATCH -J bios_mfa
 #SBATCH --output=/hpc/group/xielab/xj58/sbatch_output/%x_output_%j.txt
 #SBATCH --error=/hpc/group/xielab/xj58/sbatch_output/%x_error_%j.txt
@@ -20,7 +20,7 @@ export PYTHONUNBUFFERED=1
 COMPILED_ROOT="/hpc/group/xielab/xj58/xVerseAtlas/compiled_train_v1_all"
 CELLTYPE_CSV="/hpc/group/xielab/xj58/general/cellxgene_cell_type_id2name.csv"
 CELLTYPE_TEXT_EMB="/hpc/group/xielab/xj58/general/cellxgene_cell_type_text_embeddings.npz"
-RESULT_DIR="/hpc/group/xielab/xj58/pretrain_model_celltype/mfa_all_tissue0524_standard"
+RESULT_DIR="/hpc/group/xielab/xj58/pretrain_model_celltype/mfa_all_tissue0524_standard2"
 
 NPROC_PER_NODE=$(python - <<'PY'
 import torch
@@ -67,7 +67,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --val-persistent-workers \
   --prefetch-factor 8 \
   --samples-per-id 200 \
-  --lr 5e-3 \
+  --lr 1e-3 \
   --prior-lr-multiplier 1 \
   --epoch-lr-gamma 1 \
   --weight-decay 1e-5 \
@@ -85,11 +85,11 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --expr-hidden-dim 512 \
   --mask-hidden-dim 512 \
   --dec-hidden-dim 512 \
-  --beta-kl 2e-2 \
+  --beta-kl 1e-2 \
   --beta-u-kl-multiplier 1.0 \
   --beta-eps-kl-multiplier 1.0 \
   --beta-kl-warmup-epochs 2 \
-  --beta-kl-warmup-start 2e-2 \
+  --beta-kl-warmup-start 1e-2 \
   --vae-pretrain-epochs 0 \
   --vae-pretrain-beta-kl 1e-4 \
   --recon-observed-only \
