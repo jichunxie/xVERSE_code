@@ -150,8 +150,8 @@ def parse_args():
                         help="Factor rank R for each MFA prior component covariance: diag + A_k A_k^T.")
     parser.add_argument("--prior-shared-cov", action="store_true",
                         help="Ignored in main_mfa; MFA prior always uses component-specific covariance/factors.")
-    parser.add_argument("--prior-mu-init", choices=["normal", "sphere", "grouped_sphere", "zero"], default="normal",
-                        help="Initial placement of prior component means before any delayed prior init.")
+    parser.add_argument("--prior-mu-init", choices=["normal", "sphere", "grouped_sphere", "zero", "standard"], default="normal",
+                        help="Initial placement of prior component means. 'standard' sets all means to 0 and covariance to I.")
     parser.add_argument("--prior-mu-init-radius", type=float, default=1.0,
                         help="Coarse radius used by sphere/grouped_sphere prior mean initialization.")
     parser.add_argument("--prior-mu-init-groups", type=int, default=8,

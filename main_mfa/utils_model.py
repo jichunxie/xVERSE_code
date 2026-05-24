@@ -121,10 +121,12 @@ class GaussianMixturePrior(nn.Module):
         self.num_tissues = max(0, int(num_tissues))
         # Global (fallback/backward-compat) parameters.
         self.pi_logits = nn.Parameter(torch.zeros(self.K))
-        if str(mu_init) == "sphere":
+        mu_init = str(mu_init).lower()
+        standard_init = mu_init == "standard"
+        if mu_init == "sphere":
             init_mu = torch.randn(self.K, self.D)
             init_mu = F.normalize(init_mu, dim=-1) * float(mu_init_radius)
-        elif str(mu_init) == "grouped_sphere":
+        elif mu_init == "grouped_sphere":
             n_groups = max(1, min(int(mu_init_groups), self.K))
             group_centers = F.normalize(torch.randn(n_groups, self.D), dim=-1) * float(mu_init_radius)
             init_rows = []
@@ -133,14 +135,18 @@ class GaussianMixturePrior(nn.Module):
                 local = F.normalize(torch.randn(self.D), dim=0) * float(mu_init_local_radius)
                 init_rows.append(group_centers[group_idx] + local)
             init_mu = torch.stack(init_rows, dim=0)
-        elif str(mu_init) == "zero":
+        elif mu_init in {"zero", "standard"}:
             init_mu = torch.zeros(self.K, self.D)
         else:
             init_mu = torch.randn(self.K, self.D)
         self.prior_mu = nn.Parameter(init_mu)
         self.prior_logvar = nn.Parameter(torch.zeros(self.K, self.D))
         if self.R > 0:
-            self.prior_factor = nn.Parameter(torch.randn(self.K, self.D, self.R) * 0.01)
+            if standard_init:
+                init_factor = torch.zeros(self.K, self.D, self.R)
+            else:
+                init_factor = torch.randn(self.K, self.D, self.R) * 0.01
+            self.prior_factor = nn.Parameter(init_factor)
         else:
             self.register_parameter("prior_factor", None)
 
