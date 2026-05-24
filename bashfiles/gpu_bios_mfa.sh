@@ -67,7 +67,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --val-persistent-workers \
   --prefetch-factor 8 \
   --samples-per-id 200 \
-  --lr 1e-3 \
+  --lr 5e-3 \
   --prior-lr-multiplier 1 \
   --epoch-lr-gamma 1 \
   --weight-decay 1e-5 \
@@ -98,7 +98,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --mask-aug-policy xverse \
   --mask-aug-min-frac 0 \
   --mask-aug-max-frac 1 \
-  --lambda-celltype-cls 3 \
+  --lambda-celltype-cls 2 \
   --celltype-text-embedding-path "${CELLTYPE_TEXT_EMB}" \
   --celltype-text-temp 0.1 \
   --contrast-view-mode random_random \
@@ -128,7 +128,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --recon-cell-weight-alpha 0.5 \
   --recon-cell-weight-clusters 32 \
   --recon-cell-weight-kmeans-iters 5 \
-  --contrast-temp 0.07 \
+  --contrast-temp 0.1 \
   --resume-from last \
   --encoder-lr-multiplier 1 \
   --prior-lr-multiplier 1 \
