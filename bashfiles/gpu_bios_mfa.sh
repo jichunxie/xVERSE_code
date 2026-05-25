@@ -67,7 +67,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --val-persistent-workers \
   --prefetch-factor 8 \
   --samples-per-id 200 \
-  --lr 5e-3 \
+  --lr 1e-3 \
   --prior-lr-multiplier 1 \
   --epoch-lr-gamma 1 \
   --weight-decay 1e-5 \
@@ -85,11 +85,11 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --expr-hidden-dim 512 \
   --mask-hidden-dim 512 \
   --dec-hidden-dim 512 \
-  --beta-kl 5e-3 \
+  --beta-kl 2e-3 \
   --beta-u-kl-multiplier 1.0 \
   --beta-eps-kl-multiplier 1.0 \
   --beta-kl-warmup-epochs 2 \
-  --beta-kl-warmup-start 5e-3 \
+  --beta-kl-warmup-start 2e-3 \
   --vae-pretrain-epochs 0 \
   --vae-pretrain-beta-kl 1e-4 \
   --recon-observed-only \
