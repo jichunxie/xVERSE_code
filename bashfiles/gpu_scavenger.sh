@@ -38,17 +38,17 @@ run_one_model () {
   FIG2_EVAL_DIR="${FIG2_OUT_DIR}/evaluation_scib_full"
 
   echo ">>> [${MODEL_TAG}] Extract embeddings from ${CKPT_PATH} (${MODEL_FAMILY})"
-  python reproduce_manuscript/fig2_biology_signal_gmmvae_current/02_extract_gmmvae_embedding.py \
-      --ckpt "${CKPT_PATH}" \
-      --model-family "${MODEL_FAMILY}" \
-      --gene-ids-path "${FIG2_GENE_IDS}" \
-      --liver-dir "${FIG2_LIVER_DIR}" \
-      --brain-dir "${FIG2_BRAIN_DIR}" \
-      "${DATASET_ARGS[@]}" \
-      "${EXTRACT_EXTRA_ARGS[@]}" \
-      --output-dir "${FIG2_OUT_DIR}" \
-      --embedding-key "${EMBEDDING_KEY}" \
-      --embedding-mode "${EMBEDDING_MODE}"
+  # python reproduce_manuscript/fig2_biology_signal_gmmvae_current/02_extract_gmmvae_embedding.py \
+  #     --ckpt "${CKPT_PATH}" \
+  #     --model-family "${MODEL_FAMILY}" \
+  #     --gene-ids-path "${FIG2_GENE_IDS}" \
+  #     --liver-dir "${FIG2_LIVER_DIR}" \
+  #     --brain-dir "${FIG2_BRAIN_DIR}" \
+  #     "${DATASET_ARGS[@]}" \
+  #     "${EXTRACT_EXTRA_ARGS[@]}" \
+  #     --output-dir "${FIG2_OUT_DIR}" \
+  #     --embedding-key "${EMBEDDING_KEY}" \
+  #     --embedding-mode "${EMBEDDING_MODE}"
 
   # echo ">>> [${MODEL_TAG}] Evaluate FMs + xVERSE (scIB full)"
   # python reproduce_manuscript/fig2_biology_signal_gmmvae_current/03_evaluate_scib_full.py \

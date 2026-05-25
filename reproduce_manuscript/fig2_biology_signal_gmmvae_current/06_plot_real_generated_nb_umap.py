@@ -263,6 +263,9 @@ def _generate_nb_counts_from_real_encoded(
     if mode not in {"real_z", "real_mixmu"}:
         raise ValueError(f"Unsupported real encoded generation mode: {mode}")
     rows = []
+    top_components = []
+    top_component_probs = []
+    component_entropies = []
     model.eval()
     torch.manual_seed(int(seed))
     with torch.no_grad():
@@ -283,6 +286,19 @@ def _generate_nb_counts_from_real_encoded(
                 use_batch_condition=False,
             )
             z = out["z"] if mode == "real_z" else _mixmu_from_out(out)
+            q_c = out.get("q_c", None)
+            if q_c is not None:
+                q = q_c.detach().float()
+                top = q.argmax(dim=1)
+                top_prob = q.max(dim=1).values
+                ent = -(q * torch.log(q + 1e-12)).sum(dim=1)
+                top_components.append(top.cpu().numpy().astype(np.int64))
+                top_component_probs.append(top_prob.cpu().numpy().astype(np.float32))
+                component_entropies.append(ent.cpu().numpy().astype(np.float32))
+            else:
+                top_components.append(np.full((ed - st,), -1, dtype=np.int64))
+                top_component_probs.append(np.zeros((ed - st,), dtype=np.float32))
+                component_entropies.append(np.zeros((ed - st,), dtype=np.float32))
             rate, theta = _decode_nb_params(model, z)
             counts = _sample_nb_counts(rate, theta)
             rows.append(sparse.csr_matrix(counts))
@@ -292,7 +308,13 @@ def _generate_nb_counts_from_real_encoded(
     obs["generated_mode"] = mode
     obs["tissue"] = f"generated_from_{mode}"
     obs["donor_id"] = "generated"
-    obs["component"] = -1
+    obs["component"] = np.concatenate(top_components, axis=0)
+    obs["top_component"] = obs["component"].astype(int).values
+    obs["top_component_prob"] = np.concatenate(top_component_probs, axis=0)
+    obs["component_entropy"] = np.concatenate(component_entropies, axis=0)
+    comp_counts = pd.Series(obs["top_component"].values).value_counts().sort_index()
+    comp_frac = (comp_counts / max(float(comp_counts.sum()), 1.0)).round(4).to_dict()
+    print(f"[Generated:{mode}] top_component fractions={comp_frac}")
     print(f"[Generated:{mode}] n={x.shape[0]}, genes={x.shape[1]}, nnz={x.nnz}")
     return x, obs
 
@@ -322,14 +344,15 @@ def _plot_overlay(adata, tissue_name: str, generated_mode: str, out_dir: Path):
         title=f"{tissue_name}: real vs generated NB ({generated_mode})",
         palette={"real": "#2b6cb0", "generated": "#e53e3e"},
     )
-    if "component" in adata.obs.columns:
+    component_key = "top_component" if "top_component" in adata.obs.columns else "component"
+    if component_key in adata.obs.columns:
         sc.pl.umap(
             adata[adata.obs["source"] == "generated"].copy(),
-            color="component",
+            color=component_key,
             ax=axes[1],
             show=False,
             frameon=False,
-            title="generated cells by prior component",
+            title=f"generated cells by {component_key}",
             legend_loc="right margin",
         )
     else:
@@ -404,6 +427,21 @@ def main():
             else:
                 raise ValueError(f"Unsupported generated mode: {mode}")
             gen_obs["tissue"] = tissue_name
+            if "top_component" in gen_obs.columns:
+                summary = (
+                    gen_obs.groupby("top_component", dropna=False)
+                    .agg(
+                        n=("top_component", "size"),
+                        mean_prob=("top_component_prob", "mean"),
+                        mean_entropy=("component_entropy", "mean"),
+                    )
+                    .reset_index()
+                    .sort_values("top_component")
+                )
+                summary["fraction"] = summary["n"] / max(float(summary["n"].sum()), 1.0)
+                out_summary = out_dir / f"{tissue_name}_{mode}_posterior_component_usage.csv"
+                summary.to_csv(out_summary, index=False)
+                print(f"[OK] saved {out_summary}")
             x = sparse.vstack([real_x, gen_x], format="csr")
             obs = pd.concat([real_obs, gen_obs], axis=0)
             combined = ad.AnnData(X=x, obs=obs, var=var.copy())
