@@ -69,6 +69,18 @@ run_one_model () {
       --embedding-key "${EMBEDDING_KEY}" \
       --gene-set all \
       --max-cells 20000
+
+  echo ">>> [${MODEL_TAG}] Plot real + generated NB expression UMAP"
+  python reproduce_manuscript/fig2_biology_signal_gmmvae_current/06_plot_real_generated_nb_umap.py \
+      --ckpt "${CKPT_PATH}" \
+      --model-family "${MODEL_FAMILY}" \
+      --gene-ids-path "${FIG2_GENE_IDS}" \
+      --liver-dir "${FIG2_LIVER_DIR}" \
+      --brain-dir "${FIG2_BRAIN_DIR}" \
+      --output-dir "${FIG2_OUT_DIR}/generated_nb_umap" \
+      --gene-set all \
+      --max-real-cells 20000 \
+      --batch-size 256
 }
 
 # run_one_model "vae" "/hpc/group/xielab/xj58/pretrain_model_celltype/vae_all_tissue0518_con1_nobatch_kl1e-4_ct_reweight" "main_mfa" "encoder_hidden" "best_model.pth" --no-prior-viz
