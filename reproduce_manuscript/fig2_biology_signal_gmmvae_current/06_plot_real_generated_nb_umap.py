@@ -5,7 +5,9 @@ Overlay real cells and one-shot model-generated NB cells in expression UMAP spac
 Workflow:
 1. Load a trained xVERSE GM/MFA checkpoint.
 2. Load real fig2 h5ad files and align counts to the model gene order.
-3. Sample z from the learned prior once, decode NB rate/theta, and sample generated counts once.
+3. Generate cells in two posterior-conditioned ways:
+   - real_z: encode real cells, sample posterior z, then decode.
+   - real_mixmu: encode real cells, use deterministic mixmu, then decode.
 4. Concatenate real + generated counts and run the standard Scanpy expression pipeline:
    normalize_total -> log1p -> HVG -> PCA -> neighbors -> UMAP.
 """
@@ -54,6 +56,15 @@ def parse_args():
     ap.add_argument("--output-dir", default="/hpc/group/xielab/xj58/xVerse_results/fig2_gmmvae_current/generated_nb_umap")
     ap.add_argument("--max-real-cells", type=int, default=20000, help="Max real cells per tissue. 0 means all.")
     ap.add_argument("--generated-cells", type=int, default=0, help="Generated cells per tissue. 0 means match real n.")
+    ap.add_argument(
+        "--generated-mode",
+        default="posterior",
+        choices=["posterior", "all", "both", "prior_z", "real_z", "real_mixmu"],
+        help=(
+            "Which generated-cell source to plot. posterior writes real_z and real_mixmu. "
+            "all also includes prior_z. both is kept as prior_z+real_mixmu."
+        ),
+    )
     ap.add_argument("--batch-size", type=int, default=256, help="Generation batch size.")
     ap.add_argument("--target-sum", type=float, default=1e4)
     ap.add_argument("--n-top-genes", type=int, default=3000)
@@ -92,6 +103,7 @@ def _load_real_counts(tissue_name: str, tissue_dir: Path, gene_set: str, gene_id
 
     rng = np.random.default_rng(seed)
     rows = []
+    mask_rows = []
     obs_rows = []
     n_total = 0
     for fp in files:
@@ -132,6 +144,9 @@ def _load_real_counts(tissue_name: str, tissue_dir: Path, gene_set: str, gene_id
         aligned = sparse.csr_matrix((local_idx.size, len(gene_ids)), dtype=np.float32)
         aligned[:, np.asarray(dst_idx, dtype=np.int64)] = block.astype(np.float32)
         rows.append(aligned)
+        aligned_mask = sparse.csr_matrix((local_idx.size, len(gene_ids)), dtype=np.float32)
+        aligned_mask[:, np.asarray(dst_idx, dtype=np.int64)] = 1.0
+        mask_rows.append(aligned_mask)
 
         donor_id = fp.stem.replace(f"{tissue_name}_", "").replace(f"_{gene_set}", "")
         obs = pd.DataFrame(index=[f"real_{tissue_name}_{donor_id}_{i}" for i in local_idx])
@@ -146,9 +161,10 @@ def _load_real_counts(tissue_name: str, tissue_dir: Path, gene_set: str, gene_id
     if not rows:
         raise ValueError(f"No real cells loaded for {tissue_name}/{gene_set}")
     x = sparse.vstack(rows, format="csr")
+    mask = sparse.vstack(mask_rows, format="csr")
     obs = pd.concat(obs_rows, axis=0)
     print(f"[Real] {tissue_name}/{gene_set}: n={x.shape[0]}, genes={x.shape[1]}, nnz={x.nnz}")
-    return x, obs
+    return x, mask, obs
 
 
 def _sample_prior_z(model, n: int, device: torch.device, seed: int):
@@ -197,29 +213,87 @@ def _decode_nb_params(model, z: torch.Tensor):
     return rate, theta
 
 
-def _generate_nb_counts(model, n: int, gene_ids, device: torch.device, batch_size: int, seed: int):
+def _sample_nb_counts(rate: torch.Tensor, theta: torch.Tensor) -> np.ndarray:
+    logits = torch.log(rate) - torch.log(theta)
+    dist = torch.distributions.NegativeBinomial(total_count=theta, logits=logits)
+    counts = dist.sample().detach().cpu().numpy().astype(np.float32)
+    return np.nan_to_num(counts, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def _generate_nb_counts_from_prior_z(model, n: int, gene_ids, device: torch.device, batch_size: int, seed: int):
     rows = []
     comp_rows = []
     model.eval()
     with torch.no_grad():
-        for st in tqdm(range(0, n, batch_size), desc="generate NB cells"):
+        for st in tqdm(range(0, n, batch_size), desc="generate NB cells from prior z"):
             ed = min(st + batch_size, n)
             z, comp = _sample_prior_z(model, ed - st, device=device, seed=seed + st)
             rate, theta = _decode_nb_params(model, z)
-            logits = torch.log(rate) - torch.log(theta)
-            dist = torch.distributions.NegativeBinomial(total_count=theta, logits=logits)
-            counts = dist.sample().detach().cpu().numpy().astype(np.float32)
-            counts = np.nan_to_num(counts, nan=0.0, posinf=0.0, neginf=0.0)
+            counts = _sample_nb_counts(rate, theta)
             rows.append(sparse.csr_matrix(counts))
             comp_rows.append(comp.detach().cpu().numpy())
     x = sparse.vstack(rows, format="csr")
     comp = np.concatenate(comp_rows, axis=0)
-    obs = pd.DataFrame(index=[f"generated_{i}" for i in range(n)])
+    obs = pd.DataFrame(index=[f"generated_prior_z_{i}" for i in range(n)])
     obs["source"] = "generated"
+    obs["generated_mode"] = "prior_z"
     obs["tissue"] = "generated_prior"
     obs["donor_id"] = "generated"
     obs["component"] = comp.astype(int)
-    print(f"[Generated] n={x.shape[0]}, genes={x.shape[1]}, nnz={x.nnz}")
+    print(f"[Generated:prior_z] n={x.shape[0]}, genes={x.shape[1]}, nnz={x.nnz}")
+    return x, obs
+
+
+def _mixmu_from_out(out):
+    if ("q_c" in out) and ("mu_comp" in out):
+        return torch.sum(out["q_c"].unsqueeze(-1) * out["mu_comp"], dim=1)
+    return out.get("mu", out["z"])
+
+
+def _generate_nb_counts_from_real_encoded(
+    model,
+    real_x,
+    real_mask,
+    device: torch.device,
+    batch_size: int,
+    seed: int,
+    mode: str,
+):
+    mode = str(mode).lower()
+    if mode not in {"real_z", "real_mixmu"}:
+        raise ValueError(f"Unsupported real encoded generation mode: {mode}")
+    rows = []
+    model.eval()
+    torch.manual_seed(int(seed))
+    with torch.no_grad():
+        desc = "generate NB cells from real posterior z" if mode == "real_z" else "generate NB cells from real mixmu"
+        for st in tqdm(range(0, real_x.shape[0], batch_size), desc=desc):
+            ed = min(st + batch_size, real_x.shape[0])
+            block = real_x[st:ed]
+            mask_block = real_mask[st:ed]
+            arr = block.toarray() if hasattr(block, "toarray") else np.asarray(block)
+            mask_arr = mask_block.toarray() if hasattr(mask_block, "toarray") else np.asarray(mask_block)
+            x_count = torch.tensor(arr, dtype=torch.float32, device=device)
+            x_mask = torch.tensor(mask_arr, dtype=torch.float32, device=device)
+            out = model(
+                x_count=x_count,
+                x_mask=x_mask,
+                tissue_id=None,
+                sample_id=None,
+                use_batch_condition=False,
+            )
+            z = out["z"] if mode == "real_z" else _mixmu_from_out(out)
+            rate, theta = _decode_nb_params(model, z)
+            counts = _sample_nb_counts(rate, theta)
+            rows.append(sparse.csr_matrix(counts))
+    x = sparse.vstack(rows, format="csr")
+    obs = pd.DataFrame(index=[f"generated_{mode}_{i}" for i in range(real_x.shape[0])])
+    obs["source"] = "generated"
+    obs["generated_mode"] = mode
+    obs["tissue"] = f"generated_from_{mode}"
+    obs["donor_id"] = "generated"
+    obs["component"] = -1
+    print(f"[Generated:{mode}] n={x.shape[0]}, genes={x.shape[1]}, nnz={x.nnz}")
     return x, obs
 
 
@@ -236,7 +310,7 @@ def _standard_scanpy_umap(adata, args):
     return adata
 
 
-def _plot_overlay(adata, tissue_name: str, out_dir: Path):
+def _plot_overlay(adata, tissue_name: str, generated_mode: str, out_dir: Path):
     out_dir.mkdir(parents=True, exist_ok=True)
     fig, axes = plt.subplots(1, 2, figsize=(13, 6), dpi=180)
     sc.pl.umap(
@@ -245,7 +319,7 @@ def _plot_overlay(adata, tissue_name: str, out_dir: Path):
         ax=axes[0],
         show=False,
         frameon=False,
-        title=f"{tissue_name}: real vs generated NB",
+        title=f"{tissue_name}: real vs generated NB ({generated_mode})",
         palette={"real": "#2b6cb0", "generated": "#e53e3e"},
     )
     if "component" in adata.obs.columns:
@@ -261,7 +335,7 @@ def _plot_overlay(adata, tissue_name: str, out_dir: Path):
     else:
         axes[1].axis("off")
     fig.tight_layout()
-    out_png = out_dir / f"{tissue_name}_real_generated_nb_umap.png"
+    out_png = out_dir / f"{tissue_name}_{generated_mode}_real_generated_nb_umap.png"
     fig.savefig(out_png, bbox_inches="tight")
     plt.close(fig)
     print(f"[OK] saved {out_png}")
@@ -288,7 +362,7 @@ def main():
     for tissue_name in [x.strip() for x in str(args.tissues).split(",") if x.strip()]:
         if tissue_name not in tissue_dirs:
             raise ValueError(f"Unsupported tissue {tissue_name!r}; choose from {sorted(tissue_dirs)}")
-        real_x, real_obs = _load_real_counts(
+        real_x, real_mask, real_obs = _load_real_counts(
             tissue_name=tissue_name,
             tissue_dir=tissue_dirs[tissue_name],
             gene_set=args.gene_set,
@@ -296,27 +370,51 @@ def main():
             max_cells=int(args.max_real_cells),
             seed=int(args.seed),
         )
-        n_gen = int(args.generated_cells) if int(args.generated_cells) > 0 else int(real_x.shape[0])
-        gen_x, gen_obs = _generate_nb_counts(
-            model=model,
-            n=n_gen,
-            gene_ids=gene_ids,
-            device=device,
-            batch_size=int(args.batch_size),
-            seed=int(args.seed) + 100000,
-        )
-        gen_obs["tissue"] = tissue_name
-        x = sparse.vstack([real_x, gen_x], format="csr")
-        obs = pd.concat([real_obs, gen_obs], axis=0)
-        combined = ad.AnnData(X=x, obs=obs, var=var.copy())
-        combined.obs_names_make_unique()
-        print(f"[UMAP] {tissue_name}: combined n={combined.n_obs}, genes={combined.n_vars}")
-        combined = _standard_scanpy_umap(combined, args)
-        if args.save_h5ad:
-            out_h5ad = out_dir / f"{tissue_name}_real_generated_nb_umap.h5ad"
-            combined.write(out_h5ad)
-            print(f"[OK] saved {out_h5ad}")
-        _plot_overlay(combined, tissue_name=tissue_name, out_dir=out_dir)
+        if args.generated_mode == "posterior":
+            modes = ["real_z", "real_mixmu"]
+        elif args.generated_mode == "all":
+            modes = ["prior_z", "real_z", "real_mixmu"]
+        elif args.generated_mode == "both":
+            modes = ["prior_z", "real_mixmu"]
+        else:
+            modes = [args.generated_mode]
+        for mode in modes:
+            if mode == "prior_z":
+                n_gen = int(args.generated_cells) if int(args.generated_cells) > 0 else int(real_x.shape[0])
+                gen_x, gen_obs = _generate_nb_counts_from_prior_z(
+                    model=model,
+                    n=n_gen,
+                    gene_ids=gene_ids,
+                    device=device,
+                    batch_size=int(args.batch_size),
+                    seed=int(args.seed) + 100000,
+                )
+            elif mode in {"real_z", "real_mixmu"}:
+                if int(args.generated_cells) > 0:
+                    print(f"[WARN] --generated-cells is ignored for {mode}; it generates one cell per selected real cell.")
+                gen_x, gen_obs = _generate_nb_counts_from_real_encoded(
+                    model=model,
+                    real_x=real_x,
+                    real_mask=real_mask,
+                    device=device,
+                    batch_size=int(args.batch_size),
+                    seed=int(args.seed) + 200000,
+                    mode=mode,
+                )
+            else:
+                raise ValueError(f"Unsupported generated mode: {mode}")
+            gen_obs["tissue"] = tissue_name
+            x = sparse.vstack([real_x, gen_x], format="csr")
+            obs = pd.concat([real_obs, gen_obs], axis=0)
+            combined = ad.AnnData(X=x, obs=obs, var=var.copy())
+            combined.obs_names_make_unique()
+            print(f"[UMAP] {tissue_name}/{mode}: combined n={combined.n_obs}, genes={combined.n_vars}")
+            combined = _standard_scanpy_umap(combined, args)
+            if args.save_h5ad:
+                out_h5ad = out_dir / f"{tissue_name}_{mode}_real_generated_nb_umap.h5ad"
+                combined.write(out_h5ad)
+                print(f"[OK] saved {out_h5ad}")
+            _plot_overlay(combined, tissue_name=tissue_name, generated_mode=mode, out_dir=out_dir)
 
 
 if __name__ == "__main__":

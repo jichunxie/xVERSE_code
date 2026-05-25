@@ -50,25 +50,25 @@ run_one_model () {
       --embedding-key "${EMBEDDING_KEY}" \
       --embedding-mode "${EMBEDDING_MODE}"
 
-  echo ">>> [${MODEL_TAG}] Evaluate FMs + xVERSE (scIB full)"
-  python reproduce_manuscript/fig2_biology_signal_gmmvae_current/03_evaluate_scib_full.py \
-      --liver-dir "${FIG2_LIVER_DIR}" \
-      --brain-dir "${FIG2_BRAIN_DIR}" \
-      --output-dir "${FIG2_EVAL_DIR}" \
-      --old-eval-dir "${FIG2_OLD_EVAL_DIR}" \
-      "${DATASET_ARGS[@]}" \
-      --gmm-key "${EMBEDDING_KEY}" \
-      --max-cells 20000 \
-      --skip-official-metrics-all
+  # echo ">>> [${MODEL_TAG}] Evaluate FMs + xVERSE (scIB full)"
+  # python reproduce_manuscript/fig2_biology_signal_gmmvae_current/03_evaluate_scib_full.py \
+  #     --liver-dir "${FIG2_LIVER_DIR}" \
+  #     --brain-dir "${FIG2_BRAIN_DIR}" \
+  #     --output-dir "${FIG2_EVAL_DIR}" \
+  #     --old-eval-dir "${FIG2_OLD_EVAL_DIR}" \
+  #     "${DATASET_ARGS[@]}" \
+  #     --gmm-key "${EMBEDDING_KEY}" \
+  #     --max-cells 20000 \
+  #     --skip-official-metrics-all
 
-  echo ">>> [${MODEL_TAG}] Plot UMAP"
-  python reproduce_manuscript/fig2_biology_signal_gmmvae_current/04_plot_umap.py \
-      --liver-dir "${FIG2_LIVER_DIR}" \
-      --brain-dir "${FIG2_BRAIN_DIR}" \
-      --output-dir "${FIG2_OUT_DIR}/umap" \
-      --embedding-key "${EMBEDDING_KEY}" \
-      --gene-set all \
-      --max-cells 20000
+  # echo ">>> [${MODEL_TAG}] Plot UMAP"
+  # python reproduce_manuscript/fig2_biology_signal_gmmvae_current/04_plot_umap.py \
+  #     --liver-dir "${FIG2_LIVER_DIR}" \
+  #     --brain-dir "${FIG2_BRAIN_DIR}" \
+  #     --output-dir "${FIG2_OUT_DIR}/umap" \
+  #     --embedding-key "${EMBEDDING_KEY}" \
+  #     --gene-set all \
+  #     --max-cells 20000
 
   echo ">>> [${MODEL_TAG}] Plot real + generated NB expression UMAP"
   python reproduce_manuscript/fig2_biology_signal_gmmvae_current/06_plot_real_generated_nb_umap.py \
@@ -79,6 +79,7 @@ run_one_model () {
       --brain-dir "${FIG2_BRAIN_DIR}" \
       --output-dir "${FIG2_OUT_DIR}/generated_nb_umap" \
       --gene-set all \
+      --generated-mode posterior \
       --max-real-cells 20000 \
       --batch-size 256
 }
