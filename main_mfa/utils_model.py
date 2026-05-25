@@ -1495,9 +1495,9 @@ def bidirectional_contrastive_loss(z_real: torch.Tensor, z_fake: torch.Tensor, t
 
 
 def deterministic_contrast_embedding(out: Dict[str, torch.Tensor]) -> torch.Tensor:
-    if ("q_c" in out) and ("mu_comp" in out):
-        return torch.sum(out["q_c"].unsqueeze(-1) * out["mu_comp"], dim=1)
-    return out["mu"]
+    # Keep contrastive objectives on the same stochastic latent used by the decoder.
+    # Cell-type text contrast already goes through celltype_text_head(z).
+    return out["z"]
 
 
 def gmm_collapse_diagnostics(
