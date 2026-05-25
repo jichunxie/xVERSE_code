@@ -85,11 +85,11 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --expr-hidden-dim 512 \
   --mask-hidden-dim 512 \
   --dec-hidden-dim 512 \
-  --beta-kl 1e-2 \
+  --beta-kl 2e-2 \
   --beta-u-kl-multiplier 1.0 \
   --beta-eps-kl-multiplier 1.0 \
   --beta-kl-warmup-epochs 2 \
-  --beta-kl-warmup-start 1e-2 \
+  --beta-kl-warmup-start 2e-2 \
   --vae-pretrain-epochs 0 \
   --vae-pretrain-beta-kl 1e-4 \
   --recon-observed-only \
