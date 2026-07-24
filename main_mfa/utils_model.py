@@ -393,7 +393,7 @@ class PoissonDecoder(nn.Module):
         gamma, beta = film(cond).chunk(2, dim=-1)
         return h * (1.0 + torch.tanh(gamma)) + beta
 
-    def forward(self, z: torch.Tensor, cond: torch.Tensor = None) -> torch.Tensor:
+    def hidden(self, z: torch.Tensor, cond: torch.Tensor = None) -> torch.Tensor:
         h = self.norm1(self.fc1(z))
         if cond is not None and self.film1 is not None:
             h = self._apply_film(h, self.film1, cond)
@@ -401,8 +401,46 @@ class PoissonDecoder(nn.Module):
         h = self.norm2(self.fc2(h))
         if cond is not None and self.film2 is not None:
             h = self._apply_film(h, self.film2, cond)
-        h = self.drop(F.gelu(h))
-        return self.out(h)
+        return self.drop(F.gelu(h))
+
+    def forward(self, z: torch.Tensor, cond: torch.Tensor = None) -> torch.Tensor:
+        return self.out(self.hidden(z, cond=cond))
+
+
+class GeneEmbeddingDecoder(nn.Module):
+    def __init__(
+        self,
+        latent_dim: int,
+        num_genes: int,
+        hidden_dim: int = 1024,
+        gene_emb_dim: int = 256,
+        dropout: float = 0.1,
+        cond_dim: int = 0,
+    ):
+        super().__init__()
+        self.backbone = PoissonDecoder(
+            latent_dim=latent_dim,
+            num_genes=num_genes,
+            hidden_dim=hidden_dim,
+            dropout=dropout,
+            cond_dim=cond_dim,
+        )
+        self.backbone.out = nn.Identity()
+        self.cell_query = nn.Sequential(
+            nn.LayerNorm(hidden_dim),
+            nn.Linear(hidden_dim, gene_emb_dim),
+        )
+        self.gene_embedding = nn.Embedding(num_genes, gene_emb_dim)
+        self.gene_bias = nn.Parameter(torch.zeros(num_genes))
+        self.logit_scale = nn.Parameter(torch.tensor(1.0))
+        nn.init.normal_(self.gene_embedding.weight, mean=0.0, std=gene_emb_dim ** -0.5)
+
+    def forward(self, z: torch.Tensor, cond: torch.Tensor = None) -> torch.Tensor:
+        h = self.backbone.hidden(z, cond=cond)
+        q = F.normalize(self.cell_query(h), dim=-1, eps=1e-8)
+        gene = F.normalize(self.gene_embedding.weight, dim=-1, eps=1e-8)
+        scale = torch.clamp(self.logit_scale, min=0.1, max=20.0)
+        return scale * torch.matmul(q, gene.transpose(0, 1)) + self.gene_bias.view(1, -1)
 
 
 class MaskFiLMGMMVAE(nn.Module):
@@ -431,6 +469,8 @@ class MaskFiLMGMMVAE(nn.Module):
         batch_cond_drop_prob: float = 0.0,
         recon_loss_type: str = "poisson",
         nb_theta_mode: str = "gene",
+        decoder_type: str = "dense",
+        gene_emb_dim: int = 256,
         celltype_text_embeddings: Optional[torch.Tensor] = None,
         celltype_text_temperature: float = 0.1,
     ):
@@ -442,6 +482,11 @@ class MaskFiLMGMMVAE(nn.Module):
         if nb_theta_mode not in ("gene", "cell_gene"):
             raise ValueError(f"Unsupported nb_theta_mode: {nb_theta_mode}")
         self.nb_theta_mode = nb_theta_mode
+        decoder_type = str(decoder_type).lower()
+        if decoder_type not in ("dense", "gene_dot"):
+            raise ValueError(f"Unsupported decoder_type: {decoder_type}")
+        self.decoder_type = decoder_type
+        self.gene_emb_dim = int(gene_emb_dim)
         self.encoder = FiLMMaskEncoder(
             num_genes=num_genes,
             latent_dim=latent_dim,
@@ -468,13 +513,17 @@ class MaskFiLMGMMVAE(nn.Module):
             self.batch_embedding = nn.Embedding(self.num_batches, self.batch_emb_dim)
         else:
             self.batch_embedding = None
-        self.decoder = PoissonDecoder(
+        decoder_cls = GeneEmbeddingDecoder if self.decoder_type == "gene_dot" else PoissonDecoder
+        decoder_kwargs = dict(
             latent_dim=latent_dim,
             num_genes=num_genes,
             hidden_dim=dec_hidden_dim,
             dropout=dropout,
             cond_dim=self.batch_emb_dim if self.batch_embedding is not None else 0,
         )
+        if self.decoder_type == "gene_dot":
+            decoder_kwargs["gene_emb_dim"] = self.gene_emb_dim
+        self.decoder = decoder_cls(**decoder_kwargs)
         if self.nb_theta_mode == "cell_gene":
             self.nb_theta_decoder = PoissonDecoder(
                 latent_dim=latent_dim,
@@ -1593,6 +1642,7 @@ def output_contrastive_loss(
     valid_pair: torch.Tensor,
     temperature: float = 0.1,
     mode: str = "embedding",
+    max_cells: int = 0,
 ) -> torch.Tensor:
     mode = str(mode).lower()
     if valid_pair is None:
@@ -1601,18 +1651,24 @@ def output_contrastive_loss(
             device=out_left["z"].device,
             dtype=torch.bool,
         )
+    valid_idx = torch.nonzero(valid_pair, as_tuple=False).flatten()
+    if int(max_cells) > 0 and valid_idx.numel() > int(max_cells):
+        perm = torch.randperm(valid_idx.numel(), device=valid_idx.device)[: int(max_cells)]
+        valid_idx = valid_idx[perm]
+    if valid_idx.numel() <= 1:
+        return torch.zeros((), device=out_left["z"].device, dtype=out_left["z"].dtype)
     if mode == "embedding":
         return bidirectional_contrastive_loss(
-            z_real=deterministic_contrast_embedding(out_left)[valid_pair],
-            z_fake=deterministic_contrast_embedding(out_right)[valid_pair],
+            z_real=deterministic_contrast_embedding(out_left).index_select(0, valid_idx),
+            z_fake=deterministic_contrast_embedding(out_right).index_select(0, valid_idx),
             temperature=temperature,
         )
     if mode == "distribution":
         return bidirectional_diag_gaussian_contrastive_loss(
-            mu_real=out_left["mu"][valid_pair],
-            logvar_real=out_left["logvar"][valid_pair],
-            mu_fake=out_right["mu"][valid_pair],
-            logvar_fake=out_right["logvar"][valid_pair],
+            mu_real=out_left["mu"].index_select(0, valid_idx),
+            logvar_real=out_left["logvar"].index_select(0, valid_idx),
+            mu_fake=out_right["mu"].index_select(0, valid_idx),
+            logvar_fake=out_right["logvar"].index_select(0, valid_idx),
             temperature=temperature,
         )
     raise ValueError(f"Unsupported contrast loss mode: {mode!r}")
@@ -2091,6 +2147,7 @@ def train_gmm_vae_one_epoch(
     contrast_temp=0.1,
     contrast_view_mode: str = "real_fake",
     contrast_loss_mode: str = "embedding",
+    contrast_max_cells: int = 0,
     lambda_real_recon=0.0,
     lambda_cov=0.0,
     cov_use_mu=True,
@@ -2402,6 +2459,7 @@ def train_gmm_vae_one_epoch(
                     valid_pair=valid_pair,
                     temperature=contrast_temp,
                     mode=contrast_loss_mode,
+                    max_cells=contrast_max_cells,
                 )
             else:
                 contrast = torch.zeros((), device=x_count.device, dtype=out_fake["z"].dtype)
@@ -2642,6 +2700,7 @@ def evaluate_gmm_vae_one_epoch(
     contrast_temp=0.1,
     contrast_view_mode: str = "real_fake",
     contrast_loss_mode: str = "embedding",
+    contrast_max_cells: int = 0,
     lambda_real_recon=0.0,
     lambda_cov=0.0,
     cov_use_mu=True,
@@ -2849,6 +2908,7 @@ def evaluate_gmm_vae_one_epoch(
                     valid_pair=valid_pair,
                     temperature=contrast_temp,
                     mode=contrast_loss_mode,
+                    max_cells=contrast_max_cells,
                 )
             else:
                 contrast = torch.zeros((), device=x_count.device, dtype=out_fake["z"].dtype)

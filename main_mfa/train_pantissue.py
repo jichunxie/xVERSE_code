@@ -169,6 +169,10 @@ def parse_args():
     parser.add_argument("--expr-hidden-dim", type=int, default=1024, help="Expression encoder hidden dim.")
     parser.add_argument("--mask-hidden-dim", type=int, default=512, help="Mask encoder hidden dim.")
     parser.add_argument("--dec-hidden-dim", type=int, default=1024, help="Decoder hidden dim.")
+    parser.add_argument("--decoder-type", choices=["dense", "gene_dot"], default="dense",
+                        help="Expression decoder head. dense uses Linear(hidden,num_genes); gene_dot uses learned gene embeddings and cell-gene dot products.")
+    parser.add_argument("--gene-emb-dim", type=int, default=256,
+                        help="Gene embedding dimension for --decoder-type gene_dot.")
     parser.add_argument("--dropout", type=float, default=0.1, help="Dropout for gmm_vae MLP blocks.")
     parser.add_argument("--recon-observed-only", action="store_true",
                         help="For gmm_vae, compute Poisson NLL only on observed genes.")
@@ -282,6 +286,8 @@ def parse_args():
                         help="Contrastive view pairing: real_fake uses original mask vs random mask; random_random uses two independent random masks and averages their reconstruction losses.")
     parser.add_argument("--contrast-loss-mode", choices=["embedding", "distribution"], default="embedding",
                         help="Contrastive objective: embedding compares latent vectors; distribution compares posterior q(z|view) summaries with symmetric KL.")
+    parser.add_argument("--contrast-max-cells", type=int, default=0,
+                        help="If >0, randomly subsample at most this many valid cells for contrastive loss only. Reconstruction still uses the full batch.")
     parser.add_argument("--lambda-real-recon", type=float, default=0.1,
                         help="Weight of real-mask reconstruction loss term.")
     parser.add_argument("--contrast-temp", type=float, default=0.1,
@@ -1112,6 +1118,8 @@ def main():
         batch_cond_drop_prob=args.batch_cond_drop_prob,
         recon_loss_type=args.recon_loss,
         nb_theta_mode=args.nb_theta_mode,
+        decoder_type=args.decoder_type,
+        gene_emb_dim=args.gene_emb_dim,
         celltype_text_embeddings=celltype_text_embeddings,
         celltype_text_temperature=args.celltype_text_temp,
     ).to(device)
@@ -1348,6 +1356,7 @@ def main():
             contrast_temp=args.contrast_temp,
             contrast_view_mode=args.contrast_view_mode,
             contrast_loss_mode=args.contrast_loss_mode,
+            contrast_max_cells=args.contrast_max_cells,
             lambda_real_recon=args.lambda_real_recon,
             lambda_resp_anchor=lambda_resp_anchor_t,
             lambda_score=0.0,
@@ -1500,6 +1509,7 @@ def main():
                 contrast_temp=args.contrast_temp,
                 contrast_view_mode=args.contrast_view_mode,
                 contrast_loss_mode=args.contrast_loss_mode,
+                contrast_max_cells=args.contrast_max_cells,
                 lambda_real_recon=args.lambda_real_recon,
                 lambda_cov=0.0,
                 cov_use_mu=True,

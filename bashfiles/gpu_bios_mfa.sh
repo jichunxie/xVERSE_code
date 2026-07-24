@@ -20,7 +20,7 @@ export PYTHONUNBUFFERED=1
 COMPILED_ROOT="/hpc/group/xielab/xj58/xVerseAtlas/compiled_train_v1_all"
 CELLTYPE_CSV="/hpc/group/xielab/xj58/general/cellxgene_cell_type_id2name.csv"
 CELLTYPE_TEXT_EMB="/hpc/group/xielab/xj58/general/cellxgene_cell_type_text_embeddings.npz"
-RESULT_DIR="/hpc/group/xielab/xj58/pretrain_model_celltype/mfa_all_tissue0724_standard"
+RESULT_DIR="/hpc/group/xielab/xj58/pretrain_model_celltype/mfa_all_tissue0724_dotdecoder"
 
 NPROC_PER_NODE=$(python - <<'PY'
 import torch
@@ -77,6 +77,8 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --num-components 32 \
   --prior-cov-rank 32 \
   --prior-mu-init standard \
+  --decoder-type gene_dot \
+  --gene-emb-dim 256 \
   --batch-emb-dim 0 \
   --batch-cond-drop-prob 0.0 \
   --lambda-batchless-recon 0 \
@@ -85,7 +87,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --expr-hidden-dim 512 \
   --mask-hidden-dim 512 \
   --dec-hidden-dim 512 \
-  --beta-kl 2e-3 \
+  --beta-kl 5e-3 \
   --beta-u-kl-multiplier 1.0 \
   --beta-eps-kl-multiplier 1.0 \
   --free-bits-c 0 \
@@ -105,6 +107,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --celltype-text-temp 0.1 \
   --contrast-view-mode random_random \
   --contrast-loss-mode distribution \
+  --contrast-max-cells 256 \
   --lambda-contrast 1 \
   --lambda-real-recon 0 \
   --lambda-prior-pi-balance 0 \
