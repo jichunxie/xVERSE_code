@@ -77,8 +77,6 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --num-components 32 \
   --prior-cov-rank 32 \
   --prior-mu-init standard \
-  --decoder-type gene_dot \
-  --gene-emb-dim 256 \
   --batch-emb-dim 0 \
   --batch-cond-drop-prob 0.0 \
   --lambda-batchless-recon 0 \
@@ -87,7 +85,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --expr-hidden-dim 512 \
   --mask-hidden-dim 512 \
   --dec-hidden-dim 512 \
-  --beta-kl 5e-3 \
+  --beta-kl 1e-2 \
   --beta-u-kl-multiplier 1.0 \
   --beta-eps-kl-multiplier 1.0 \
   --free-bits-c 0 \
@@ -107,7 +105,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --celltype-text-temp 0.1 \
   --contrast-view-mode random_random \
   --contrast-loss-mode distribution \
-  --contrast-max-cells 256 \
+  --contrast-max-cells 128 \
   --lambda-contrast 1 \
   --lambda-real-recon 0 \
   --lambda-prior-pi-balance 0 \
