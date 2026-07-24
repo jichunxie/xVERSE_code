@@ -751,6 +751,9 @@ class MaskFiLMGMMVAE(nn.Module):
         beta: float = 1.0,
         beta_u_kl_multiplier: float = 1.0,
         beta_eps_kl_multiplier: float = 1.0,
+        free_bits_c: float = 0.0,
+        free_bits_u: float = 0.0,
+        free_bits_eps: float = 0.0,
         encoder_mask: torch.Tensor = None,
         use_batch_condition: bool = True,
         recon_mask: torch.Tensor = None,
@@ -850,10 +853,15 @@ class MaskFiLMGMMVAE(nn.Module):
         if self.prior_type == "gaussian" or (self.prior_type == "gmm" and force_base_posterior):
             # Closed-form KL(q(z|x)||N(0,I)) for diagonal Gaussian posterior.
             kl_per_cell = 0.5 * torch.sum(torch.exp(logvar) + mu.pow(2) - 1.0 - logvar, dim=-1)
+            kl_eps_raw = _valid_cell_mean(kl_per_cell.to(z.dtype), x_count_safe)
+            if float(free_bits_eps) > 0.0:
+                kl_per_cell = torch.clamp(kl_per_cell, min=float(free_bits_eps))
             kl_loss = _valid_cell_mean(kl_per_cell.to(z.dtype), x_count_safe)
             kl_c = torch.zeros((), device=z.device, dtype=z.dtype)
             kl_u = torch.zeros((), device=z.device, dtype=z.dtype)
             kl_eps = kl_loss
+            kl_c_raw = kl_c
+            kl_u_raw = kl_u
             log_q = gaussian_log_prob_diag(z=z, mu=mu, logvar=logvar)
             zero_mu = torch.zeros_like(z)
             zero_logvar = torch.zeros_like(z)
@@ -875,6 +883,9 @@ class MaskFiLMGMMVAE(nn.Module):
             else:
                 log_p_c = F.log_softmax(self.prior.pi_logits, dim=0).unsqueeze(0)  # (1, K)
             kl_c_per_cell = (q_c * (log_q_c - log_p_c)).sum(dim=1)
+            kl_c_raw = _valid_cell_mean(kl_c_per_cell.to(z.dtype), x_count_safe)
+            if float(free_bits_c) > 0.0:
+                kl_c_per_cell = torch.clamp(kl_c_per_cell, min=float(free_bits_c))
             kl_c = _valid_cell_mean(kl_c_per_cell.to(z.dtype), x_count_safe)
 
             if u_mu is not None and u_logvar is not None and u_comp is not None:
@@ -917,6 +928,12 @@ class MaskFiLMGMMVAE(nn.Module):
 
             kl_u_per_cell = (q_c.float() * kl_u_per_comp).sum(dim=1).to(z.dtype)
             kl_eps_per_cell = (q_c.float() * kl_eps_per_comp).sum(dim=1).to(z.dtype)
+            kl_u_raw = _valid_cell_mean(kl_u_per_cell, x_count_safe)
+            kl_eps_raw = _valid_cell_mean(kl_eps_per_cell, x_count_safe)
+            if float(free_bits_u) > 0.0:
+                kl_u_per_cell = torch.clamp(kl_u_per_cell, min=float(free_bits_u))
+            if float(free_bits_eps) > 0.0:
+                kl_eps_per_cell = torch.clamp(kl_eps_per_cell, min=float(free_bits_eps))
             kl_u = _valid_cell_mean(kl_u_per_cell, x_count_safe)
             kl_eps = _valid_cell_mean(kl_eps_per_cell, x_count_safe)
             u_kl_mult = max(float(beta_u_kl_multiplier), 0.0)
@@ -1049,6 +1066,9 @@ class MaskFiLMGMMVAE(nn.Module):
             "kl_c_loss": kl_c.to(z.dtype),
             "kl_u_loss": kl_u.to(z.dtype),
             "kl_eps_loss": kl_eps.to(z.dtype),
+            "kl_c_raw_loss": kl_c_raw.to(z.dtype),
+            "kl_u_raw_loss": kl_u_raw.to(z.dtype),
+            "kl_eps_raw_loss": kl_eps_raw.to(z.dtype),
             "score_loss": score_loss,
             "cov_loss": cov_loss,
             "cov_offdiag_post": cov_offdiag_post,
@@ -1494,10 +1514,108 @@ def bidirectional_contrastive_loss(z_real: torch.Tensor, z_fake: torch.Tensor, t
     return (0.5 * (loss_12 + loss_21)).to(dtype=z_real.dtype)
 
 
+def _pairwise_diag_gaussian_kl_rows(
+    mu_q: torch.Tensor,
+    logvar_q: torch.Tensor,
+    mu_p: torch.Tensor,
+    logvar_p: torch.Tensor,
+) -> torch.Tensor:
+    mu_q = torch.nan_to_num(mu_q.float(), nan=0.0, posinf=0.0, neginf=0.0)
+    mu_p = torch.nan_to_num(mu_p.float(), nan=0.0, posinf=0.0, neginf=0.0)
+    logvar_q = torch.nan_to_num(logvar_q.float(), nan=0.0, posinf=10.0, neginf=-10.0).clamp(-10.0, 10.0)
+    logvar_p = torch.nan_to_num(logvar_p.float(), nan=0.0, posinf=10.0, neginf=-10.0).clamp(-10.0, 10.0)
+    var_q = torch.exp(logvar_q)
+    var_p = torch.exp(logvar_p)
+    diff2 = (mu_q[:, None, :] - mu_p[None, :, :]).pow(2)
+    kl = 0.5 * (
+        logvar_p[None, :, :]
+        - logvar_q[:, None, :]
+        + (var_q[:, None, :] + diff2) / torch.clamp(var_p[None, :, :], min=1e-6)
+        - 1.0
+    ).sum(dim=-1)
+    return torch.nan_to_num(kl, nan=0.0, posinf=1e6, neginf=0.0).clamp(min=0.0, max=1e6)
+
+
+def bidirectional_diag_gaussian_contrastive_loss(
+    mu_real: torch.Tensor,
+    logvar_real: torch.Tensor,
+    mu_fake: torch.Tensor,
+    logvar_fake: torch.Tensor,
+    temperature: float = 0.1,
+    chunk_size: int = 256,
+) -> torch.Tensor:
+    """
+    Symmetric distribution-level InfoNCE.
+
+    Positive pair: q(z|view_a[i]) and q(z|view_b[i]).
+    Similarity: negative symmetric KL between diagonal Gaussian summaries.
+    """
+    if mu_real.dim() != 2 or mu_fake.dim() != 2 or logvar_real.dim() != 2 or logvar_fake.dim() != 2:
+        raise ValueError("bidirectional_diag_gaussian_contrastive_loss expects [B, D] tensors.")
+    if mu_real.shape != mu_fake.shape or mu_real.shape != logvar_real.shape or mu_fake.shape != logvar_fake.shape:
+        raise ValueError(
+            "distribution contrast requires paired mu/logvar tensors with the same shape, "
+            f"got mu_real={tuple(mu_real.shape)}, logvar_real={tuple(logvar_real.shape)}, "
+            f"mu_fake={tuple(mu_fake.shape)}, logvar_fake={tuple(logvar_fake.shape)}"
+        )
+    bsz = mu_real.size(0)
+    if bsz <= 1:
+        return torch.zeros((), device=mu_real.device, dtype=mu_real.dtype)
+    rows = []
+    chunk = max(1, int(chunk_size))
+    for start in range(0, bsz, chunk):
+        end = min(start + chunk, bsz)
+        kl_rf = _pairwise_diag_gaussian_kl_rows(
+            mu_real[start:end], logvar_real[start:end], mu_fake, logvar_fake
+        )
+        kl_fr_t = _pairwise_diag_gaussian_kl_rows(
+            mu_fake, logvar_fake, mu_real[start:end], logvar_real[start:end]
+        ).transpose(0, 1)
+        sym_kl = 0.5 * (kl_rf + kl_fr_t)
+        rows.append((-sym_kl / max(float(temperature), 1e-6)).clamp(min=-50.0, max=50.0))
+    logits = torch.cat(rows, dim=0)
+    logits = torch.nan_to_num(logits, nan=0.0, posinf=50.0, neginf=-50.0)
+    labels = torch.arange(bsz, device=mu_real.device)
+    loss_12 = F.cross_entropy(logits, labels)
+    loss_21 = F.cross_entropy(logits.transpose(0, 1), labels)
+    return (0.5 * (loss_12 + loss_21)).to(dtype=mu_real.dtype)
+
+
 def deterministic_contrast_embedding(out: Dict[str, torch.Tensor]) -> torch.Tensor:
     # Keep contrastive objectives on the same stochastic latent used by the decoder.
     # Cell-type text contrast already goes through celltype_text_head(z).
     return out["z"]
+
+
+def output_contrastive_loss(
+    out_left: Dict[str, torch.Tensor],
+    out_right: Dict[str, torch.Tensor],
+    valid_pair: torch.Tensor,
+    temperature: float = 0.1,
+    mode: str = "embedding",
+) -> torch.Tensor:
+    mode = str(mode).lower()
+    if valid_pair is None:
+        valid_pair = torch.ones(
+            (out_left["z"].size(0),),
+            device=out_left["z"].device,
+            dtype=torch.bool,
+        )
+    if mode == "embedding":
+        return bidirectional_contrastive_loss(
+            z_real=deterministic_contrast_embedding(out_left)[valid_pair],
+            z_fake=deterministic_contrast_embedding(out_right)[valid_pair],
+            temperature=temperature,
+        )
+    if mode == "distribution":
+        return bidirectional_diag_gaussian_contrastive_loss(
+            mu_real=out_left["mu"][valid_pair],
+            logvar_real=out_left["logvar"][valid_pair],
+            mu_fake=out_right["mu"][valid_pair],
+            logvar_fake=out_right["logvar"][valid_pair],
+            temperature=temperature,
+        )
+    raise ValueError(f"Unsupported contrast loss mode: {mode!r}")
 
 
 def gmm_collapse_diagnostics(
@@ -1958,6 +2076,9 @@ def train_gmm_vae_one_epoch(
     beta_kl=1.0,
     beta_u_kl_multiplier=1.0,
     beta_eps_kl_multiplier=1.0,
+    free_bits_c=0.0,
+    free_bits_u=0.0,
+    free_bits_eps=0.0,
     recon_observed_only=False,
     mask_aug_prob=1.0,
     mask_aug_policy="xverse",
@@ -1969,6 +2090,7 @@ def train_gmm_vae_one_epoch(
     lambda_contrast=0.0,
     contrast_temp=0.1,
     contrast_view_mode: str = "real_fake",
+    contrast_loss_mode: str = "embedding",
     lambda_real_recon=0.0,
     lambda_cov=0.0,
     cov_use_mu=True,
@@ -2018,6 +2140,11 @@ def train_gmm_vae_one_epoch(
     contrast_view_mode = str(contrast_view_mode).lower()
     if contrast_view_mode not in {"real_fake", "random_random"}:
         raise ValueError(f"Unsupported contrast_view_mode={contrast_view_mode!r}; use real_fake or random_random.")
+    contrast_loss_mode = str(contrast_loss_mode).lower()
+    if contrast_loss_mode not in {"embedding", "distribution"}:
+        raise ValueError(
+            f"Unsupported contrast_loss_mode={contrast_loss_mode!r}; use embedding or distribution."
+        )
 
     for batch_idx, (sample_id, tissue_id, celltype_id, x_count, x_mask, x_mask_encoder) in enumerate(train_loader):
         optimizer.zero_grad(set_to_none=True)
@@ -2041,6 +2168,9 @@ def train_gmm_vae_one_epoch(
                 beta=beta_kl,
                 beta_u_kl_multiplier=beta_u_kl_multiplier,
                 beta_eps_kl_multiplier=beta_eps_kl_multiplier,
+                free_bits_c=free_bits_c,
+                free_bits_u=free_bits_u,
+                free_bits_eps=free_bits_eps,
                 encoder_mask=x_mask_encoder,
                 recon_mask=x_mask if recon_observed_only else None,
                 lambda_score=lambda_score,
@@ -2094,6 +2224,9 @@ def train_gmm_vae_one_epoch(
                     beta=0.0,
                     beta_u_kl_multiplier=beta_u_kl_multiplier,
                     beta_eps_kl_multiplier=beta_eps_kl_multiplier,
+                    free_bits_c=0.0,
+                    free_bits_u=0.0,
+                    free_bits_eps=0.0,
                     encoder_mask=x_mask,
                     recon_mask=x_mask if recon_observed_only else None,
                     lambda_score=0.0,
@@ -2152,6 +2285,9 @@ def train_gmm_vae_one_epoch(
                     beta=0.0,
                     beta_u_kl_multiplier=beta_u_kl_multiplier,
                     beta_eps_kl_multiplier=beta_eps_kl_multiplier,
+                    free_bits_c=0.0,
+                    free_bits_u=0.0,
+                    free_bits_eps=0.0,
                     encoder_mask=second_encoder_mask,
                     recon_mask=x_mask if recon_observed_only else None,
                     lambda_score=0.0,
@@ -2203,6 +2339,9 @@ def train_gmm_vae_one_epoch(
                     beta=0.0,
                     beta_u_kl_multiplier=beta_u_kl_multiplier,
                     beta_eps_kl_multiplier=beta_eps_kl_multiplier,
+                    free_bits_c=0.0,
+                    free_bits_u=0.0,
+                    free_bits_eps=0.0,
                     encoder_mask=x_mask_encoder,
                     use_batch_condition=False,
                     recon_mask=x_mask if recon_observed_only else None,
@@ -2248,19 +2387,21 @@ def train_gmm_vae_one_epoch(
                 valid_pair = out_fake.get("valid_cell_mask", torch.ones((bsz,), device=x_count.device, dtype=torch.bool))
                 if contrast_view_mode == "real_fake" and need_real_view:
                     valid_pair = valid_pair & out_real.get("valid_cell_mask", valid_pair)
-                    z_left = deterministic_contrast_embedding(out_real)
-                    z_right = deterministic_contrast_embedding(out_fake)
+                    out_left = out_real
+                    out_right = out_fake
                 elif contrast_view_mode == "random_random" and out_second is not None:
                     valid_pair = valid_pair & out_second.get("valid_cell_mask", valid_pair)
-                    z_left = deterministic_contrast_embedding(out_fake)
-                    z_right = deterministic_contrast_embedding(out_second)
+                    out_left = out_fake
+                    out_right = out_second
                 else:
-                    z_left = deterministic_contrast_embedding(out_fake)
-                    z_right = deterministic_contrast_embedding(out_fake)
-                contrast = bidirectional_contrastive_loss(
-                    z_real=z_left[valid_pair],
-                    z_fake=z_right[valid_pair],
+                    out_left = out_fake
+                    out_right = out_fake
+                contrast = output_contrastive_loss(
+                    out_left=out_left,
+                    out_right=out_right,
+                    valid_pair=valid_pair,
                     temperature=contrast_temp,
+                    mode=contrast_loss_mode,
                 )
             else:
                 contrast = torch.zeros((), device=x_count.device, dtype=out_fake["z"].dtype)
@@ -2490,6 +2631,9 @@ def evaluate_gmm_vae_one_epoch(
     beta_kl=1.0,
     beta_u_kl_multiplier=1.0,
     beta_eps_kl_multiplier=1.0,
+    free_bits_c=0.0,
+    free_bits_u=0.0,
+    free_bits_eps=0.0,
     recon_observed_only=False,
     lambda_score=0.0,
     score_noise_std=0.1,
@@ -2497,6 +2641,7 @@ def evaluate_gmm_vae_one_epoch(
     lambda_contrast=0.0,
     contrast_temp=0.1,
     contrast_view_mode: str = "real_fake",
+    contrast_loss_mode: str = "embedding",
     lambda_real_recon=0.0,
     lambda_cov=0.0,
     cov_use_mu=True,
@@ -2549,6 +2694,11 @@ def evaluate_gmm_vae_one_epoch(
     contrast_view_mode = str(contrast_view_mode).lower()
     if contrast_view_mode not in {"real_fake", "random_random"}:
         raise ValueError(f"Unsupported contrast_view_mode={contrast_view_mode!r}; use real_fake or random_random.")
+    contrast_loss_mode = str(contrast_loss_mode).lower()
+    if contrast_loss_mode not in {"embedding", "distribution"}:
+        raise ValueError(
+            f"Unsupported contrast_loss_mode={contrast_loss_mode!r}; use embedding or distribution."
+        )
 
     with torch.no_grad():
         for batch_idx, (sample_id, tissue_id, celltype_id, x_count, x_mask, x_mask_encoder) in enumerate(val_loader):
@@ -2581,6 +2731,9 @@ def evaluate_gmm_vae_one_epoch(
                 beta=beta_kl,
                 beta_u_kl_multiplier=beta_u_kl_multiplier,
                 beta_eps_kl_multiplier=beta_eps_kl_multiplier,
+                free_bits_c=free_bits_c,
+                free_bits_u=free_bits_u,
+                free_bits_eps=free_bits_eps,
                 use_batch_condition=False,
                 encoder_mask=main_encoder_mask,
                 recon_mask=x_mask if recon_observed_only else None,
@@ -2639,6 +2792,9 @@ def evaluate_gmm_vae_one_epoch(
                     celltype_id=celltype_id,
                     force_base_posterior=force_base_posterior,
                     beta=0.0,
+                    free_bits_c=0.0,
+                    free_bits_u=0.0,
+                    free_bits_eps=0.0,
                     use_batch_condition=False,
                     encoder_mask=fake_encoder_mask,
                     recon_mask=x_mask if recon_observed_only else None,
@@ -2687,10 +2843,12 @@ def evaluate_gmm_vae_one_epoch(
             if lambda_contrast > 0:
                 valid_pair = out_real.get("valid_cell_mask", torch.ones((bsz,), device=x_count.device, dtype=torch.bool))
                 valid_pair = valid_pair & out_fake.get("valid_cell_mask", valid_pair)
-                contrast = bidirectional_contrastive_loss(
-                    z_real=deterministic_contrast_embedding(out_real)[valid_pair],
-                    z_fake=deterministic_contrast_embedding(out_fake)[valid_pair],
+                contrast = output_contrastive_loss(
+                    out_left=out_real,
+                    out_right=out_fake,
+                    valid_pair=valid_pair,
                     temperature=contrast_temp,
+                    mode=contrast_loss_mode,
                 )
             else:
                 contrast = torch.zeros((), device=x_count.device, dtype=out_fake["z"].dtype)

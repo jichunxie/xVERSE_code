@@ -20,7 +20,7 @@ export PYTHONUNBUFFERED=1
 COMPILED_ROOT="/hpc/group/xielab/xj58/xVerseAtlas/compiled_train_v1_all"
 CELLTYPE_CSV="/hpc/group/xielab/xj58/general/cellxgene_cell_type_id2name.csv"
 CELLTYPE_TEXT_EMB="/hpc/group/xielab/xj58/general/cellxgene_cell_type_text_embeddings.npz"
-RESULT_DIR="/hpc/group/xielab/xj58/pretrain_model_celltype/mfa_all_tissue0525_standard"
+RESULT_DIR="/hpc/group/xielab/xj58/pretrain_model_celltype/mfa_all_tissue0724_standard"
 
 NPROC_PER_NODE=$(python - <<'PY'
 import torch
@@ -67,7 +67,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --val-persistent-workers \
   --prefetch-factor 8 \
   --samples-per-id 200 \
-  --lr 5e-3 \
+  --lr 5e-4 \
   --prior-lr-multiplier 1 \
   --epoch-lr-gamma 1 \
   --weight-decay 1e-5 \
@@ -88,7 +88,10 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --beta-kl 2e-3 \
   --beta-u-kl-multiplier 1.0 \
   --beta-eps-kl-multiplier 1.0 \
-  --beta-kl-warmup-epochs 2 \
+  --free-bits-c 0 \
+  --free-bits-u 0 \
+  --free-bits-eps 0 \
+  --beta-kl-warmup-epochs 0 \
   --beta-kl-warmup-start 2e-3 \
   --vae-pretrain-epochs 0 \
   --vae-pretrain-beta-kl 1e-4 \
@@ -101,6 +104,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --celltype-text-embedding-path "${CELLTYPE_TEXT_EMB}" \
   --celltype-text-temp 0.1 \
   --contrast-view-mode random_random \
+  --contrast-loss-mode distribution \
   --lambda-contrast 1 \
   --lambda-real-recon 0 \
   --lambda-prior-pi-balance 0 \

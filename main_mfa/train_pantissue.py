@@ -134,6 +134,12 @@ def parse_args():
                         help="Extra multiplier on the MFA factor u KL inside the KL term. 1.0 keeps standard KL.")
     parser.add_argument("--beta-eps-kl-multiplier", type=float, default=1.0,
                         help="Extra multiplier on the MFA residual eps KL inside the KL term. 1.0 keeps standard KL.")
+    parser.add_argument("--free-bits-c", type=float, default=0.0,
+                        help="Per-cell free-bits floor in nats for KL(q(c|x)||p(c)). 0 disables.")
+    parser.add_argument("--free-bits-u", type=float, default=0.0,
+                        help="Per-cell free-bits floor in nats for the MFA factor u KL. 0 disables.")
+    parser.add_argument("--free-bits-eps", type=float, default=0.0,
+                        help="Per-cell free-bits floor in nats for the MFA residual eps KL. 0 disables.")
     parser.add_argument("--beta-kl-warmup-epochs", type=int, default=0,
                         help="Linearly warm KL weight from --beta-kl-warmup-start to --beta-kl over this many epochs. 0 disables.")
     parser.add_argument("--beta-kl-warmup-start", type=float, default=0.0,
@@ -274,6 +280,8 @@ def parse_args():
                         help="Weight of contrastive loss between real-mask and fake-mask views.")
     parser.add_argument("--contrast-view-mode", choices=["real_fake", "random_random"], default="real_fake",
                         help="Contrastive view pairing: real_fake uses original mask vs random mask; random_random uses two independent random masks and averages their reconstruction losses.")
+    parser.add_argument("--contrast-loss-mode", choices=["embedding", "distribution"], default="embedding",
+                        help="Contrastive objective: embedding compares latent vectors; distribution compares posterior q(z|view) summaries with symmetric KL.")
     parser.add_argument("--lambda-real-recon", type=float, default=0.1,
                         help="Weight of real-mask reconstruction loss term.")
     parser.add_argument("--contrast-temp", type=float, default=0.1,
@@ -1307,7 +1315,10 @@ def main():
 
         log(
             f"[Epoch {epoch_id}] stage={stage_name}, beta_kl={beta_t:.6f}, "
-            f"lambda_resp_anchor={lambda_resp_anchor_t:.6f}"
+            f"free_bits_c/u/eps={args.free_bits_c:.4g}/{args.free_bits_u:.4g}/{args.free_bits_eps:.4g}, "
+            f"lambda_resp_anchor={lambda_resp_anchor_t:.6f}, "
+            f"contrast_view_mode={args.contrast_view_mode}, "
+            f"contrast_loss_mode={args.contrast_loss_mode}"
         )
         prior_snapshot_start = prior_parameter_snapshot(model)
         if prior_snapshot_start and is_main_process(rank):
@@ -1325,6 +1336,9 @@ def main():
             beta_kl=beta_t,
             beta_u_kl_multiplier=args.beta_u_kl_multiplier,
             beta_eps_kl_multiplier=args.beta_eps_kl_multiplier,
+            free_bits_c=args.free_bits_c,
+            free_bits_u=args.free_bits_u,
+            free_bits_eps=args.free_bits_eps,
             recon_observed_only=args.recon_observed_only,
             mask_aug_prob=args.mask_aug_prob,
             mask_aug_policy=args.mask_aug_policy,
@@ -1333,6 +1347,7 @@ def main():
             lambda_contrast=args.lambda_contrast,
             contrast_temp=args.contrast_temp,
             contrast_view_mode=args.contrast_view_mode,
+            contrast_loss_mode=args.contrast_loss_mode,
             lambda_real_recon=args.lambda_real_recon,
             lambda_resp_anchor=lambda_resp_anchor_t,
             lambda_score=0.0,
@@ -1474,6 +1489,9 @@ def main():
                 beta_kl=beta_t,
                 beta_u_kl_multiplier=args.beta_u_kl_multiplier,
                 beta_eps_kl_multiplier=args.beta_eps_kl_multiplier,
+                free_bits_c=args.free_bits_c,
+                free_bits_u=args.free_bits_u,
+                free_bits_eps=args.free_bits_eps,
                 recon_observed_only=args.recon_observed_only,
                 lambda_score=0.0,
                 score_noise_std=0.0,
@@ -1481,6 +1499,7 @@ def main():
                 lambda_contrast=args.lambda_contrast,
                 contrast_temp=args.contrast_temp,
                 contrast_view_mode=args.contrast_view_mode,
+                contrast_loss_mode=args.contrast_loss_mode,
                 lambda_real_recon=args.lambda_real_recon,
                 lambda_cov=0.0,
                 cov_use_mu=True,
