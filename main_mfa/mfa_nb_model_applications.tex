@@ -1,0 +1,79 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{hyperref}
+
+\title{Applications Enabled by a Structured Generative Prior}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section{Why a Structured Prior Matters}
+
+A central motivation of the MFA-NB model is to make the latent space itself biologically meaningful, rather than relying only on a powerful decoder. In a standard VAE with an isotropic Gaussian prior, generation can work if the decoder is sufficiently expressive: the decoder learns to map samples from a simple prior into plausible expression profiles. However, this does not guarantee that the latent space has a useful population-level organization. The latent distribution may be smooth and compact, but it may not expose interpretable modes, local directions, or separable cellular programs.
+
+For whole-atlas single-cell modeling, we want more than sample-level reconstruction. We want the latent prior to represent the structure of cellular populations. A structured prior can encode coarse population modes, local variation within each mode, and the relative prevalence of different states. In the MFA prior, mixture centers can be interpreted as population-level prototypes, while factor directions around each center describe continuous axes of variation. This geometry makes it possible to ask questions at the population level: which cell states are represented, how broad each state is, how states are connected, and which directions correspond to biological variation.
+
+This is different from a purely decoder-centric generative model. If the decoder carries almost all of the modeling burden, generation may still look plausible, but the latent space may be hard to interpret. By imposing a geometrically structured prior, we encourage the latent space to preserve meaningful organization before decoding. The decoder then maps this structured latent landscape into gene expression, rather than inventing all biological structure downstream.
+
+\section{Generation With a Template}
+
+One practical mode of use is template-guided generation. Here, a real cell, spot, or external representation provides a template, and the model generates or completes an expression profile conditioned on that template. This setting is useful when the biological object is partially observed or sample size is limited.
+
+\subsection{Improving Rare-Cell Analysis}
+
+Rare cell populations are often difficult to analyze because they have limited sample size and are easily dominated by abundant populations during representation learning. A generative model can help by producing template-conditioned expression profiles for rare cells, effectively increasing the amount of usable signal for downstream analysis. This does not mean fabricating new biology without constraints; rather, generation can be used to denoise, complete, or augment rare-cell profiles using the learned population structure.
+
+
+\subsection{Supporting Cross-Modality Prediction}
+
+Template-guided generation can support cross-modality prediction by increasing the number and diversity of cell-level training examples available to a downstream predictive model. In spatial or multi-omic settings, paired data are often limited: only a subset of cells or regions may have both the input modality and the target transcriptomic profile. Given a real template, posterior distribution, or partial expression profile, the generative model can produce additional compatible RNA profiles that preserve the learned single-cell population structure.
+
+These generated cell-level examples can then be used to train or regularize a cross-modality predictor. The goal is not to replace the cross-modality model, but to provide it with more biologically plausible training targets, especially for rare populations, sparsely sampled states, or panel-restricted measurements. Because generated profiles pass through the MFA-NB latent structure and count likelihood, they can augment training while respecting population-level geometry and single-cell count constraints.
+
+\subsection{Improving Drug-Perturbation Modeling}
+
+Template-conditioned generation can similarly improve drug-perturbation modeling by increasing the effective number of training examples for perturbation predictors. Perturbation datasets are often small, imbalanced across cell types, or missing rare cellular states. Starting from observed control or partially observed perturbed cells, the model can generate additional cell-level expression profiles that are compatible with the learned atlas-scale latent landscape.
+
+These generated examples can be used to train a stronger perturbation prediction model, to balance rare cell states, or to expose the predictor to plausible expression variability around each population mode. In this use case, the generative model acts as a structured data augmenter: it expands the training distribution while keeping generated cells constrained by the learned prior geometry and negative-binomial expression model.
+
+\section{Conditional Generation for Perturbation Prediction}
+
+A second application mode is conditional generation. In this setting, the model is extended with explicit condition variables such as tissue, disease status, treatment, time point, genotype, or drug exposure. The goal is to generate expression under a specified condition:
+\begin{equation}
+    x \sim p(x \mid z, y),
+\end{equation}
+where $y$ is the condition of interest. Depending on the design, the condition can affect the decoder, the prior, or both.
+
+Conditional generation provides a natural framework for perturbation prediction. Given a cell state inferred under a control condition, the model can generate a counterfactual expression profile under a treated condition. Conceptually, this allows questions such as: what would this cell population look like under drug treatment, disease progression, or a different tissue context?
+
+There are two broad strategies. First, the condition can modulate the decoder while keeping the latent state fixed. This treats $z$ as a biological cell-state representation and uses $y$ to modify expression output. Second, the condition can modulate the prior or posterior distribution, allowing the population landscape itself to shift under perturbation. The first approach is more conservative and easier to interpret; the second is more expressive and can capture changes in population composition.
+
+For perturbation prediction, a useful formulation is:
+\begin{align}
+    z &\sim q(z \mid x_{\mathrm{control}}), \\
+    x_{\mathrm{treated}} &\sim p(x \mid z, y=\mathrm{treated}).
+\end{align}
+This preserves the identity of the starting cell while asking the decoder to generate its treated expression profile. At the population level, one can also compare posterior distributions between control and treated populations to estimate perturbation-induced shifts in latent space.
+
+\section{Using the Posterior for Interpretation}
+
+The posterior distribution is not only an inference tool; it is also a mechanism for interpretation. For each cell, the model estimates posterior responsibility over mixture components,
+\begin{equation}
+    q(c \mid x),
+\end{equation}
+which indicates which population prototypes are most compatible with the cell. Aggregating these responsibilities across a cell type, tissue, disease group, or perturbation condition gives a population-level summary of how that group occupies the structured prior.
+
+The posterior also provides factor-level information. Conditional on a component, the posterior over $u$ describes where the cell lies along the local factor directions of that component. These directions can be decoded to identify gene programs associated with movement along local axes. In this way, the model can support interpretation at multiple resolutions:
+\begin{itemize}
+    \item component usage: which population prototypes are used;
+    \item component entropy: whether cells are assigned sharply or ambiguously;
+    \item factor coordinates: which local directions explain variation within a prototype;
+    \item residual uncertainty: how much variation remains unexplained by the structured factor space.
+\end{itemize}
+
+This posterior-based interpretation is especially important for comparing populations. For example, two tissues may share a component but differ along factor directions; a disease condition may increase usage of a rare component; a drug may move cells from one region of a component to another. These analyses are difficult to obtain from a standard VAE prior because the prior lacks explicit population components and local factor geometry.
+
+\end{document}

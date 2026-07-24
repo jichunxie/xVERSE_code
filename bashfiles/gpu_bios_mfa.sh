@@ -67,7 +67,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --val-persistent-workers \
   --prefetch-factor 8 \
   --samples-per-id 200 \
-  --lr 5e-4 \
+  --lr 1e-3 \
   --prior-lr-multiplier 1 \
   --epoch-lr-gamma 1 \
   --weight-decay 1e-5 \
@@ -89,7 +89,7 @@ stdbuf -oL -eL "${RUN_CMD[@]}" \
   --beta-u-kl-multiplier 1.0 \
   --beta-eps-kl-multiplier 1.0 \
   --free-bits-c 0 \
-  --free-bits-u 0 \
+  --free-bits-u 0.5 \
   --free-bits-eps 0 \
   --beta-kl-warmup-epochs 0 \
   --beta-kl-warmup-start 2e-3 \
